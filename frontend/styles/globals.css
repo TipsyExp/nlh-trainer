@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Global styles for the NLH training simulator */
+body {
+  @apply bg-gray-50 text-gray-900;
+}
