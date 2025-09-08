@@ -1,0 +1,67 @@
+﻿# ---- OS / Editors ----
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# ---- Env / Secrets ----
+.env
+.env.*
+*.key
+*.pem
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+.eggs/
+*.egg-info/
+
+# ---- Coverage / Test Artifacts ----
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ---- SQLite & local data ----
+*.sqlite
+*.sqlite3
+*.db
+data/**/*.sqlite
+data/**/*.db
+logs/
+*.log
+
+# ---- Node / Next.js (frontend) ----
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+frontend/coverage/
+frontend/.vercel/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Project artifacts ----
+*.zip
+!.github/
+!.gitattributes
+
+# ---- Third-party drop-in binaries (we vendor only placeholders) ----
+third_party/**
+!third_party/.gitkeep
+
+# ---- Generated assets (if any) ----
+*.cache
