@@ -32,7 +32,8 @@ jobs:
       - name: Run backend tests
         env:
           PYTHONPATH: .
-        run: pytest -q backend/tests
+        run: |
+          pytest -q backend/tests
 
   frontend:
     name: Frontend (Node)
@@ -62,4 +63,3 @@ jobs:
         run: |
           npm ci || npm i
           npm run build --if-present
-
