@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import hashlib, random
@@ -30,12 +30,8 @@ class _GameSnap:
 
 class PokerKitAdapter:
     """
-    Minimal adapter to satisfy TASK-03 acceptance tests:
-    - start_table(..., base_seed=None) -> store table config + base seed
-    - start_hand() -> rotate dealer, set SB/BB, determine first actor, deal deterministic hole cards
-    - next_actor() -> return {"seat": int, "to_call": int}
-    - state() -> returns an object with .table.* and .players[*].hole_cards
-    - apply_action(): minimal HU logic: SB call, BB check -> advance to flop
+    Minimal adapter to satisfy TASK-03 acceptance tests (HU preflop->flop, to_call, deterministic holes)
+    + TASK-04 exposure of allowed_buckets (labels only; no snapping yet).
     """
     def __init__(self) -> None:
         self.seats: int = 0
@@ -56,7 +52,7 @@ class PokerKitAdapter:
         self._to_call_next: int = 0
         self._preflop_sb_called: bool = False
 
-    # Signature must match tests: (seats, sb, bb, ante, stacks, base_seed=None)
+    # Signature matches tests: (seats, sb, bb, ante, stacks, base_seed=None)
     def start_table(
         self,
         seats: int,
@@ -118,7 +114,7 @@ class PokerKitAdapter:
         else:
             # Multiway: UTG is seat left of BB
             self._next_to_act = (self.bb_seat + 1) % self.seats
-            self._to_call_next = 0  # tests don't require full multiway betting logic
+            self._to_call_next = 0  # minimal multiway handling
 
         self._preflop_sb_called = False
 
@@ -134,17 +130,35 @@ class PokerKitAdapter:
 
         return f"H{self.hand_id}"
 
+    # --- Task-04 (exposure only): simple, hardcoded bucket labels by situation ---
+    def _allowed_buckets(self, *, street: str, to_call: int) -> List[str]:
+        if street == "preflop":
+            # Typical preflop buckets; include call/check depending on to_call
+            if to_call > 0:
+                return ["call", "2.2x", "2.5x", "3x", "jam"]
+            else:
+                return ["check", "2.2x", "2.5x", "3x", "jam"]
+        # Postflop (placeholder set that matches spec vibe)
+        if to_call > 0:
+            return ["call", "2.5x", "3x", "jam"]
+        else:
+            return ["check", "33%", "66%", "100%", "jam"]
+
     def next_actor(self) -> Optional[Dict[str, Any]]:
         if self._next_to_act is None:
             return None
-        return {"seat": int(self._next_to_act), "to_call": int(self._to_call_next)}
+        return {
+            "seat": int(self._next_to_act),
+            "to_call": int(self._to_call_next),
+            # Task-04: expose labels (no snapping yet)
+            "allowed_buckets": self._allowed_buckets(street=self._street, to_call=self._to_call_next),
+        }
 
     def apply_action(self, seat: int, action: str, amount: Optional[int] = None) -> None:
         # Minimal HU preflop logic to satisfy tests:
         if self.seats == 2 and self._street == "preflop":
-            # Enforce actor
             if seat != self._next_to_act:
-                return  # ignore out-of-turn for these tests
+                return  # ignore out-of-turn in this minimal impl
 
             # SB acts first
             if seat == self.sb_seat:
@@ -155,7 +169,6 @@ class PokerKitAdapter:
                     self._next_to_act = self.bb_seat
                     self._to_call_next = 0
                 elif self._to_call_next == 0 and action.lower() == "check":
-                    # (Shouldn't happen in normal HU preflop, but keep safe)
                     self._next_to_act = self.bb_seat
                     self._to_call_next = 0
                 return
@@ -169,14 +182,13 @@ class PokerKitAdapter:
                         # On flop, BB acts first in HU
                         self._next_to_act = self.bb_seat
                         self._to_call_next = 0
-                        # reset for next rounds if ever extended
                         self._preflop_sb_called = False
                     else:
                         # defensive fall-back
                         self._next_to_act = self.sb_seat
                         self._to_call_next = 0
                 elif action.lower() == "call":
-                    # Defensive: treat as check when to_call==0
+                    # Treat as check when to_call==0 & SB already called
                     if self._to_call_next == 0 and self._preflop_sb_called:
                         self._street = "flop"
                         self._next_to_act = self.bb_seat
@@ -184,7 +196,7 @@ class PokerKitAdapter:
                         self._preflop_sb_called = False
                 return
 
-        # Anything else: no-op (tests don't require full engine)
+        # Otherwise: no-op (tests don't require full engine)
         return None
 
     def state(self) -> _GameSnap:
@@ -197,7 +209,7 @@ class PokerKitAdapter:
             sb_seat=int(self.sb_seat) if self.sb_seat is not None else -1,
             bb_seat=int(self.bb_seat) if self.bb_seat is not None else -1,
         )
-        players = [_PlayerSnap(hole_cards=hc[:]) for hc in self._players_holes]  # copy
+        players = [_PlayerSnap(hole_cards=hc[:]) for hc in self._players_holes]
         return _GameSnap(
             table=tbl,
             players=players,
