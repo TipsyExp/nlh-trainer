@@ -1,3 +1,4 @@
+# backend/main.py
 from __future__ import annotations
 
 from fastapi import FastAPI
@@ -6,14 +7,25 @@ from fastapi import FastAPI
 from backend.api.session import router as session_router
 from backend.api.hand import router as hand_router
 
-app = FastAPI(title="NLH Trainer API", version="0.1.0")
+app = FastAPI(
+    title="NLH Trainer API",
+    version="0.1.0",
+)
 
 
-@app.get("/")
-def root():
-    return {"ok": True, "message": "NLH Trainer API"}
+# -------- Health / Root --------
+
+@app.get("/", tags=["health"])
+def root() -> dict:
+    return {"ok": True, "message": "NLH Trainer backend is up"}
+
+@app.get("/health", tags=["health"])
+def health() -> dict:
+    return {"status": "ok"}
 
 
-# Mount API routes
+# -------- API Routers --------
+
+# Everything under /api/...
 app.include_router(session_router, prefix="/api")
 app.include_router(hand_router, prefix="/api")
