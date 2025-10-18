@@ -35,8 +35,8 @@ class _GameSnap:
     players: List[_PlayerSnap]
     street: str
     deck_seed: Optional[str]
-    last_action: Optional[_LastAction] = None  # records snapping/meta
-
+    pot_total: int = 0                   # ← ADD THIS
+    last_action: Optional[_LastAction] = None
 
 class PokerKitAdapter:
     """
@@ -84,6 +84,9 @@ class PokerKitAdapter:
 
         # cards/state
         self._players_holes: List[List[str]] = []
+
+        # pot (placeholder for now)
+        self._pot_total: int = 0           # ← ADD THIS
 
         # meta for tests
         self._last_action: Optional[_LastAction] = None
@@ -255,6 +258,13 @@ class PokerKitAdapter:
         self._next_to_act = seat
         self._to_call_next = max(0, self._current_price - self._committed[seat])
 
+    def _compute_min_raise(self, to_call: int) -> int:
+        # Opening: min raise target is at least 1×BB
+        if to_call <= 0:
+            return max(self.bb, self._last_raise_size or self.bb)
+        # Facing action: min raise = to_call + max(BB, last_raise_size)
+        return to_call + max(self.bb, self._last_raise_size or self.bb)
+
     # --- hand lifecycle ---
 
     def start_hand(self) -> str:
@@ -307,6 +317,7 @@ class PokerKitAdapter:
         return {
             "seat": seat,
             "to_call": to_call,
+            "min_raise": int(self._compute_min_raise(to_call)),
             "allowed_buckets": [b["label"] for b in buckets],
         }
 
@@ -411,9 +422,9 @@ class PokerKitAdapter:
             players=players,
             street=self._street,
             deck_seed=self._deck_seed,
+            pot_total=int(self._pot_total),     # ← ADD THIS
             last_action=self._last_action,
         )
-
 
 # Module-level singleton and factory
 _ADAPTER: Optional[PokerKitAdapter] = None
