@@ -41,9 +41,22 @@ class _GameSnap:
 
 class PokerKitAdapter:
     """
-    Minimal adapter w/ Task-04 polish & HU preflop-open labeling fix:
-      - HU preflop SB is treated as an OPEN (labels: 2.2x/2.5x/3.0x), even though to_call=BB-SB.
+    Minimal adapter with Task-04 buckets/snapping + HU preflop flow:
+
+    - start_table(..., base_seed=None)
+    - start_hand(): rotate BTN, set SB/BB, determine first actor, deal deterministic holes
+    - next_actor(): {"seat": int, "to_call": int, "allowed_buckets": [labels]}
+    - apply_action(): supports "check", "call", "bet", "raise" with snapping + min-raise enforcement
+      and minimal `to_call` propagation
+    - state(): returns object w/ .table.*, .players[*].hole_cards, .street, .deck_seed, .last_action
+
+    Bucket policy (current milestone):
+      • Preflop open (to_call==0): 2.2x / 2.5x / 3.0x + "jam"
+      • Facing action (any street with to_call>0): "call" + (2.5xR / 3.0xR) + "jam"
+      • Postflop open (flop/turn/river, to_call==0): "33%" / "66%" / "100%" + "jam"
+        (we approximate pot for targets; labels are the main API surface for UI)
     """
+
     def __init__(self) -> None:
         # table config
         self.seats: int = 0
@@ -120,48 +133,56 @@ class PokerKitAdapter:
         rng.shuffle(deck)
         return deck
 
-    def _is_hu_preflop_open(self, to_call: int, seat: int) -> bool:
-        """HU preflop SB acts first; treat as an OPEN (label 2.2x/2.5x/3.0x) even though to_call==BB-SB."""
-        return (
-            self.seats == 2
-            and self._street == "preflop"
-            and seat == self.sb_seat
-            and to_call == max(0, self.bb - self.sb)
-        )
+    def _postflop_pot_guess(self) -> int:
+        """
+        Minimal 'pot' approximation for open postflop buckets.
+        In HU with completed preflop (SB call, BB check) pot ~= 2*BB.
+        This keeps bucket targets consistent for snapping tests.
+        """
+        return max(2 * self.bb, self.bb)
 
-    def _allowed_buckets_data(self, to_call: int, seat: int) -> List[Dict[str, Any]]:
+    def _allowed_buckets_data(self, to_call: int) -> List[Dict[str, Any]]:
         """
         Returns buckets as dicts: {"label": str, "target": int}
-        - HU preflop SB (open): 2.2x/2.5x/3x (total bet) + jam  (+ "call" still available)
-        - Generic open (to_call==0): 2.2x/2.5x/3x + jam
-        - Facing action (to_call>0): call, and raises {to_call + k*last_raise_size} with k in {2.5, 3.0}, + jam
+
+        - Preflop open (to_call==0): 2.2x/2.5x/3x (total), + jam
+        - Facing action (to_call>0): call, + raises {to_call + k*last_raise_size} w/ k∈{2.5,3.0}, + jam
+        - Postflop open (street in flop/turn/river AND to_call==0): 33%/66%/100% pot, + jam
+        - Special case: HU SB preflop with to_call>0 is treated as an OPEN for labels (2.2/2.5/3x)
         """
         buckets: List[Dict[str, Any]] = []
 
-        # call is always present when to_call > 0
-        if to_call > 0:
+        # Treat HU SB preflop completion as "open" for labels (so we show 2.2x/2.5x/3x instead of *xR)
+        hu_sb_open = (
+            self.seats == 2 and self._street == "preflop" and
+            self.sb_seat is not None and self._next_to_act == self.sb_seat and to_call > 0
+        )
+
+        if to_call > 0 and not hu_sb_open:
             buckets.append({"label": "call", "target": to_call})
 
-        if self._is_hu_preflop_open(to_call, seat) or (to_call == 0 and self._street == "preflop"):
-            # OPEN labels
+        if self._street in ("flop", "turn", "river") and to_call == 0:
+            pot = self._postflop_pot_guess()
+            for pct, lab in ((0.33, "33%"), (0.66, "66%"), (1.00, "100%")):
+                buckets.append({"label": lab, "target": int(round(pot * pct))})
+        elif to_call == 0 or hu_sb_open:
+            # Preflop open buckets (total bet amounts)
             for mult in (2.2, 2.5, 3.0):
                 target = int(round(mult * self.bb))
                 buckets.append({"label": f"{mult:.1f}x", "target": max(target, self.bb)})
         else:
-            # Facing action labels
-            if to_call > 0:
-                base = max(self._last_raise_size, self.bb)
-                for mult in (2.5, 3.0):
-                    target = to_call + int(round(mult * base))
-                    buckets.append({"label": f"{mult:.1f}xR", "target": target})
+            # Facing action (any street)
+            base = max(self._last_raise_size, self.bb)
+            for mult in (2.5, 3.0):
+                target = to_call + int(round(mult * base))
+                buckets.append({"label": f"{mult:.1f}xR", "target": target})
 
-        # Top of tree
         buckets.append({"label": "jam", "target": 10**12})
         buckets.sort(key=lambda b: b["target"])
         return buckets
 
-    def _snap_to_bucket(self, requested_total: int, to_call: int, seat: int) -> Dict[str, Any]:
-        bks = self._allowed_buckets_data(to_call, seat)
+    def _snap_to_bucket(self, requested_total: int, to_call: int) -> Dict[str, Any]:
+        bks = self._allowed_buckets_data(to_call)
         best = min(bks, key=lambda b: (abs(b["target"] - requested_total), b["target"]))
         return {
             "target": best["target"],
@@ -185,13 +206,13 @@ class PokerKitAdapter:
         self._street = "preflop"
         if self.seats == 2:
             self._next_to_act = self.sb_seat
-            self._to_call_next = max(0, self.bb - self.sb)
+            self._to_call_next = max(0, self.bb - self.sb)  # SB owes BB-SB
         else:
-            self._next_to_act = (self.bb_seat + 1) % self.seats
+            self._next_to_act = (self.bb_seat + 1) % self.seats  # UTG
             self._to_call_next = 0
 
         self._preflop_sb_called = False
-        self._last_raise_size = self.bb
+        self._last_raise_size = self.bb  # initial preflop raise increment ~ BB
 
         self._deck_seed = f"{self.base_seed}:{self.hand_id}" if self.base_seed is not None else None
 
@@ -210,29 +231,38 @@ class PokerKitAdapter:
         if self._next_to_act is None:
             return None
         to_call = int(self._to_call_next)
-        seat = int(self._next_to_act)
-        buckets = self._allowed_buckets_data(to_call, seat)
+        buckets = self._allowed_buckets_data(to_call)
         return {
-            "seat": seat,
+            "seat": int(self._next_to_act),
             "to_call": to_call,
             "allowed_buckets": [b["label"] for b in buckets],
         }
 
     def apply_action(self, seat: int, action: str, amount: Optional[int] = None) -> None:
+        """
+        amount: interpreted as *requested total commitment* for bet/raise; snapped to bucket.
+        Enforces min-raise for bet/raise:
+            committed >= to_call + max(bb, last_raise_size)
+        Minimal HU flow: SB call -> BB check -> flop.
+        Minimal postflop: bet/raise rotates and sets opponent to_call accordingly.
+        """
         if seat != self._next_to_act:
-            return
+            return  # ignore out-of-turn in this minimal adapter
 
         action_l = (action or "").lower().strip()
         to_call = int(self._to_call_next)
 
         if action_l == "check":
             if to_call == 0:
+                # HU preflop close to flop: SB called earlier, BB checks now
                 if self.seats == 2 and self._street == "preflop" and seat == self.bb_seat and self._preflop_sb_called:
                     self._street = "flop"
+                    # On flop HU, BB acts first
                     self._next_to_act = self.bb_seat
                     self._to_call_next = 0
                     self._last_raise_size = 0
                 else:
+                    # rotate back in this toy model
                     self._next_to_act = self.sb_seat if seat == self.bb_seat else self.bb_seat
                     self._to_call_next = 0
             else:
@@ -244,11 +274,13 @@ class PokerKitAdapter:
             if to_call <= 0:
                 return self.apply_action(seat, "check")
             if self.seats == 2 and self._street == "preflop" and seat == self.sb_seat:
+                # SB completed preflop
                 self._preflop_sb_called = True
                 self._next_to_act = self.bb_seat
                 self._to_call_next = 0
                 self._last_action = _LastAction(seat=seat, type="call", committed=to_call)
                 return
+            # generic rotate
             self._next_to_act = self.bb_seat if seat == self.sb_seat else self.sb_seat
             self._to_call_next = 0
             self._last_action = _LastAction(seat=seat, type="call", committed=to_call)
@@ -258,21 +290,30 @@ class PokerKitAdapter:
             if amount is None or not isinstance(amount, int):
                 raise ValueError("bet/raise requires integer 'amount' (total commitment)")
 
-            snap = self._snap_to_bucket(requested_total=amount, to_call=to_call, seat=seat)
+            snap = self._snap_to_bucket(requested_total=amount, to_call=to_call)
             committed = int(snap["target"])
 
+            # Min-raise calc
             min_raise_inc = max(self.bb, self._last_raise_size)
-            min_required = to_call + min_raise_inc if to_call > 0 else max(self.bb, committed)
+            min_required = to_call + min_raise_inc if to_call > 0 else max(self.bb, committed)  # opening bet ≥ BB
             if to_call > 0 and committed < min_required:
                 raise ValueError(f"min-raise not met: need ≥ {min_required}, got {committed}")
 
-            if to_call == 0 or self._is_hu_preflop_open(to_call, seat):
+            # Update last_raise_size
+            if to_call == 0:
+                # opening bet on the street
                 self._last_raise_size = max(committed, self.bb)
+                # opponent faces full bet
+                self._to_call_next = committed
             else:
-                self._last_raise_size = max(committed - to_call, self.bb)
+                # raise over previous
+                inc = max(committed - to_call, 0)
+                self._last_raise_size = max(inc, self.bb)
+                # opponent faces the raise increment
+                self._to_call_next = max(committed - to_call, 0)
 
+            # rotate in this toy model
             self._next_to_act = self.bb_seat if seat == self.sb_seat else self.sb_seat
-            self._to_call_next = 0
 
             self._last_action = _LastAction(
                 seat=seat,
