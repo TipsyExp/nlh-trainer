@@ -1,0 +1,27 @@
+schema: v1
+seat_count: 2
+positions:
+  SB:
+    no_raise:
+      fold: 0
+      call: 0
+      raise:
+        "2.2x": 40
+        "2.5x": 40
+        "3.0x": 20
+  BB:
+    vs_open_2.2x:
+      fold: 20
+      call: 60
+      raise:
+        "3.0xR": 20
+    vs_open_2.5x:
+      fold: 25
+      call: 55
+      raise:
+        "3.0xR": 20
+    vs_open_3.0x:
+      fold: 30
+      call: 50
+      raise:
+        "3.0xR": 20
