@@ -65,3 +65,4 @@ third_party/**
 
 # ---- Generated assets (if any) ----
 *.cache
+frontend/.env.local
