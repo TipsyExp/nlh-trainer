@@ -59,7 +59,7 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
     Hide opponents' hole cards (mask to 'XX').
     """
     adapter = get_adapter()
-    s = adapter.state()  # dataclasses: table, players, street, deck_seed, last_action
+    s = adapter.state()  # dataclasses: table, players, street, deck_seed, last_action, (pot_total)
     tbl = s.table
 
     # Players: mask everyone except human_seat
@@ -83,10 +83,11 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
         "players": players,
         "street": s.street,
         "deck_seed": s.deck_seed,
+        # NEW: surface the pot
+        "pot_total": int(getattr(s, "pot_total", 0)),
         "last_action": _la_to_dict(getattr(s, "last_action", None)),
     }
     return resp
-
 
 def _pick_bot_action(actor: Dict[str, Any]) -> Tuple[str, Optional[int]]:
     """
