@@ -1,23 +1,29 @@
-schema: v1
+﻿schema: v1
 seat_count: 2
+
 positions:
   SB:
     no_raise:
-      fold: 0
-      call: 0
+      fold: 10
+      call: 20
       raise:
-        "2.2x": 40
+        "2.2x": 30
         "2.5x": 40
         "3.0x": 20
+
   BB:
+    no_raise:
+      fold: 0
+      call: 100
+      raise: {}
     vs_open_2.2x:
-      fold: 20
-      call: 60
+      fold: 40
+      call: 40
       raise:
         "3.0xR": 20
     vs_open_2.5x:
-      fold: 25
-      call: 55
+      fold: 35
+      call: 45
       raise:
         "3.0xR": 20
     vs_open_3.0x:
