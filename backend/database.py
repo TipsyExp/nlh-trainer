@@ -6,6 +6,13 @@ information to a SQLite database.  In milestone M0 the schema is
 minimal: each hand is stored with its id, deck seed, engine and
 evaluator.  Future milestones will extend this schema with per
 decision logs and session tracking.
+
+In addition to logging, this module exposes simple helpers for
+exporting logged data back out of the database.  These helpers
+return the original JSON representation of a hand as well as a
+CSV representation of the action history.  These utilities are
+used by the API export routes to enable deterministic replay of
+logged hands.
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ class SQLiteLogger:
         # Ensure parent directories exist
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
+        # return rows as dict-like objects
         self.conn.row_factory = sqlite3.Row
         self._init_schema()
 
@@ -78,6 +86,8 @@ class SQLiteLogger:
             engine: Name of the engine used (e.g. 'PokerKit').
             evaluator: Name of the evaluator used (e.g. 'PokerKit' or 'HenryRLee').
         """
+        # Serialize the full GameState using Pydantic; this ensures all fields
+        # are captured in a stable order for deterministic replay.
         state_json = state.model_dump_json()
         cur = self.conn.cursor()
         cur.execute(
@@ -129,5 +139,99 @@ class SQLiteLogger:
         ).fetchone()
         return row["deck_seed"] if row else None
 
-    def close(self) -> None:
-        self.conn.close()
+    # ---------------------------------------------------------------------------
+    # Export helpers
+    #
+    # These helpers surface logged data in a simple format for consumption via
+    # API routes.  They deliberately return primitive Python types or serialised
+    # strings rather than sqlite objects to make them easy to expose via
+    # FastAPI without leaking internal state.
+
+    def get_hand_json(self, hand_id: str) -> Optional[str]:
+        """
+        Retrieve the full state JSON for a given hand.
+
+        Args:
+            hand_id: The unique identifier for the hand to fetch.
+
+        Returns:
+            The JSON string originally logged for the hand, or None if not found.
+        """
+        cur = self.conn.cursor()
+        row = cur.execute(
+            "SELECT state_json FROM hands WHERE hand_id = ?", (hand_id,)
+        ).fetchone()
+        return row["state_json"] if row else None
+
+    def get_actions(self, hand_id: str) -> list[sqlite3.Row]:
+        """
+        Retrieve all action rows for a given hand.
+
+        Args:
+            hand_id: The unique identifier for the hand whose actions should be returned.
+
+        Returns:
+            A list of sqlite3.Row objects, one per recorded action.  If no actions were
+            recorded, an empty list is returned.
+        """
+        cur = self.conn.cursor()
+        rows = cur.execute(
+            "SELECT idx, street, actor_seat, type, amount, bucket, to_call_after, pot_after, time_ms, rng_seed, snapped, meta "
+            "FROM actions WHERE hand_id = ? ORDER BY idx ASC",
+            (hand_id,),
+        ).fetchall()
+        return list(rows)
+
+    def export_actions_csv(self, hand_id: str) -> Optional[str]:
+        """
+        Export the action history for a hand as a CSV string.
+
+        The CSV will include a header row and one row per action with the following
+        columns: idx, street, actor_seat, type, amount, bucket, to_call_after,
+        pot_after, time_ms, rng_seed, snapped, meta.
+
+        Args:
+            hand_id: The unique identifier for the hand to export.
+
+        Returns:
+            A CSV formatted string if any actions exist, otherwise None.
+        """
+        rows = self.get_actions(hand_id)
+        if not rows:
+            return None
+        import csv
+        import io
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        header = [
+            "idx",
+            "street",
+            "actor_seat",
+            "type",
+            "amount",
+            "bucket",
+            "to_call_after",
+            "pot_after",
+            "time_ms",
+            "rng_seed",
+            "snapped",
+            "meta",
+        ]
+        writer.writerow(header)
+        for row in rows:
+            writer.writerow([
+                row["idx"],
+                row["street"],
+                row["actor_seat"],
+                row["type"],
+                row["amount"],
+                row["bucket"],
+                row["to_call_after"],
+                row["pot_after"],
+                row["time_ms"],
+                row["rng_seed"],
+                row["snapped"],
+                row["meta"],
+            ])
+        return output.getvalue()

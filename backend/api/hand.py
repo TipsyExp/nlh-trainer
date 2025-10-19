@@ -8,7 +8,17 @@ from pydantic import BaseModel
 from backend.adapters.engines import get_adapter
 from .session import get_session_state
 
-# NOTE: no prefix here; app/main.py likely includes this router with prefix="/api".
+# ---- Optional logging hooks (safe if missing) ----
+try:
+    from backend.database import log_hand_start as db_log_hand_start  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - optional
+    db_log_hand_start = None  # type: ignore[assignment]
+
+try:
+    from backend.database import log_action as db_log_action  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - optional
+    db_log_action = None  # type: ignore[assignment]
+
 router = APIRouter(tags=["hand"])
 
 
@@ -59,7 +69,7 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
     Hide opponents' hole cards (mask to 'XX').
     """
     adapter = get_adapter()
-    s = adapter.state()  # dataclasses: table, players, street, deck_seed, last_action, (pot_total)
+    s = adapter.state()  # dataclasses: table, players, street, deck_seed, last_action, pot_total?
     tbl = s.table
 
     # Players: mask everyone except human_seat
@@ -82,12 +92,12 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
         },
         "players": players,
         "street": s.street,
-        "deck_seed": s.deck_seed,
-        # NEW: surface the pot
-        "pot_total": int(getattr(s, "pot_total", 0)),
+        "deck_seed": getattr(s, "deck_seed", None),
         "last_action": _la_to_dict(getattr(s, "last_action", None)),
+        "pot_total": int(getattr(s, "pot_total", 0)),
     }
     return resp
+
 
 def _pick_bot_action(actor: Dict[str, Any]) -> Tuple[str, Optional[int]]:
     """
@@ -134,6 +144,26 @@ def start_hand() -> StartHandResponse:
     human_seat = get_session_state().human_seat
     _auto_advance_bots(human_seat)
 
+    # --- Optional logging (hand start)
+    if callable(db_log_hand_start):  # type: ignore[truthy-bool]
+        s = adapter.state()
+        tbl = s.table
+        try:
+            db_log_hand_start(  # type: ignore[misc]
+                hand_id=hand_id,
+                deck_seed=getattr(s, "deck_seed", None),
+                seats=int(tbl.seats),
+                sb=int(tbl.sb),
+                bb=int(tbl.bb),
+                ante=int(tbl.ante),
+                button=int(tbl.button),
+                sb_seat=int(tbl.sb_seat),
+                bb_seat=int(tbl.bb_seat),
+            )
+        except Exception:
+            # don't break gameplay if logging fails
+            pass
+
     return StartHandResponse(hand_id=hand_id)
 
 
@@ -146,7 +176,7 @@ def get_state() -> StateResponse:
     return StateResponse(state=snap, actor=actor)
 
 
-@router.post("/hand/action", response_model=ActionResponse)  # <-- FIXED PATH
+@router.post("/hand/action", response_model=ActionResponse)
 def post_action(req: ActionRequest) -> ActionResponse:
     adapter = get_adapter()
     human_seat = get_session_state().human_seat
@@ -162,8 +192,26 @@ def post_action(req: ActionRequest) -> ActionResponse:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"apply_action failed: {e}") from e
 
-    # Snapshot immediately after the human action
+    # Snapshot immediately AFTER the human action
     pre_bot_state = _to_public_state(human_seat)
+
+    # --- Optional logging (human decision)
+    if callable(db_log_action):  # type: ignore[truthy-bool]
+        la = pre_bot_state.get("last_action") or {}
+        try:
+            db_log_action(  # type: ignore[misc]
+                hand_id=str(getattr(adapter, "hand_id", "")),
+                seat=int(la.get("seat", req.seat)),
+                action=str(la.get("type", req.action)).lower(),
+                amount=int(la.get("committed") or (req.amount if req.amount is not None else 0)),
+                snapped=bool(la.get("snapped", False)),
+                bucket_label=la.get("bucket_label"),
+                street=str(pre_bot_state.get("street", "")),
+                pot_total=int(pre_bot_state.get("pot_total", 0)),
+            )
+        except Exception:
+            # don't break gameplay if logging fails
+            pass
 
     # For bet/raise: return pre-bot snapshot so snapping details are visible.
     # For call/check: auto-advance bots and return post-bot snapshot (e.g. HU SB-call -> BB-check -> flop).

@@ -1,87 +1,101 @@
 """
-Quick bots-only autoplay driver for M0.
-Runs N hands HU (human_seat still 0, but we auto-apply "check/call" for both seats).
+Simple autoplay script for the NLH trainer backend.
 
-Usage:
-  python -m backend.scripts.autoplay --hands 1000 --seed AUTO
+This script drives the FastAPI application through its session and hand
+endpoints to simulate a number of hands without human intervention.  It
+is intended primarily for testing that the server and engine remain
+stable over long sequences of games.  The bot policy used here is
+extremely naive: it always checks when there is nothing to call and
+otherwise calls any bet.  No raises are ever made.
+
+You can run this module directly via ``python -m backend.scripts.autoplay``
+or invoke ``autoplay`` programmatically from within tests.  The number
+of hands to play can be provided on the command line as an integer
+argument; the default is 100 hands.
 """
 
 from __future__ import annotations
-import argparse
+
+import sys
+from typing import Optional
+
 from fastapi.testclient import TestClient
+
 from backend.main import app
 
-client = TestClient(app)
 
-def start_session(seed: str):
-    r = client.post("/api/session", json={
-        "seats": 2, "sb": 50, "bb": 100, "ante": 0,
+def run_autoplay(num_hands: int = 100, base_seed: str = "autoplay_seed") -> None:
+    """Run a naive autoplay across a number of hands.
+
+    Args:
+        num_hands: The number of hands to simulate.
+        base_seed: Optional base seed to use for deterministic deck shuffling.
+
+    Raises:
+        RuntimeError: If the session creation or hand progression fails.
+    """
+    client = TestClient(app)
+    # Configure a new session; we always play heads‑up with equal stacks.
+    session_req = {
+        "seats": 2,
+        "sb": 50,
+        "bb": 100,
+        "ante": 0,
         "stacks": [10000, 10000],
-        "base_seed": seed,
+        "base_seed": base_seed,
         "human_seat": 0,
-    })
-    r.raise_for_status()
+    }
+    resp = client.post("/api/session", json=session_req)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to create session: {resp.text}")
 
-def start_hand():
-    r = client.post("/api/hand/start")
-    r.raise_for_status()
+    for _ in range(int(num_hands)):
+        # Start a new hand; this will auto‑advance bots up to the first human action
+        start = client.post("/api/hand/start")
+        if start.status_code != 200:
+            raise RuntimeError(f"hand start failed: {start.text}")
+        # Loop until the hand completes
+        while True:
+            # Get current state and next actor; may return None when the hand is over
+            state_resp = client.get("/api/hand/state")
+            if state_resp.status_code != 200:
+                raise RuntimeError(f"state query failed: {state_resp.text}")
+            data = state_resp.json()
+            actor = data.get("actor")
+            if not actor:
+                # Hand completed
+                break
+            # Always act from the human seat (0).  The session is
+            # configured with human_seat=0 and the server will reject
+            # actions for other seats.  We ignore the seat returned in
+            # actor because bots are advanced automatically by the API.
+            to_call = int(actor.get("to_call", 0))
+            action_req = {"seat": 0, "action": "check" if to_call <= 0 else "call", "amount": None}
+            action = client.post("/api/hand/action", json=action_req)
+            # Treat non‑200 as fatal
+            if action.status_code != 200:
+                raise RuntimeError(f"action failed: {action.text}")
 
-def state():
-    r = client.get("/api/hand/state")
-    r.raise_for_status()
-    return r.json()
 
-def apply_action(seat: int, action: str, amount: int | None = None):
-    payload = {"seat": seat, "action": action}
-    if amount is not None:
-        payload["amount"] = amount
-    r = client.post("/api/hand/action", json=payload)
-    r.raise_for_status()
-    return r.json()
+def main(argv: Optional[list[str]] = None) -> None:
+    """Entry point for CLI execution.
 
-def bot_policy(actor) -> tuple[str, int | None]:
-    # super-naive policy for autoplay:
-    # if to_call == 0 -> check; else -> call
-    to_call = int(actor.get("to_call", 0))
-    if to_call <= 0:
-        return "check", None
-    return "call", None
+    Pass the number of hands to play as the first argument.  When run
+    without arguments, defaults to 100 hands.
+    """
+    if argv is None:
+        argv = sys.argv[1:]
+    try:
+        num = int(argv[0]) if argv else 100
+    except ValueError:
+        print(f"Invalid number of hands: {argv[0]}")
+        sys.exit(1)
+    try:
+        run_autoplay(num_hands=num)
+    except Exception as exc:
+        print(f"Autoplay encountered an error: {exc}")
+        sys.exit(2)
 
-def play_one_hand() -> None:
-    start_hand()
-    # step until there is no actor or the adapter moves streets to end
-    for _ in range(200):
-        s = state()
-        actor = s.get("actor")
-        if not actor:
-            break
-        action, amount = bot_policy(actor)
-        # always act from "human seat" (0) when it's our turn,
-        # but our API only accepts actions from human_seat, so if it's seat 1 we skip
-        if int(actor["seat"]) != 0:
-            # we can't post actions for bots via /api here; just fetch again
-            # engine auto-advances bots on the human's check/call path when applicable
-            # so we emulate "wait" by calling state again after a no-op
-            # if needed, you could add a non-API direct engine driver later.
-            # To force progress, try a no-op "check" if allowed.
-            if int(actor.get("to_call", 0)) == 0:
-                apply_action(0, "check")
-            else:
-                apply_action(0, "call")
-        else:
-            apply_action(0, action, amount)
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--hands", type=int, default=1000)
-    ap.add_argument("--seed", type=str, default="AUTO")
-    args = ap.parse_args()
-
-    start_session(args.seed)
-    for i in range(args.hands):
-        play_one_hand()
-        if (i + 1) % 100 == 0:
-            print(f"Played {i+1} hands")
 
 if __name__ == "__main__":
     main()
