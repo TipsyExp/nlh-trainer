@@ -1,262 +1,237 @@
-"""
-SQLite persistence layer for the NLH training simulator.
-
-This module defines a simple logger that records hand and action
-information to a SQLite database.  In milestone M0 the schema is
-minimal: each hand is stored with its id, deck seed, engine and
-evaluator.  Future milestones will extend this schema with per
-decision logs and session tracking.
-
-In addition to logging, this module exposes simple helpers for
-exporting logged data back out of the database.  These helpers
-return the original JSON representation of a hand as well as a
-CSV representation of the action history.  These utilities are
-used by the API export routes to enable deterministic replay of
-logged hands.
-"""
-
 from __future__ import annotations
 
-import json
-import sqlite3
-from datetime import datetime
-from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from .models.state import GameState
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
-# at top
-from datetime import datetime, timezone
-from contextlib import suppress
+from backend.adapters.engines import get_adapter
+from .session import get_session_state
 
-class SQLiteLogger:
-    ...
-    def __init__(self, path: str) -> None:
-        ...
-        self.conn = sqlite3.connect(self.path)
-        self.conn.row_factory = sqlite3.Row
-        self._init_schema()
+# ---- Optional logging hooks (safe if missing) ----
+try:
+    from backend.database import log_hand_start as db_log_hand_start  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - optional
+    db_log_hand_start = None  # type: ignore[assignment]
 
-    # NEW: graceful close + context manager
-    def close(self) -> None:
-        """Close the underlying SQLite connection (idempotent)."""
-        with suppress(Exception):
-            if getattr(self, "conn", None) is not None:
-                self.conn.close()
-        self.conn = None  # type: ignore[assignment]
+try:
+    from backend.database import log_action as db_log_action  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - optional
+    db_log_action = None  # type: ignore[assignment]
 
-    def __enter__(self) -> "SQLiteLogger":
-        return self
+router = APIRouter(tags=["hand"])
 
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.close()
 
-class SQLiteLogger:
-    """A lightweight wrapper around sqlite3 for logging hands and actions."""
+# ---------- Models ----------
 
-    def __init__(self, path: str) -> None:
-        self.path = Path(path)
-        # Ensure parent directories exist
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path)
-        # return rows as dict-like objects
-        self.conn.row_factory = sqlite3.Row
-        self._init_schema()
+class StartHandResponse(BaseModel):
+    hand_id: str
 
-    def _init_schema(self) -> None:
-        cur = self.conn.cursor()
-        # Hands table
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS hands (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hand_id TEXT UNIQUE NOT NULL,
-                deck_seed TEXT,
-                engine TEXT,
-                evaluator TEXT,
-                created_at TEXT NOT NULL,
-                state_json TEXT NOT NULL
+
+class ActionRequest(BaseModel):
+    seat: int
+    action: str
+    amount: Optional[int] = None
+
+
+class ActionResponse(BaseModel):
+    ok: bool
+    bots_applied: List[Dict[str, Any]]
+    state: Dict[str, Any]
+
+
+class StateResponse(BaseModel):
+    state: Dict[str, Any]
+    actor: Optional[Dict[str, Any]] = None
+
+
+# ---------- Helpers ----------
+
+def _la_to_dict(la: Any) -> Optional[Dict[str, Any]]:
+    """
+    Adapter's last_action may be a dataclass or dict. Normalize to dict or None.
+    """
+    if la is None:
+        return None
+    if isinstance(la, dict):
+        return la
+    # Dataclass-like: try to read expected fields
+    out = {}
+    for k in ("seat", "type", "requested", "committed", "snapped", "bucket_label", "allowed_buckets"):
+        if hasattr(la, k):
+            out[k] = getattr(la, k)
+    return out
+
+
+def _to_public_state(human_seat: int) -> Dict[str, Any]:
+    """
+    Convert adapter.state() dataclasses to a JSON-friendly dict snapshot.
+    Hide opponents' hole cards (mask to 'XX').
+    """
+    adapter = get_adapter()
+    s = adapter.state()
+    tbl = s.table
+
+    # Players: mask everyone except human_seat
+    players = []
+    for i, p in enumerate(s.players):
+        if i == human_seat:
+            players.append({"seat": i, "hole_cards": list(p.hole_cards)})
+        else:
+            players.append({"seat": i, "hole_cards": ["XX", "XX"]})
+
+    resp = {
+        "table": {
+            "seats": int(tbl.seats),
+            "sb": int(tbl.sb),
+            "bb": int(tbl.bb),
+            "ante": int(tbl.ante),
+            "button": int(tbl.button),
+            "sb_seat": int(tbl.sb_seat),
+            "bb_seat": int(tbl.bb_seat),
+        },
+        "players": players,
+        "street": s.street,
+        "deck_seed": getattr(s, "deck_seed", None),
+        "last_action": _la_to_dict(getattr(s, "last_action", None)),
+        "pot_total": int(getattr(s, "pot_total", 0)),
+    }
+    return resp
+
+
+def _pick_bot_action(actor: Dict[str, Any]) -> Tuple[str, Optional[int]]:
+    """
+    Naive heuristic for M0:
+      - if to_call == 0: "check"
+      - else: "call"
+    """
+    to_call = int(actor.get("to_call", 0))
+    if to_call <= 0:
+        return "check", None
+    return "call", None
+
+
+def _auto_advance_bots(human_seat: int) -> List[Dict[str, Any]]:
+    """
+    Loop while it's a bot's turn. Returns a list of bot actions taken.
+
+    IMPORTANT: Stop if a bot action causes a street transition, so we do not
+    consume the very first decision on the new street (e.g., HU SB-call →
+    BB bot checks → move to flop and KEEP BB as the actor).
+    """
+    adapter = get_adapter()
+    actions_taken: List[Dict[str, Any]] = []
+    # safety to avoid infinite loops
+    for _ in range(100):
+        actor = adapter.next_actor()
+        if not actor:
+            break
+        if int(actor["seat"]) == human_seat:
+            break
+
+        # Capture street before the bot acts
+        prev_street = getattr(adapter.state(), "street", None)
+
+        action, amount = _pick_bot_action(actor)
+        adapter.apply_action(actor["seat"], action, amount)
+        actions_taken.append({"seat": actor["seat"], "action": action, "amount": amount})
+
+        # If the street advanced, stop advancing bots here.
+        new_street = getattr(adapter.state(), "street", None)
+        if new_street != prev_street:
+            break
+    return actions_taken
+
+
+# ---------- Routes ----------
+
+@router.post("/hand/start", response_model=StartHandResponse)
+def start_hand() -> StartHandResponse:
+    adapter = get_adapter()
+    try:
+        hand_id = adapter.start_hand()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"start_hand failed: {e}") from e
+
+    # Auto-advance bots immediately to first human decision (if any)
+    human_seat = get_session_state().human_seat
+    _auto_advance_bots(human_seat)
+
+    # --- Optional logging (hand start)
+    if callable(db_log_hand_start):  # type: ignore[truthy-bool]
+        s = adapter.state()
+        tbl = s.table
+        try:
+            db_log_hand_start(  # type: ignore[misc]
+                hand_id=hand_id,
+                deck_seed=getattr(s, "deck_seed", None),
+                seats=int(tbl.seats),
+                sb=int(tbl.sb),
+                bb=int(tbl.bb),
+                ante=int(tbl.ante),
+                button=int(tbl.button),
+                sb_seat=int(tbl.sb_seat),
+                bb_seat=int(tbl.bb_seat),
             )
-            """
-        )
-        # Actions table (minimal; may be extended in future tasks)
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS actions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hand_id TEXT NOT NULL,
-                idx INTEGER,
-                street TEXT,
-                actor_seat INTEGER,
-                type TEXT,
-                amount INTEGER,
-                bucket TEXT,
-                to_call_after INTEGER,
-                pot_after INTEGER,
-                time_ms INTEGER,
-                rng_seed TEXT,
-                snapped INTEGER,
-                meta TEXT,
-                FOREIGN KEY (hand_id) REFERENCES hands(hand_id)
+        except Exception:
+            # don't break gameplay if logging fails
+            pass
+
+    return StartHandResponse(hand_id=hand_id)
+
+
+@router.get("/hand/state", response_model=StateResponse)
+def get_state() -> StateResponse:
+    adapter = get_adapter()
+    human_seat = get_session_state().human_seat
+    snap = _to_public_state(human_seat)
+    actor = adapter.next_actor()
+    return StateResponse(state=snap, actor=actor)
+
+
+@router.post("/hand/action", response_model=ActionResponse)
+def post_action(req: ActionRequest) -> ActionResponse:
+    adapter = get_adapter()
+    human_seat = get_session_state().human_seat
+
+    if req.seat != human_seat:
+        raise HTTPException(status_code=400, detail="Only the configured human seat may post actions.")
+
+    # Apply the human action
+    try:
+        adapter.apply_action(req.seat, req.action, req.amount)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve)) from ve
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"apply_action failed: {e}") from e
+
+    # Snapshot immediately AFTER the human action
+    pre_bot_state = _to_public_state(human_seat)
+
+    # --- Optional logging (human decision)
+    if callable(db_log_action):  # type: ignore[truthy-bool]
+        la = pre_bot_state.get("last_action") or {}
+        try:
+            db_log_action(  # type: ignore[misc]
+                hand_id=str(getattr(adapter, "hand_id", "")),
+                seat=int(la.get("seat", req.seat)),
+                action=str(la.get("type", req.action)).lower(),
+                amount=int(la.get("committed") or (req.amount if req.amount is not None else 0)),
+                snapped=bool(la.get("snapped", False)),
+                bucket_label=la.get("bucket_label"),
+                street=str(pre_bot_state.get("street", "")),
+                pot_total=int(pre_bot_state.get("pot_total", 0)),
             )
-            """
-        )
-        self.conn.commit()
+        except Exception:
+            # don't break gameplay if logging fails
+            pass
 
-    def log_hand(self, state: GameState, engine: str, evaluator: str) -> None:
-        """Persist a hand to the database.
+    # For bet/raise: return pre-bot snapshot so snapping details are visible.
+    action_l = (req.action or "").lower().strip()
+    if action_l in ("bet", "raise"):
+        return ActionResponse(ok=True, bots_applied=[], state=pre_bot_state)
 
-        Args:
-            state: The fully populated GameState.
-            engine: Name of the engine used (e.g. 'PokerKit').
-            evaluator: Name of the evaluator used (e.g. 'PokerKit' or 'HenryRLee').
-        """
-        # Serialize the full GameState using Pydantic; this ensures all fields
-        # are captured in a stable order for deterministic replay.
-        state_json = state.model_dump_json()
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            INSERT OR REPLACE INTO hands (hand_id, deck_seed, engine, evaluator, created_at, state_json)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                state.hand_id,
-                state.deck_seed,
-                engine,
-                evaluator,
-                datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                state_json,
-            ),
-        )
-        # Persist actions individually
-        for action in state.action_history:
-            cur.execute(
-                """
-                INSERT INTO actions (hand_id, idx, street, actor_seat, type, amount, bucket,
-                                     to_call_after, pot_after, time_ms, rng_seed, snapped, meta)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    state.hand_id,
-                    action.idx,
-                    action.street.value,
-                    action.actor_seat,
-                    action.type.value,
-                    action.amount,
-                    action.bucket,
-                    action.to_call_after,
-                    action.pot_after,
-                    action.time_ms,
-                    action.rng_seed,
-                    1 if action.snapped else 0 if action.snapped is not None else None,
-                    json.dumps(action.meta) if action.meta is not None else None,
-                ),
-            )
-        self.conn.commit()
-
-    def fetch_hand_seed(self, hand_id: str) -> Optional[str]:
-        """Retrieve the deck seed associated with a given hand id."""
-        cur = self.conn.cursor()
-        row = cur.execute(
-            "SELECT deck_seed FROM hands WHERE hand_id = ?",
-            (hand_id,),
-        ).fetchone()
-        return row["deck_seed"] if row else None
-
-    # ---------------------------------------------------------------------------
-    # Export helpers
-    #
-    # These helpers surface logged data in a simple format for consumption via
-    # API routes.  They deliberately return primitive Python types or serialised
-    # strings rather than sqlite objects to make them easy to expose via
-    # FastAPI without leaking internal state.
-
-    def get_hand_json(self, hand_id: str) -> Optional[str]:
-        """
-        Retrieve the full state JSON for a given hand.
-
-        Args:
-            hand_id: The unique identifier for the hand to fetch.
-
-        Returns:
-            The JSON string originally logged for the hand, or None if not found.
-        """
-        cur = self.conn.cursor()
-        row = cur.execute(
-            "SELECT state_json FROM hands WHERE hand_id = ?", (hand_id,)
-        ).fetchone()
-        return row["state_json"] if row else None
-
-    def get_actions(self, hand_id: str) -> list[sqlite3.Row]:
-        """
-        Retrieve all action rows for a given hand.
-
-        Args:
-            hand_id: The unique identifier for the hand whose actions should be returned.
-
-        Returns:
-            A list of sqlite3.Row objects, one per recorded action.  If no actions were
-            recorded, an empty list is returned.
-        """
-        cur = self.conn.cursor()
-        rows = cur.execute(
-            "SELECT idx, street, actor_seat, type, amount, bucket, to_call_after, pot_after, time_ms, rng_seed, snapped, meta "
-            "FROM actions WHERE hand_id = ? ORDER BY idx ASC",
-            (hand_id,),
-        ).fetchall()
-        return list(rows)
-
-    def export_actions_csv(self, hand_id: str) -> Optional[str]:
-        """
-        Export the action history for a hand as a CSV string.
-
-        The CSV will include a header row and one row per action with the following
-        columns: idx, street, actor_seat, type, amount, bucket, to_call_after,
-        pot_after, time_ms, rng_seed, snapped, meta.
-
-        Args:
-            hand_id: The unique identifier for the hand to export.
-
-        Returns:
-            A CSV formatted string if any actions exist, otherwise None.
-        """
-        rows = self.get_actions(hand_id)
-        if not rows:
-            return None
-        import csv
-        import io
-
-        output = io.StringIO()
-        writer = csv.writer(output)
-        header = [
-            "idx",
-            "street",
-            "actor_seat",
-            "type",
-            "amount",
-            "bucket",
-            "to_call_after",
-            "pot_after",
-            "time_ms",
-            "rng_seed",
-            "snapped",
-            "meta",
-        ]
-        writer.writerow(header)
-        for row in rows:
-            writer.writerow([
-                row["idx"],
-                row["street"],
-                row["actor_seat"],
-                row["type"],
-                row["amount"],
-                row["bucket"],
-                row["to_call_after"],
-                row["pot_after"],
-                row["time_ms"],
-                row["rng_seed"],
-                row["snapped"],
-                row["meta"],
-            ])
-        return output.getvalue()
+    # Default: auto-advance bots and return post-bot snapshot
+    bots = _auto_advance_bots(human_seat)
+    post_bot_state = _to_public_state(human_seat)
+    return ActionResponse(ok=True, bots_applied=bots, state=post_bot_state)
