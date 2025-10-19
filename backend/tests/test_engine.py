@@ -119,22 +119,36 @@ class TestAPIAdapterInteractions(unittest.TestCase):
         # Snap flag indicates whether the requested amount was adjusted
         # It is acceptable for the engine to snap upward
 
-    def test_hu_preflop_call_ends_hand(self) -> None:
-        """In the stub engine a SB call followed by BB check ends the hand."""
+    def test_hu_preflop_call_transitions_to_flop(self) -> None:
+        """A small‑blind call followed by a big‑blind check should transition to the flop.
+
+        In heads‑up play the small blind (seat 0) acts first preflop.  When the
+        small blind calls, the big blind is offered a decision.  A check from
+        the big blind should advance the street to the flop and rotate the
+        actor back to the big blind.  This test verifies that the engine
+        correctly transitions and that further actions remain available.
+        """
         # Start a new hand
         self.client.post("/api/hand/start")
-        # Preflop: actor should be SB (seat 0)
+        # Preflop: actor should be small blind (seat 0)
         state = self.client.get("/api/hand/state").json()
         actor = state["actor"]
-        self.assertEqual(actor["seat"], 0)
-        # SB calls; this triggers the BB to check and the hand to end
+        self.assertIsNotNone(actor)
+        self.assertEqual(actor.get("seat"), 0)
+        # SB calls
         resp = self.client.post(
             "/api/hand/action", json={"seat": 0, "action": "call"}
         )
         self.assertEqual(resp.status_code, 200)
-        # After the call, no further actor should be available
+        # After the call, the next actor should be the big blind (seat 1)
         state2 = self.client.get("/api/hand/state").json()
-        self.assertIsNone(state2["actor"])
+        actor2 = state2["actor"]
+        # Actor should be available and should be BB
+        self.assertIsNotNone(actor2)
+        self.assertEqual(int(actor2["seat"]), 1)
+        # The street should have progressed to at least the flop
+        street = state2["state"].get("street")
+        self.assertIn(street, ("flop", "turn", "river", "showdown"))
 
     def test_off_tree_size_snapping(self) -> None:
         """Raising to an unsupported amount should snap to the nearest bucket."""

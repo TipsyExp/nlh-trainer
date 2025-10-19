@@ -32,32 +32,61 @@ class PlayerStatus(str, Enum):
 
 
 class Street(str, Enum):
-    """Enumeration of game streets."""
+    """Enumeration of game streets.
+
+    The canonical street enumeration used by the state schema.  In the
+    M0 specification the simulator only supports a preflop action
+    sequence, but downstream tests expect that ``Street`` exposes
+    additional phases such as ``showdown`` and ``complete``.  These
+    extra values are included here for forward compatibility and to
+    satisfy Pydantic validation against the documented schema.
+    """
 
     preflop = "preflop"
     flop = "flop"
     turn = "turn"
     river = "river"
+    showdown = "showdown"
+    complete = "complete"
 
 
 class ActionType(str, Enum):
-    """Enumeration of action types."""
+    """Enumeration of supported player actions.
+
+    The underlying values correspond to the JSON representation used by
+    the state schema.  The ``raise_`` member maps to the string
+    ``"raise"`` because ``raise`` is a reserved keyword in Python.
+    Additional members such as ``post_blind``, ``all_in`` and ``deal``
+    are defined for completeness relative to the documented schema.
+    """
 
     check = "check"
     call = "call"
     bet = "bet"
-    raise_ = "raise"  # 'raise' is a reserved keyword in Python
+    raise_ = "raise"
     fold = "fold"
     post_blind = "post_blind"
+    all_in = "all_in"
+    deal = "deal"
 
     def __str__(self) -> str:
         return self.value
 
 
 class TableState(BaseModel):
-    """Static table configuration for a session."""
+    """Static table configuration for a session.
 
-    seat_count: int = Field(..., alias="seats")
+    The number of seats is represented by ``seat_count``.  Previous
+    iterations of this model aliased the field to ``seats``, however
+    Pydantic's default behaviour requires either the alias to be used in
+    the input or ``populate_by_name`` to be set.  Because upstream
+    tests construct ``TableState`` instances using the ``seat_count``
+    keyword, the alias has been removed.  Additional fields such as
+    ``rake`` are included for completeness relative to the documented
+    schema but are not actively used in M0.
+    """
+
+    seat_count: int
     sb: int
     bb: int
     ante: int = 0

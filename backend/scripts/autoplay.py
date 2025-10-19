@@ -54,9 +54,14 @@ def run_autoplay(num_hands: int = 100, base_seed: str = "autoplay_seed") -> None
         start = client.post("/api/hand/start")
         if start.status_code != 200:
             raise RuntimeError(f"hand start failed: {start.text}")
-        # Loop until the hand completes
+        # Loop until the hand completes or a safety limit is reached
+        steps = 0
         while True:
-            # Get current state and next actor; may return None when the hand is over
+            # Fetch the current public state and actor.  The /hand/state
+            # endpoint will return ``actor`` as None when the hand has
+            # concluded.  To avoid infinite loops (e.g. if the engine
+            # never signals completion), break after a generous number of
+            # iterations.
             state_resp = client.get("/api/hand/state")
             if state_resp.status_code != 200:
                 raise RuntimeError(f"state query failed: {state_resp.text}")
@@ -75,6 +80,10 @@ def run_autoplay(num_hands: int = 100, base_seed: str = "autoplay_seed") -> None
             # Treat non‑200 as fatal
             if action.status_code != 200:
                 raise RuntimeError(f"action failed: {action.text}")
+            steps += 1
+            if steps > 100:
+                # Break to avoid hanging if the engine fails to end the hand
+                break
 
 
 def main(argv: Optional[list[str]] = None) -> None:

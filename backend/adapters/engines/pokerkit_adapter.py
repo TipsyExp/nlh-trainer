@@ -367,22 +367,28 @@ class PokerKitAdapter:
         if action_l == "check":
             if to_call != 0:
                 raise ValueError("illegal check facing to_call")
-            # Heads‑up preflop: if BB checks after SB has called, transition to flop
+            # Heads‑up preflop: SB has called and BB now checks → advance to flop
             if (
                 self.seats == 2
                 and self._street == "preflop"
                 and seat == self.bb_seat
                 and self._preflop_sb_called
             ):
-                # Special case: heads‑up check behind preflop ends the hand for M0.
-                # We transition to the flop street but do not offer further
-                # actions; instead we clear the next actor to signal hand completion.
+                # Transition to flop street and rotate to the first actor on the flop
+                # In HU, the big blind acts first postflop (left of the button)
                 self._street = "flop"
+                # Reset raise tracking for the new street
                 self._last_raise_size = 0
                 self._raises_this_round = 0
-                self._next_to_act = None
+                # The price remains whatever was committed preflop (BB), so
+                # rotate to BB again; to_call will be zero because committed
+                # matches current price.
+                if self.bb_seat is not None:
+                    self._rotate_to(self.bb_seat)
+                else:
+                    self._next_to_act = None
             else:
-                # Rotate to opponent
+                # Rotate to the opponent seat (HU) or next seat (multiway)
                 nxt = self.bb_seat if seat == self.sb_seat else self.sb_seat
                 self._rotate_to(nxt)
             # Record last action
