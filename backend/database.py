@@ -25,6 +25,31 @@ from typing import Optional
 
 from .models.state import GameState
 
+# at top
+from datetime import datetime, timezone
+from contextlib import suppress
+
+class SQLiteLogger:
+    ...
+    def __init__(self, path: str) -> None:
+        ...
+        self.conn = sqlite3.connect(self.path)
+        self.conn.row_factory = sqlite3.Row
+        self._init_schema()
+
+    # NEW: graceful close + context manager
+    def close(self) -> None:
+        """Close the underlying SQLite connection (idempotent)."""
+        with suppress(Exception):
+            if getattr(self, "conn", None) is not None:
+                self.conn.close()
+        self.conn = None  # type: ignore[assignment]
+
+    def __enter__(self) -> "SQLiteLogger":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
 class SQLiteLogger:
     """A lightweight wrapper around sqlite3 for logging hands and actions."""
@@ -100,7 +125,7 @@ class SQLiteLogger:
                 state.deck_seed,
                 engine,
                 evaluator,
-                datetime.utcnow().isoformat(timespec="seconds"),
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 state_json,
             ),
         )

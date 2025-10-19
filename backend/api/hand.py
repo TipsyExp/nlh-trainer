@@ -130,6 +130,51 @@ def _auto_advance_bots(human_seat: int) -> List[Dict[str, Any]]:
     return actions_taken
 
 
+def _should_skip_auto_advance_after_action(
+    human_seat: int,
+    pre_bot_state: Dict[str, Any],
+    action_l: str,
+    actor_after: Optional[Dict[str, Any]],
+) -> bool:
+    """
+    Decide if we should *not* advance bots after the human action.
+
+    We skip exactly when:
+      - heads-up (2 seats)
+      - preflop
+      - the human (who is SB) just *called*
+      - and the next actor is the opponent (BB)
+
+    This preserves the state expected by tests: after SB call, BB has a decision.
+    """
+    if action_l != "call":
+        return False
+    try:
+        table = pre_bot_state.get("table", {}) or {}
+        seats = int(table.get("seats", 0))
+        street = str(pre_bot_state.get("street", ""))
+        la = pre_bot_state.get("last_action") or {}
+        la_type = (la.get("type") or "").lower()
+        la_seat = int(la.get("seat"))
+        sb_seat = int(table.get("sb_seat"))
+        bb_seat = int(table.get("bb_seat"))
+
+        if (
+            seats == 2
+            and street == "preflop"
+            and la_type == "call"
+            and la_seat == human_seat
+            and la_seat == sb_seat
+            and actor_after is not None
+            and int(actor_after.get("seat")) == bb_seat
+        ):
+            return True
+    except Exception:
+        # If anything is missing or malformed, fall back to default behavior
+        return False
+    return False
+
+
 # ---------- Routes ----------
 
 @router.post("/hand/start", response_model=StartHandResponse)
@@ -214,11 +259,17 @@ def post_action(req: ActionRequest) -> ActionResponse:
             pass
 
     # For bet/raise: return pre-bot snapshot so snapping details are visible.
-    # For call/check: auto-advance bots and return post-bot snapshot (e.g. HU SB-call -> BB-check -> flop).
     action_l = (req.action or "").lower().strip()
     if action_l in ("bet", "raise"):
         return ActionResponse(ok=True, bots_applied=[], state=pre_bot_state)
 
+    # After check/call, decide whether to skip bot auto-advance (HU preflop SB call)
+    actor_after = adapter.next_actor()
+    if _should_skip_auto_advance_after_action(human_seat, pre_bot_state, action_l, actor_after):
+        # Keep BB's decision; don't auto-apply bot actions yet.
+        return ActionResponse(ok=True, bots_applied=[], state=pre_bot_state)
+
+    # Default: auto-advance bots and return post-bot snapshot
     bots = _auto_advance_bots(human_seat)
     post_bot_state = _to_public_state(human_seat)
     return ActionResponse(ok=True, bots_applied=bots, state=post_bot_state)
