@@ -9,3 +9,7 @@ pytest>=8.2,<9
 
 # Engine
 pokerkit==0.6.3
+
+# Baseline bots
+PyPokerEngine>=1.0.0
+rlcard>=1.0.0

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
+from dotenv import load_dotenv; load_dotenv()
 
 # Routers
 from backend.api.session import router as session_router
