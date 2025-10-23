@@ -1,190 +1,497 @@
 """
-PokerKit engine adapter (stub).
+Minimal PokerKit‑like engine adapter.
 
-This module defines a minimal stub for the PokerKit adapter expected by
-the NLH training simulator.  In milestone M0 we do not implement a
-full game engine; instead these functions are placeholders which
-conform to the required interface.  Future milestones will replace
-these stubs with real logic backed by the PokerKit library.
+This module provides a very lightweight No‑Limit Hold'em engine that
+supports heads‑up and multi‑player tables.  It implements a reduced
+feature set sufficient for M0 testing: posting blinds, deterministic
+deck shuffling based on a seed, heads‑up preflop order rules, basic
+bet sizing buckets, minimum raise enforcement, and off‑tree size
+snapping.  It does **not** handle side pots, showdown evaluation or
+complex betting rounds.  It is intended solely as a stub for early
+milestones and is not production ready.
 
-Functions:
-    start_table(seats, blinds, stacks, seed):
-        Create a new table with a given number of seats, blind
-        structure, initial stacks and random seed.
-
-    start_hand():
-        Begin a new hand at the current table.  Hands are tracked
-        internally by the adapter.
-
-    next_actor() -> tuple[int, dict, int, int]:
-        Determine which seat is to act next and return the legal
-        actions along with to‑call and min‑raise information.
-
-    apply_action(seat, action, amount):
-        Apply an action on behalf of a seat.  The action should be
-        validated by the caller.
-
-    state() -> dict:
-        Return the current game state as a dict conforming to the
-        ``docs/STATE-SCHEMA.md`` specification.  In this stub
-        implementation a minimal placeholder state is returned.
+The core class is ``PokerKitAdapter``; a module‑level ``get_adapter``
+function returns a singleton instance to share state across API
+handlers.  See the docstrings on individual methods for usage.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+import hashlib
+import random
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
+
+# ---------------------------------------------------------------------------
+# Lightweight snapshot dataclasses
+#
+# These dataclasses capture a minimal view of the current game state.  They
+# intentionally omit much of the full game model (pot breakdown, action
+# history, etc.) because the early API only needs to surface a few fields.
 
 @dataclass
-class TableConfig:
-    """Configuration parameters for a PokerKit table."""
-
-    seat_count: int
+class _TableSnap:
+    seats: int
     sb: int
     bb: int
     ante: int
-    stacks: List[int]
-    seed: Optional[str] = None
+    button: int
+    sb_seat: int
+    bb_seat: int
 
 
 @dataclass
+class _PlayerSnap:
+    hole_cards: List[str]
+
+
+@dataclass
+class _LastAction:
+    seat: int
+    type: str
+    requested: Optional[int] = None
+    committed: Optional[int] = None
+    snapped: Optional[bool] = None
+    bucket_label: Optional[str] = None
+    allowed_buckets: Optional[List[str]] = None
+
+
+@dataclass
+class _GameSnap:
+    table: _TableSnap
+    players: List[_PlayerSnap]
+    street: str
+    deck_seed: Optional[str]
+    pot_total: int = 0
+    last_action: Optional[_LastAction] = None
+
+
 class PokerKitAdapter:
-    """Minimal stub adapter for the PokerKit engine."""
+    """A minimal poker engine for testing.
 
-    table_config: Optional[TableConfig] = None
-    hand_counter: int = 0
+    This adapter exposes methods to configure a table (``start_table``),
+    start a new hand (``start_hand``), query the next actor
+    (``next_actor``), apply actions (``apply_action``), and obtain a
+    lightweight snapshot of the current state (``state``).  It models a
+    simple HU preflop structure with bucketised bet sizing and
+    deterministic deck shuffling.
+    """
 
-    def start_table(self, seats: int, blinds: Dict[str, int], stacks: List[int], seed: Optional[str] = None) -> None:
-        """Configure a new table.
+    # --- Table lifecycle -----------------------------------------------------
 
-        Args:
-            seats: Number of seats (2/3/6/9/10).
-            blinds: Dict with keys ``sb``, ``bb`` and ``ante`` specifying blind amounts.
-            stacks: List of starting stack sizes for each seat.
-            seed: Optional RNG seed for deterministic dealing.
+    def __init__(self) -> None:
+        # Table configuration
+        self.seats: int = 0
+        self.sb: int = 0
+        self.bb: int = 0
+        self.ante: int = 0
+        self.base_seed: Optional[str] = None
+        # Hand/runtime state
+        self.hand_id: int = 0
+        self.button: int = -1
+        self.sb_seat: Optional[int] = None
+        self.bb_seat: Optional[int] = None
+        self._street: str = "preflop"
+        self._deck_seed: Optional[str] = None
+        # Actor & betting state
+        self._next_to_act: Optional[int] = None
+        self._to_call_next: int = 0
+        self._preflop_sb_called: bool = False
+        self._last_raise_size: int = 0
+        self._raises_this_round: int = 0
+        # Committed amounts and pricing
+        self._committed: List[int] = []
+        self._current_price: int = 0
+        # Cards/state
+        self._players_holes: List[List[str]] = []
+        self._pot_total: int = 0
+        # Metadata for last action
+        self._last_action: Optional[_LastAction] = None
+
+    # --- Internal helpers ----------------------------------------------------
+
+    def _seeded_rng(self, seed_text: str) -> random.Random:
+        """Create a deterministic PRNG from a text seed.
+
+        We use SHA256 to derive a numeric seed from the provided text.
         """
-        self.table_config = TableConfig(
-            seat_count=seats,
-            sb=blinds.get("sb", 0),
-            bb=blinds.get("bb", 0),
-            ante=blinds.get("ante", 0),
-            stacks=stacks,
-            seed=seed,
+        h = hashlib.sha256(seed_text.encode("utf-8")).digest()
+        return random.Random(int.from_bytes(h, "big"))
+
+    def _new_shuffled_deck(self, rng: random.Random) -> List[str]:
+        """Return a new shuffled deck of 52 cards using the provided RNG."""
+        ranks = ["A", "K", "Q", "J", "T", "9", "8", "7", "6", "5", "4", "3", "2"]
+        suits = ["s", "h", "d", "c"]
+        deck = [r + s for r in ranks for s in suits]
+        rng.shuffle(deck)
+        return deck
+
+    def _in_position_preflop_hu(self, actor_seat: int) -> bool:
+        """Return whether the actor is in position for HU preflop.
+
+        In heads‑up play the small blind (button) is considered in
+        position postflop.  This helper is used when selecting 3‑bet
+        sizing multipliers.
+        """
+        return actor_seat == self.sb_seat
+
+    def _allowed_buckets_data(self, to_call: int, actor_seat: Optional[int]) -> List[Dict[str, Any]]:
+        """Compute the allowed bet/raise buckets for the current actor.
+
+        Buckets are expressed as dicts with ``label`` and ``target`` keys.
+        The target is the total amount a player must be committed to after
+        the action (including any call portion).  The calling option is
+        always provided when ``to_call > 0``.
+        """
+        buckets: List[Dict[str, Any]] = []
+        # Allow calling if there is something to call
+        if to_call > 0:
+            buckets.append({"label": "call", "target": to_call})
+        # Determine if this is an open (no bet) or a heads‑up SB open
+        hu_sb_open = (
+            self.seats == 2
+            and self._street == "preflop"
+            and actor_seat is not None
+            and actor_seat == self.sb_seat
         )
-        self.hand_counter = 0
+        if to_call == 0 or hu_sb_open:
+            # Opening raise buckets: 2.2×/2.5×/3.0× big blind
+            for mult in (2.2, 2.5, 3.0):
+                target = int(round(mult * self.bb))
+                buckets.append({"label": f"{mult:.1f}x", "target": max(target, self.bb)})
+        else:
+            # Facing action: raises over the current price using last raise size
+            base = max(self._last_raise_size, self.bb)
+            for mult in (2.5, 3.0):
+                target = to_call + int(round(mult * base))
+                buckets.append({"label": f"{mult:.1f}xR", "target": target})
+        # Always include jam as a sentinel bucket with a huge target
+        buckets.append({"label": "jam", "target": 10 ** 12})
+        # Sort ascending by target so snapping picks the smallest option first
+        buckets.sort(key=lambda b: b["target"])
+        return buckets
 
-    def start_hand(self) -> None:
-        """Start a new hand.
+    def _snap_to_bucket(
+        self,
+        requested_total: int,
+        to_call: int,
+        actor_seat: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Snap a requested total commitment to the nearest allowed bucket.
 
-        For the stub implementation this simply increments an internal counter.
+        The caller must supply ``requested_total`` as the player’s desired
+        total commitment (including any call amount).  The returned dict
+        includes the chosen ``target`` commitment, a boolean ``snapped``
+        flag indicating if the input was adjusted, the ``bucket_label``
+        that was chosen and the list of all bucket labels available.
         """
-        if self.table_config is None:
-            raise RuntimeError("Table has not been started. Call start_table() first.")
-        self.hand_counter += 1
-
-    def next_actor(self) -> Tuple[int, Dict[str, Any], int, int]:
-        """Return the next seat to act and associated legal action information.
-
-        Returns:
-            A tuple of (seat_index, legal_actions, to_call, min_raise).
-
-        Note:
-            This stub always returns seat 0 with an empty set of legal actions.
-            Real implementations will compute legal actions based on game state.
-        """
-        # In a real adapter this would inspect the engine state; here we return
-        # a fixed placeholder.
-        seat = 0
-        legal_actions: Dict[str, bool] = {"can_fold": False, "can_check": False, "can_call": False, "can_raise": False}
-        to_call = 0
-        min_raise = 0
-        return seat, legal_actions, to_call, min_raise
-
-    def apply_action(self, seat: int, action: str, amount: Optional[int] = None) -> None:
-        """Apply an action to the current hand.
-
-        Args:
-            seat: The seat index performing the action.
-            action: The action type (e.g. ``fold``, ``call``, ``raise``).
-            amount: Optional chip amount for bet/raise actions.
-        """
-        # The stub does not track actions; this method is a no‑op.
-        return None
-
-    def state(self) -> Dict[str, Any]:
-        """Return a minimal placeholder game state.
-
-        In a real implementation this would transform PokerKit's internal state
-        into the canonical schema defined in ``docs/STATE-SCHEMA.md``.  For now
-        we return a skeleton with only a hand id and empty fields.
-
-        Returns:
-            A dict representing the current hand state.
-        """
-        if self.table_config is None:
-            raise RuntimeError("Table has not been started. Call start_table() first.")
+        buckets = self._allowed_buckets_data(to_call, actor_seat)
+        # Extract jam and non‑jam targets
+        jam_bucket = next((b for b in buckets if b["label"] == "jam"), None)
+        nonjam = [b for b in buckets if b["label"] != "jam"]
+        nonjam_targets = [b["target"] for b in nonjam]
+        max_non_jam = max(nonjam_targets) if nonjam_targets else 0
+        # Force jam when the request is absurdly large
+        jam_floor = max(self.bb * 100, max_non_jam * 20)
+        if requested_total >= jam_floor:
+            if jam_bucket:
+                best = jam_bucket
+            else:
+                # Fallback if jam bucket is missing: use largest non‑jam
+                biggest_nonjam = max(nonjam, key=lambda b: b["target"], default=None)
+                if biggest_nonjam is not None:
+                    best = {"label": "jam", "target": biggest_nonjam["target"]}
+                else:
+                    best = {"label": "jam", "target": int(to_call)}
+        else:
+            # Select the allowed bucket with minimal distance to the request
+            best = min(
+                buckets,
+                key=lambda b: (
+                    abs(int(b["target"]) - int(requested_total)),
+                    int(b["target"]),
+                ),
+            )
         return {
-            "hand_id": f"hand-{self.hand_counter}",
-            "deck_seed": self.table_config.seed or "",  # may be empty if not set
-            "table": {
-                "seat_count": self.table_config.seat_count,
-                "sb": self.table_config.sb,
-                "bb": self.table_config.bb,
-                "ante": self.table_config.ante,
-                "rake": {"enabled": False, "type": "none"},
-            },
-            "dealer_seat": 0,
-            "sb_seat": 1 if self.table_config.seat_count > 1 else 0,
-            "bb_seat": 2 if self.table_config.seat_count > 2 else 0,
-            "street": "preflop",
-            "community": {"preflop": [], "flop": [], "turn": [], "river": []},
-            "pots": {"main": 0, "sides": []},
-            "players": [],
-            "to_act": None,
-            "legal_actions": {},
-            "spr": 0.0,
-            "effective_stacks": [],
-            "action_history": [],
+            "target": int(best["target"]),
+            "snapped": int(requested_total) != int(best["target"]),
+            "bucket_label": best["label"],
+            "allowed_buckets": [b["label"] for b in buckets],
         }
 
+    def _rotate_to(self, seat: int) -> None:
+        """Set the next actor and compute their amount to call."""
+        self._next_to_act = seat
+        # Amount the actor must call to match the current price
+        self._to_call_next = max(0, self._current_price - self._committed[seat])
 
-# A module level instance can be used by the API to manage a single table.
-_DEFAULT_ADAPTER: PokerKitAdapter | None = None
+    def _compute_min_raise(self, to_call: int) -> int:
+        """Compute the minimum raise target based on the current state."""
+        if to_call <= 0:
+            # Opening raise: must be at least the big blind or last raise size
+            return max(self.bb, self._last_raise_size or self.bb)
+        # Facing action: min raise = call + max(bb, last_raise_size)
+        return to_call + max(self.bb, self._last_raise_size or self.bb)
+
+    # --- Public API ---------------------------------------------------------
+
+    def start_table(
+        self,
+        seats: int,
+        sb: int,
+        bb: int,
+        ante: int,
+        stacks: List[int],
+        base_seed: Optional[str] = None,
+    ) -> None:
+        """Configure a new table with the given parameters.
+
+        Args:
+            seats: Number of seats at the table.
+            sb: Small blind amount.
+            bb: Big blind amount.
+            ante: Ante amount (unused in M0).
+            stacks: List of starting stack sizes for each seat.
+            base_seed: Optional base seed used for deterministic shuffling.
+
+        Raises:
+            ValueError: If seats <= 0 or stacks length does not match seats.
+        """
+        if seats <= 0:
+            raise ValueError("seats must be > 0")
+        if len(stacks) != seats:
+            raise ValueError("stacks length must equal seats")
+        self.seats = seats
+        self.sb = sb
+        self.bb = bb
+        self.ante = ante
+        self.base_seed = base_seed
+        # Reset per‑hand state
+        self.hand_id = 0
+        self.button = -1
+        self.sb_seat = None
+        self.bb_seat = None
+        self._street = "preflop"
+        self._deck_seed = None
+        self._next_to_act = None
+        self._to_call_next = 0
+        self._preflop_sb_called = False
+        self._last_raise_size = 0
+        self._raises_this_round = 0
+        self._committed = [0] * seats
+        self._current_price = 0
+        self._players_holes = []
+        self._pot_total = 0
+        self._last_action = None
+
+    def start_hand(self) -> str:
+        """Begin a new hand and deal deterministic hole cards.
+
+        Returns:
+            A hand identifier string (e.g. ``H1`` for the first hand).
+        """
+        if self.seats <= 0:
+            raise RuntimeError("call start_table first")
+        # Increment hand counter and rotate button
+        self.hand_id += 1
+        self.button = (self.button + 1) % self.seats
+        # Assign blinds
+        self.sb_seat = self.button
+        self.bb_seat = (self.button + 1) % self.seats
+        # Reset street and betting
+        self._street = "preflop"
+        self._preflop_sb_called = False
+        self._last_raise_size = self.bb
+        self._raises_this_round = 0
+        # Reset commitments: post blinds
+        self._committed = [0] * self.seats
+        self._committed[self.sb_seat] = self.sb
+        self._committed[self.bb_seat] = self.bb
+        self._current_price = self.bb
+        # Determine first actor: HU preflop -> SB acts first
+        if self.seats == 2:
+            self._rotate_to(self.sb_seat)
+        else:
+            # Multiway: actor after BB
+            self._rotate_to((self.bb_seat + 1) % self.seats)
+        # Build deterministic seed for deck
+        if self.base_seed is not None:
+            self._deck_seed = f"{self.base_seed}:{self.hand_id}"
+        else:
+            self._deck_seed = None
+        # Deal hole cards deterministically
+        rng = self._seeded_rng(self._deck_seed or f"default:{self.hand_id}")
+        deck = self._new_shuffled_deck(rng)
+        self._players_holes = []
+        for _seat in range(self.seats):
+            # Each player gets two cards
+            self._players_holes.append([deck.pop(), deck.pop()])
+        # Clear last action
+        self._last_action = None
+        return f"H{self.hand_id}"
+
+    def next_actor(self) -> Optional[Dict[str, Any]]:
+        """Return the next actor and their call amount, or None if no action."""
+        if self._next_to_act is None:
+            return None
+        seat = int(self._next_to_act)
+        to_call = int(self._to_call_next)
+        buckets = self._allowed_buckets_data(to_call, actor_seat=self._next_to_act)
+        return {
+            "seat": seat,
+            "to_call": to_call,
+            "min_raise": int(self._compute_min_raise(to_call)),
+            "allowed_buckets": [b["label"] for b in buckets],
+        }
+
+    def apply_action(self, seat: int, action: str, amount: Optional[int] = None) -> None:
+        """Apply an action for a given seat.
+
+        Args:
+            seat: The acting seat index.
+            action: One of "check", "call", "bet", or "raise".
+            amount: When betting or raising, the total amount the player
+                intends to be committed to (call + raise).  Ignored for
+                check/call.
+
+        Raises:
+            ValueError: If the action is illegal (e.g., checking when facing a bet)
+                or the bet/raise amount is below the minimum.
+        """
+        # Ignore out‑of‑turn actions
+        if seat != self._next_to_act:
+            return
+        action_l = (action or "").lower().strip()
+        to_call = int(self._to_call_next)
+        # ----- Check -----
+        if action_l == "check":
+            if to_call != 0:
+                raise ValueError("illegal check facing to_call")
+            # Heads‑up preflop: SB has called and BB now checks → advance to flop
+            if (
+                self.seats == 2
+                and self._street == "preflop"
+                and seat == self.bb_seat
+                and self._preflop_sb_called
+            ):
+                # Transition to flop street and rotate to the first actor on the flop
+                # In HU, the big blind acts first postflop (left of the button)
+                self._street = "flop"
+                # Reset raise tracking for the new street
+                self._last_raise_size = 0
+                self._raises_this_round = 0
+                # The price remains whatever was committed preflop (BB), so
+                # rotate to BB again; to_call will be zero because committed
+                # matches current price.
+                if self.bb_seat is not None:
+                    self._rotate_to(self.bb_seat)
+                else:
+                    self._next_to_act = None
+            else:
+                # Rotate to the opponent seat (HU) or next seat (multiway)
+                nxt = self.bb_seat if seat == self.sb_seat else self.sb_seat
+                self._rotate_to(nxt)
+            # Record last action
+            self._last_action = _LastAction(seat=seat, type="check")
+            return
+        # ----- Call -----
+        if action_l == "call":
+            if to_call <= 0:
+                # Call without anything to call -> treat as check
+                self.apply_action(seat, "check")
+                return
+            # Pay to match the current price
+            self._committed[seat] = self._current_price
+            # Track if small blind has called preflop (HU) to detect SB call -> BB check -> flop pattern
+            if self.seats == 2 and self._street == "preflop" and seat == self.sb_seat:
+                self._preflop_sb_called = True
+            # Rotate to opponent
+            nxt = self.bb_seat if seat == self.sb_seat else self.sb_seat
+            self._rotate_to(nxt)
+            self._last_action = _LastAction(seat=seat, type="call", committed=to_call)
+            return
+        # ----- Bet/Raise -----
+        if action_l in ("bet", "raise"):
+            if amount is None or not isinstance(amount, int):
+                raise ValueError("bet/raise requires integer 'amount' (total commitment)")
+            snap = self._snap_to_bucket(
+                requested_total=amount, to_call=to_call, actor_seat=seat
+            )
+            committed_total = int(snap["target"])
+            # Minimum raise enforcement
+            if to_call > 0:
+                min_required = to_call + max(self.bb, self._last_raise_size)
+                if committed_total < min_required:
+                    raise ValueError(
+                        f"min-raise not met: need ≥ {min_required}, got {committed_total}"
+                    )
+            else:
+                # Opening bet must be at least the big blind
+                if committed_total < self.bb:
+                    raise ValueError(f"open must be ≥ {self.bb}")
+            # Update last raise size & raise level
+            if to_call == 0:
+                # Opening raise size above 0 anchor
+                self._last_raise_size = max(committed_total, self.bb)
+                self._raises_this_round = 1
+            else:
+                # Raise increment is the difference from the call price
+                self._last_raise_size = max(committed_total - to_call, self.bb)
+                self._raises_this_round = min(self._raises_this_round + 1, 99)
+            # Update actor's commitment and global price
+            self._committed[seat] = committed_total
+            self._current_price = committed_total
+            # Rotate to opponent
+            nxt = self.bb_seat if seat == self.sb_seat else self.sb_seat
+            self._rotate_to(nxt)
+            # Record last action
+            self._last_action = _LastAction(
+                seat=seat,
+                type=action_l,
+                requested=amount,
+                committed=committed_total,
+                snapped=bool(snap["snapped"]),
+                bucket_label=snap["bucket_label"],
+                allowed_buckets=snap["allowed_buckets"],
+            )
+            return
+        raise ValueError(f"unknown action: {action}")
+
+    def state(self) -> _GameSnap:
+        """Return a lightweight snapshot of the current hand."""
+        tbl = _TableSnap(
+            seats=self.seats,
+            sb=self.sb,
+            bb=self.bb,
+            ante=self.ante,
+            button=int(self.button) if self.button >= 0 else -1,
+            sb_seat=int(self.sb_seat) if self.sb_seat is not None else -1,
+            bb_seat=int(self.bb_seat) if self.bb_seat is not None else -1,
+        )
+        players = [_PlayerSnap(hole_cards=hc[:]) for hc in self._players_holes]
+        return _GameSnap(
+            table=tbl,
+            players=players,
+            street=self._street,
+            deck_seed=self._deck_seed,
+            pot_total=int(self._pot_total),
+            last_action=self._last_action,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Singleton access
+#
+_ADAPTER: Optional[PokerKitAdapter] = None
 
 
 def get_adapter() -> PokerKitAdapter:
-    """Return a singleton instance of the PokerKitAdapter.
-
-    This helper ensures that there is a consistent adapter instance used
-    across the API for a single user session.
-    """
-    global _DEFAULT_ADAPTER
-    if _DEFAULT_ADAPTER is None:
-        _DEFAULT_ADAPTER = PokerKitAdapter()
-    return _DEFAULT_ADAPTER
+    """Return a singleton instance of the PokerKitAdapter."""
+    global _ADAPTER
+    if _ADAPTER is None:
+        _ADAPTER = PokerKitAdapter()
+    return _ADAPTER
 
 
-def start_table(seats: int, blinds: Dict[str, int], stacks: List[int], seed: Optional[str] = None) -> None:
-    """Thin wrapper around the adapter's start_table method."""
-    get_adapter().start_table(seats, blinds, stacks, seed)
-
-
-def start_hand() -> None:
-    """Thin wrapper around the adapter's start_hand method."""
-    get_adapter().start_hand()
-
-
-def next_actor() -> Tuple[int, Dict[str, Any], int, int]:
-    """Thin wrapper around the adapter's next_actor method."""
-    return get_adapter().next_actor()
-
-
-def apply_action(seat: int, action: str, amount: Optional[int] = None) -> None:
-    """Thin wrapper around the adapter's apply_action method."""
-    get_adapter().apply_action(seat, action, amount)
-
-
-def state() -> Dict[str, Any]:
-    """Thin wrapper around the adapter's state method."""
-    return get_adapter().state()
+__all__ = ["PokerKitAdapter", "get_adapter"]

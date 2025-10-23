@@ -1,10 +1,9 @@
-"""
-Adapters package.
+"""Adapter package for the NLH trainer backend.
 
-This package collects thin wrappers around third‑party engines and evaluators.
-Each adapter exposes a stable interface defined in the docs for the
-NLH training simulator.  Engines and evaluators live outside of this
-repository and are accessed via these adapters.
+This package contains engine adapters and other integration layers.
+It currently exposes the ``engines`` subpackage, which provides
+access to the PokerKit adapter for running simulated games.  The
+package does not perform any work at import time.
 """
 
-__all__ = []
+__all__: list[str] = []

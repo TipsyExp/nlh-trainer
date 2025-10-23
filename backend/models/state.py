@@ -4,7 +4,7 @@ Pydantic models representing the training simulator state.
 The classes defined in this module encapsulate the mutable state of a
 poker hand as well as immutable configuration data such as table
 blind sizes and player metadata.  They are intentionally simple for
-milestone M0 but provide enough structure to serialise and
+the M0 milestone but provide enough structure to serialise and
 deserialise complete hand histories for logging and replay.
 """
 
