@@ -1,213 +1,108 @@
-# RUNBOOK — M0
+# Runbook
 
-## Prereqs
-- Python 3.10+
-- Node 18+
-- SQLite 3
+This runbook provides operational guidance for running the NLH
+Trainer backend, exporting hand histories and replaying them for
+analysis.  It is intended for developers and QA engineers who need
+to start the service, run automated matches and verify determinism.
 
-## Install
+## Starting the Service
 
-```bash
-# Backend
-python -m venv .venv && source .venv/bin/activate
-pip install -U pip wheel
-pip install fastapi uvicorn pydantic sqlite-utils
-pip install pokerkit               # primary engine
-# Optional QA evaluator:
-# pip install phevaluator
-
-# Frontend
-cd web && npm ci
-```
-
-Configure
-
-Environment (examples):
-```bash
-export ENGINE=PokerKit
-export EVALUATOR=PokerKit      # or HenryRLee
-export LOG_DB_PATH=./data/m0.sqlite
-# export RNG_SEED=123456
-```
-
-If you change ENGINE or EVALUATOR, reset the session.
-
-Run
+The backend is a FastAPI application.  To run it locally:
 
 ```bash
-# Backend
-make api
-# or
-uvicorn app.main:app --reload
-
-# Frontend
-make web
-# or
-npm run dev --prefix web
-
+# from the repository root
+python -m uvicorn nlh-trainer.backend.main:app --reload
 ```
 
-Open: http://localhost:3000
+Alternatively, if you prefer to run the module directly:
 
-Usage
-
-Go to Settings, choose seat count & assign Human/Bots, set blinds/stacks/seed.
-
-Click Apply & Play to open Table.
-
-Use action buttons; raise selections snap to fixed buckets.
-
-At hand end, click Next Hand.
-
-Export history from Settings (JSON/CSV), or inspect LOG_DB_PATH (SQLite).
-
-Headless Autoplay (QA)
 ```bash
-# 1,000 hands, PokerKit, logs to SQLite
-make autoplay N=1000 ENGINE=PokerKit
+python -m nlh-trainer.backend.main
 ```
 
-Troubleshooting
+The server listens on `localhost:8000` by default.  Use `GET /` or
+`GET /health` to verify that it is up.
 
-HU order looks off → ensure ENGINE=PokerKit; reset session.
+### Environment Variables
 
-Weird bet sizes → buckets enforced; off-tree sizes snap to nearest legal.
+The following environment variables influence the backend:
 
-Determinism → set RNG_SEED and reuse the same settings; replays should match bit-for-bit.
+| Variable                 | Description                                                                                     |
+|--------------------------|-------------------------------------------------------------------------------------------------|
+| `LOG_DB_PATH`           | Filesystem path to the SQLite database used for logging sessions, hands and actions.  Defaults to `nlh_trainer_logs.db` in the current working directory. |
+| `ENGINE`                | Name of the engine module to use (currently only `pokerkit` is supported).                       |
+| `EVALUATOR`             | Name of the hand evaluator to use (future use).                                                 |
+| `COACH_ENABLED`         | If set to `true`, enables the solver coach API (will remain `false` until M1 steps are complete). |
+| `COACH_CACHE_MAX_ROWS`  | Maximum number of entries in the solver cache (M1 Step 7).                                       |
+| `COACH_CACHE_TTL_DAYS`  | Time‑to‑live for solver cache entries (M1 Step 7).                                               |
+| `TEXASSOLVER_PATH`      | Absolute path to the TexasSolver binary (needed when `COACH_ENABLED=true`).                       |
 
-Distribution (.zip)
+Environment variables can be loaded from a `.env` file if
+`python‑dotenv` is installed.  See `backend/main.py` for details.
 
-Use make dist to produce a slim .zip with our source only (no vendored third-party).
+## Creating Sessions and Playing Hands
 
-CI publishes this zip per PR.
+Use the API endpoints described in [API‑CONTRACT.md](API-CONTRACT.md)
+to create a training session, start hands, query state and submit
+actions.  A typical workflow is:
 
-On a fresh machine, unzip, create venv, then pip install -r requirements.txt (installs PokerKit, optional phevaluator), and run as above.
+1. `POST /api/session` – configure the table (seats, blinds, stacks,
+   base_seed, human_seat).
+2. `POST /api/hand/start` – begin a new hand; bots will act until it
+   is your turn.
+3. `GET /api/hand/state` – inspect the public snapshot and the actor
+   information.
+4. `POST /api/hand/action` – submit your decision (`check`, `call`,
+   `bet`, `raise`, `fold`).
+5. Repeat steps 3–4 until the hand concludes (no actor returned).
+6. Export the hand if desired (see below).
 
----
+## Exporting and Replaying Hands
 
-## `STATE-SCHEMA.md` (updated)
-> Remove “PyPokerEngine” from engine field; keep schema stable. Based on your existing schema.
+Completed hands and sessions can be exported for analysis:
 
-```md
-# STATE SCHEMA (Authoritative)
+- `GET /api/export/hand/{hand_id}.json` – export a single hand as JSON.
+- `GET /api/export/hand/{hand_id}.csv` – export a single hand as CSV.
+- `GET /api/export/session/{session_id}.json` – export all completed
+  hands in a session as JSON.
+- `GET /api/export/session/{session_id}.csv` – export all completed
+  hands in a session as CSV.
 
-This schema is **engine-agnostic**. Engines must adapt their native state to this structure.
+The JSON export includes a serialised `GameState` and an `actions`
+array.  To replay a hand, you can deserialize the `state` using
+`nlh_trainer.backend.models.state.import_json`:
 
-## Top-Level
+```python
+from nlh_trainer.backend.models.state import import_json
+import json
 
-```json
-{
-  "game": { ... },
-  "players": [ ... ],
-  "history": [ ... ]
-}
+with open("hand_H1.json") as f:
+    data = json.load(f)
+game_state = import_json(json.dumps(data["state"]))
+# Now you can inspect game_state.players, game_state.action_history, etc.
 ```
 
-game (per hand)
-| Field             | Type          | Notes                                                                                             |
-| ----------------- | ------------- | ------------------------------------------------------------------------------------------------- |
-| hand_id          | string        | Unique hand id (uuid or monotonic).                                                               |
-| deck_seed        | string \| int | Seed used to shuffle this hand.                                                                   |
-| engine            | string        | `"PokerKit"` (for logs/debug).                                                                    |
-| evaluator         | string        | `"PokerKit"` \| `"HenryRLee"` (for logs/debug).                                                   |
-| table             | object        | See below.                                                                                        |
-| street            | string        | `"preflop" \| "flop" \| "turn" \| "river" \| "showdown"`.                                         |
-| community         | string[]     | Board cards (e.g., `["As","Kd",...]`).                                                            |
-| pot               | object        | `{"main": int, "sides": [{"amount": int, "eligible_seats": [int,...]}]}`                          |
-| to_act           | int \| null   | Seat index or null at showdown/end.                                                               |
-| legal_actions    | object        | `{ "can_fold": bool, "can_check": bool, "call_amount": int, "min_raise": int, "max_raise": int }` |
-| spr               | number        | Stack-to-pot ratio at street start.                                                               |
-| effective_matrix | number[][]  | Effective stacks per (i,j) pair, optional.                                                        |
+To reproduce the hand in the engine, ensure you create a session
+with the same base seed and apply each action in order via the API.
+Logging the RNG seed for each action guarantees that the shuffled
+deck and action sequence are deterministic.
 
-table
-| Field    | Type   | Notes                                                                      |
-| -------- | ------ | -------------------------------------------------------------------------- |
-| seats    | int    | 2/3/6/9/10                                                                 |
-| blinds   | object | `{ "sb": int, "bb": int, "ante": int }`                                    |
-| rake     | object | `{ "enabled": bool, "percent": number, "cap": int }` (rake disabled in M0) |
-| dealer   | int    | Dealer button seat index                                                   |
-| sb_seat | int    | Small blind seat index                                                     |
-| bb_seat | int    | Big blind seat index                                                       |
+## Automated Play
 
-players[] (length = table.seats; empty seats included)
-| Field             | Type              | Notes                                                                 |
-| ----------------- | ----------------- | --------------------------------------------------------------------- |
-| seat              | int               | 0..N-1                                                                |
-| kind              | string            | `"human" \| "bot" \| "empty"`                                         |
-| profile           | string \| null    | For bots: `"Nit" \| "TAG" \| "LAG" \| "Station"`                      |
-| alias             | string            | Display name                                                          |
-| stack             | int               | Chips not yet committed                                               |
-| committed_street | int               | Chips committed this street                                           |
-| committed_total  | int               | Chips committed this hand                                             |
-| hole              | string[] \| null | Visible only for human seat during hand; others at showdown per rules |
-| status            | string            | `"active" \| "folded" \| "all-in"`                                    |
-| position          | string            | `"BTN" \| "SB" \| "BB" \| "UTG" ...` (derived)                        |
+A convenience script will be provided in later milestones
+(`backend/scripts/autoplay.py`) to simulate matches against the bots or
+the coach.  For now you can drive the API from a test client (e.g.
+Python `requests` or `httpx`) to automate gameplay and collect
+training data.
 
-history[] (ordered decisions, incl. blinds)
-| Field           | Type         | Notes                                                                         |
-| --------------- | ------------ | ----------------------------------------------------------------------------- |
-| idx             | int          | 0..K-1                                                                        |
-| street          | string       | As above                                                                      |
-| actor           | int          | Seat index                                                                    |
-| action          | string       | `"fold" \| "check" \| "call" \| "bet" \| "raise" \| "all-in" \| "post-blind"` |
-| amount          | int\|null    | Chips for bet/raise/call; 0 or null for fold/check                            |
-| bucket          | string\|null | Sizing bucket tag (`"B33" \| "B66" \| "BPOT" \| "R2.5x" \| "R3x" \| "JAM"`)   |
-| to_call_after | int          | To-call for next player                                                       |
-| pot_after      | int          | Pot after this action                                                         |
-| time_ms        | int          | (Optional) decision time                                                      |
-| rng_trace      | string\|null | Seed/roll log for deterministic replay                                        |
-| snapped         | bool         | True if off-tree amount snapped to bucket                                     |
-| meta            | object       | Optional map (e.g., board class, flags)                                       |
+## Troubleshooting
 
-docs/BET-TREES.md (summary)
-
-Preflop: Opens 2.2/2.5/3×; 3-bet ~3× IP / ~3.5× OOP; 4-bet 2.2–2.5×; 5-bet+ jam.
-
-Postflop: Flop 33/66/100%; Turn 66/100%; River 66/100%; raises ~2.5–3×; jam.
-
-Rounding: bucket → chips; honor min-raise and stacks; mark snapped=true when applied.
-
-```
-
----
-
-## `TASKS-M0.md` (updated)
-> Remove PyPE; add Agent-Mode flow; keep one PR per ticket; CI zip artifact. Based on your existing list.
-
-```md
----
-# TASKS — M0
-
-Work ticket-by-ticket. Open **one PR per ticket** with passing CI, updated docs, and tests.
-
-**Agent Mode policy**
-- The agent may **proceed to the next ticket** automatically if the current ticket’s PR is open with **green CI** and no blocking review feedback.
-- Always **one PR per ticket** (do not batch multiple tickets into one PR).
-- Each PR must attach the **slim .zip** artifact (our source only; no vendored third-party).
-
----
-
-## TASK-01: Repository scaffolding & CI
-
-**Deliver**
-- Backend (FastAPI), Frontend (Next.js), `data/` (SQLite), `adapters/`, `docs/`
-- CI: lint, format, type-check, unit tests (Py + JS)
-- Make targets: `make api`, `make web`, `make test`, `make autoplay`, `make dist` (zip)
-
-**Accept**
-- CI green
-- Basic “health” endpoint up
-- Docs present: M0-SPEC, STATE-SCHEMA, RUNBOOK, QA-CHECKLIST skeleton
-- Zip artifact produced in CI
-
----
-
-## TASK-02: State schema plumbing
-
-**Deliver**
-- Pydantic models mirroring `docs/STATE-SCHEMA.md`
-- JSON export utility (per hand, per session)
-- SQLite schema: sessions, hands, actions (include `engine`, `evaluator`)
-
-**Accept**
-```
+- If the server fails to start, ensure that the `nlh-trainer`
+  directory is on your `PYTHONPATH` and that all dependencies from
+  `requirements.txt` are installed in your virtual environment.
+- When exporting hands, ensure that the hand has completed (the engine
+  must have reached a terminal street).  In M0 the stub engine only
+  transitions from preflop to the flop; showdown handling will be
+  added in later milestones.
+- If environment variables are not being read, create a `.env` file in
+  the repository root or set them before starting the server.
