@@ -1,104 +1,90 @@
-# State Schema (Authoritative)
+# State Schema
 
-## Types
-- **SeatIndex**: int (0..N-1)
-- **Chips**: int (smallest unit)
-- **Card**: string `"As" | "Td" | ...`
-- **Street**: `"preflop" | "flop" | "turn" | "river" | "showdown" | "complete"`
-- **ActionType**: `"post_blind" | "fold" | "check" | "call" | "bet" | "raise" | "all_in" | "deal"`
-- **SeatType**: `"human" | "bot" | "empty"`
-- **PlayerStatus**: `"active" | "folded" | "all_in"`
-- **Position**: `"BTN" | "SB" | "BB" | "UTG" | "UTG1" | "MP" | "HJ" | "CO"` (derived by seat count)
-- **BucketTag**: e.g., `"OPEN_2.5x"`, `"B33"`, `"B66"`, `"BPOT"`, `"R3x"`, `"R2.5x"`, `"JAM"`
+The NLH Trainer serialises complete hand histories into JSON objects
+for logging, export and replay.  This document describes the schema
+of the `GameState` and `ActionRecord` structures.  The schema is
+implemented using Pydantic models in `backend/models/state.py`.
 
-## Root (per hand)
-```json
-{
-  "hand_id": "string",
-  "deck_seed": "string",
-  "table": {
-    "seat_count": 6,
-    "sb": 50,
-    "bb": 100,
-    "ante": 0,
-    "rake": { "enabled": false, "type": "none" }
-  },
-  "dealer_seat": 2,
-  "sb_seat": 3,
-  "bb_seat": 4,
-  "street": "flop",
-  "community": {
-    "preflop": [],
-    "flop": ["Ah","7d","2c"],
-    "turn": ["Tc"],
-    "river": ["2h"]
-  },
-  "pots": {
-    "main": 4200,
-    "sides": [
-      { "size": 1200, "contestants": [1,4] }
-    ]
-  },
-  "players": [/* array of PlayerState */],
-  "to_act": 5,
-  "legal_actions": {
-    "can_fold": true,
-    "can_check": false,
-    "to_call": 500,
-    "min_raise_to": 1000,
-    "allowed_buckets": ["R3x","JAM"]
-  },
-  "spr": 5.2,
-  "effective_stacks": [
-    /* matrix or list:
-       { "a":0,"b":1,"effective": 8900 }, ... */
-  ],
-  "action_history": [/* array of ActionRecord */]
-}
-```
+## Enumerations
+
+- **SeatType** – describes the type of occupant at a seat:
+  - `human` – controlled by the trainee.
+  - `bot` – controlled by the built‑in bot.
+- **PlayerStatus** – indicates the current status of a player:
+  - `active` – still in the hand.
+  - `folded` – has folded.
+  - `all_in` – has committed all chips.
+- **Street** – enumerates the phases of a hand:
+  - `preflop`, `flop`, `turn`, `river`, `showdown`, `complete`.
+- **ActionType** – enumerates supported actions:
+  - `check`, `call`, `bet`, `raise`, `fold`, `post_blind`, `all_in`, `deal`.
+  - In the Pydantic model the `raise` action is named `raise_` to avoid
+    clashing with the Python keyword, but the JSON representation uses
+    `"raise"`.
+
+## GameState
+
+A `GameState` captures the final public state of a hand.
+
+| Field          | Type                               | Description                                                 |
+|----------------|------------------------------------|-------------------------------------------------------------|
+| `hand_id`      | `string`                           | Unique identifier (e.g. `H1`, `H2`, …).                     |
+| `deck_seed`    | `string?`                          | Seed used for deterministic shuffling (may be `null`).      |
+| `table`        | [`TableState`](#tablestate)        | Static table configuration.                                 |
+| `dealer_seat`  | `int`                              | Seat index of the dealer button for the hand.               |
+| `sb_seat`      | `int`                              | Seat index posting the small blind.                         |
+| `bb_seat`      | `int`                              | Seat index posting the big blind.                           |
+| `street`       | `Street`                           | Final street reached (currently always `preflop` or `flop`).|
+| `players`      | `[PlayerState]`                    | List of players and their metadata.                         |
+| `action_history` | `[ActionRecord]`                 | Sequence of actions performed during the hand.              |
+
+### TableState
+
+| Field       | Type | Description                    |
+|-------------|------|--------------------------------|
+| `seat_count`| `int`| Number of seats at the table.  |
+| `sb`        | `int`| Small blind amount.            |
+| `bb`        | `int`| Big blind amount.              |
+| `ante`      | `int`| Ante amount (unused in M0).     |
 
 ### PlayerState
-```json
-{
-  "seat": 4,
-  "type": "bot",
-  "alias": "LAG_4",
-  "stack": 9800,
-  "stack_bb": 98.0,
-  "committed_street": 500,
-  "committed_total": 1200,
-  "status": "active",
-  "position": "CO",
-  "hole_cards": ["9s","9c"] // null for opponents until showdown
-}
-```
 
-### ActionRecord
-```json
-{
-  "idx": 7,
-  "street": "flop",
-  "actor_seat": 4,
-  "type": "bet",
-  "amount": 500,
-  "bucket": "B33",
-  "to_call_after": 500,
-  "pot_after": 1800,
-  "time_ms": 42,
-  "rng_seed": "m0:hand123:act7"
-}
-```
+| Field     | Type       | Description                                   |
+|-----------|------------|-----------------------------------------------|
+| `seat`    | `int`      | Seat index of the player.                      |
+| `type`    | `SeatType` | Whether the player is `human` or `bot`.        |
+| `alias`   | `string`   | Display name (e.g. “Hero”, “Bot1”).            |
+| `stack`   | `int`      | Stack size at the start of the hand.           |
+| `status`  | `PlayerStatus` | Current status (`active`, `folded`, `all_in`). |
 
----
+## ActionRecord
 
-## docs/BET-TREES.md
+Each entry in `action_history` is an `ActionRecord` describing a single
+decision in the hand.
 
-```md
-# Bet-Size Trees (Locked in M0)
+| Field          | Type            | Description                                                      |
+|----------------|-----------------|------------------------------------------------------------------|
+| `idx`          | `int`           | Zero‑based index of the action within the hand.                  |
+| `street`       | `Street`        | Street on which the action occurred.                            |
+| `actor_seat`   | `int`           | Seat index of the acting player.                                |
+| `type`         | `ActionType`    | Type of action (e.g. `check`, `call`, `raise`).                 |
+| `amount`       | `int?`          | Total commitment after the action (for bet/raise).               |
+| `bucket`       | `string?`       | Label of the bet bucket used (e.g. `"2.5x"`, `"2.5xR"`).       |
+| `to_call_after`| `int?`          | Amount to call for the next player after this action.            |
+| `pot_after`    | `int?`          | Total pot size after the action.                                 |
+| `time_ms`      | `int?`          | Elapsed time for the decision (unused in M0).                    |
+| `rng_seed`     | `string?`       | RNG seed associated with the action for determinism.             |
+| `snapped`      | `bool?`         | Whether the amount was snapped to a bucket.                      |
+| `meta`         | `object?`       | Additional metadata (e.g. `{"allowed_buckets": ["call", "2.2x"]}`). |
 
-## Preflop
-- **Opens** (per position): choose one baseline per position from { **2.2×**, **2.5×**, **3×** }.
-- **3-bets**: ~**3×** vs open when IP; ~**3.5×** when OOP.
-- **4-bets**: **2.2–2.5×** of 3-bet.
-- **5-bets+**: **jam** unless a fixed % bucket is explicitly configured (optional; default jam).
-```
+## Serialisation Helpers
+
+The `backend/models/state.py` module exposes two functions:
+
+- **`export_json(GameState) -> str`** – Serialises a `GameState`
+  instance to a JSON string suitable for export.
+- **`import_json(str) -> GameState`** – Deserialises a JSON string
+  back into a `GameState` object.
+
+These helpers are used by the export endpoints and by internal tests
+to verify round‑trip determinism.
