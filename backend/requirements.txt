@@ -1,15 +1,15 @@
-# Backend runtime + dev deps (compatible with Python 3.12/3.13)
+# Backend runtime + test deps (Python 3.12/3.13)
+
+# Runtime
 fastapi>=0.110,<1
 uvicorn[standard]>=0.24,<1
-pydantic>=2.8.0,<3
+pydantic>=2.8,<3
 httpx>=0.25,<1
+pokerkit==0.6.3
+rlcard==1.2.0  # required for bots/autoplay (M1)
+
+# Optional env loader (used in main; guard import in code)
+python-dotenv>=1.0,<2
 
 # Tests
 pytest>=8.2,<9
-
-# Engine
-pokerkit==0.6.3
-
-# Baseline bots
-PyPokerEngine>=1.0.0
-rlcard>=1.0.0
