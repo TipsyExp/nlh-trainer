@@ -1,9 +1,9 @@
 """Session API for the NLH trainer.
 
 This module defines the HTTP endpoints responsible for creating or
-resetting a training session.  A session encapsulates a table
+resetting a training session. A session encapsulates a table
 configuration (number of seats, blinds, stacks) and the index of the
-human player.  When a new session is created the logger is also
+human player. When a new session is created the logger is also
 initialised so that hands and actions are grouped under a single
 session identifier in the database.
 """
@@ -22,7 +22,7 @@ from backend.logger import get_logger
 router = APIRouter(tags=["session"])
 
 
-# ---------- In‑memory session state ----------
+# ---------- In-memory session state ----------
 
 @dataclass
 class SessionState:
@@ -69,6 +69,7 @@ class SessionRequest(BaseModel):
 class SessionResponse(BaseModel):
     ok: bool
     detail: str
+    session_id: int
 
 
 # ---------- Routes ----------
@@ -78,8 +79,8 @@ def create_or_reset_session(req: SessionRequest) -> SessionResponse:
     """Create a new session or reset the current one.
 
     This endpoint initialises the poker engine with the supplied table
-    configuration and records a new session in the logger.  The returned
-    response indicates whether the operation succeeded.
+    configuration and records a new session in the logger. The returned
+    response includes the new session_id.
     """
     global _STATE
     try:
@@ -103,4 +104,4 @@ def create_or_reset_session(req: SessionRequest) -> SessionResponse:
         human_seat=req.human_seat,
         logger_session_id=session_id,
     )
-    return SessionResponse(ok=True, detail="session created/reset")
+    return SessionResponse(ok=True, detail="session created/reset", session_id=session_id)
