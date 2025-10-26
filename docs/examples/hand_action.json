@@ -1,0 +1,54 @@
+{
+  "bots_applied": [
+    {
+      "action": "check",
+      "amount": null,
+      "seat": 1
+    },
+    {
+      "action": "check",
+      "amount": null,
+      "seat": 1
+    }
+  ],
+  "ok": true,
+  "state": {
+    "deck_seed": "DOCS-EXAMPLE-SEED-1:1",
+    "last_action": {
+      "allowed_buckets": null,
+      "bucket_label": null,
+      "committed": null,
+      "requested": null,
+      "seat": 1,
+      "snapped": null,
+      "type": "check"
+    },
+    "players": [
+      {
+        "hole_cards": [
+          "5s",
+          "4s"
+        ],
+        "seat": 0
+      },
+      {
+        "hole_cards": [
+          "XX",
+          "XX"
+        ],
+        "seat": 1
+      }
+    ],
+    "pot_total": 0,
+    "street": "flop",
+    "table": {
+      "ante": 0,
+      "bb": 100,
+      "bb_seat": 1,
+      "button": 0,
+      "sb": 50,
+      "sb_seat": 0,
+      "seats": 2
+    }
+  }
+}
