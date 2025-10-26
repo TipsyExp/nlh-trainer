@@ -1,0 +1,45 @@
+{
+  "actor": {
+    "allowed_buckets": [
+      "call",
+      "2.2x",
+      "2.5x",
+      "3.0x",
+      "jam"
+    ],
+    "min_raise": 150,
+    "seat": 0,
+    "to_call": 50
+  },
+  "state": {
+    "deck_seed": "DOCS-EXAMPLE-SEED-1:1",
+    "last_action": null,
+    "players": [
+      {
+        "hole_cards": [
+          "5s",
+          "4s"
+        ],
+        "seat": 0
+      },
+      {
+        "hole_cards": [
+          "XX",
+          "XX"
+        ],
+        "seat": 1
+      }
+    ],
+    "pot_total": 0,
+    "street": "preflop",
+    "table": {
+      "ante": 0,
+      "bb": 100,
+      "bb_seat": 1,
+      "button": 0,
+      "sb": 50,
+      "sb_seat": 0,
+      "seats": 2
+    }
+  }
+}
