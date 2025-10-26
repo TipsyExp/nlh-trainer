@@ -1,108 +1,86 @@
 # Runbook
 
-This runbook provides operational guidance for running the NLH
-Trainer backend, exporting hand histories and replaying them for
-analysis.  It is intended for developers and QA engineers who need
-to start the service, run automated matches and verify determinism.
+This runbook provides a concise guide for setting up and operating the NLH Trainer backend as of milestone M1.  It covers local installation, starting the server, exporting hands, and replaying exported data to verify determinism.
 
-## Starting the Service
+## Local Setup
 
-The backend is a FastAPI application.  To run it locally:
+1. **Clone the repository** and navigate to its root.
+2. **Install dependencies** using Python 3.12 or newer:
+
+   ```bash
+   python -m pip install -r requirements.txt
+   ```
+
+   The `requirements.txt` in the project root includes both backend and frontend dependencies.  Do not remove `rlcard`; it is required for the default engine.
+
+3. **Run the backend**.  The application uses FastAPI and can be served with Uvicorn:
+
+   ```bash
+   uvicorn backend.main:app --reload
+   ```
+
+   The API will be available at `http://localhost:8000/api` by default.
+
+## Export & Replay Workflow
+
+One of the acceptance tests for M1 verifies that exporting a hand and replaying it with the same seed produces an identical canonical state.  The steps below describe how to perform this process manually.
+
+### 1. Start a Session
+
+POST to `/api/session` with a fixed `base_seed` to ensure determinism:
 
 ```bash
-# from the repository root
-python -m uvicorn nlh-trainer.backend.main:app --reload
+curl -X POST "http://localhost:8000/api/session?base_seed=DOCS-EXAMPLES"
 ```
 
-Alternatively, if you prefer to run the module directly:
+The response will contain a `session_id` (e.g. `10`).
+
+### 2. Start a Hand
+
+POST to `/api/hand/start` with the session ID:
 
 ```bash
-python -m nlh-trainer.backend.main
+curl -X POST "http://localhost:8000/api/hand/start?session_id=10"
 ```
 
-The server listens on `localhost:8000` by default.  Use `GET /` or
-`GET /health` to verify that it is up.
+This returns a `hand_id` (e.g. `H1`).
 
-### Environment Variables
+### 3. Take a Deterministic Action
 
-The following environment variables influence the backend:
+Query the current state via `GET /api/hand/state?hand_id=H1` to see allowed buckets.  For the first action, choose a fixed rule (e.g. **always call** if there is an amount to call, otherwise **check**).  Submit the action:
 
-| Variable                 | Description                                                                                     |
-|--------------------------|-------------------------------------------------------------------------------------------------|
-| `LOG_DB_PATH`           | Filesystem path to the SQLite database used for logging sessions, hands and actions.  Defaults to `nlh_trainer_logs.db` in the current working directory. |
-| `ENGINE`                | Name of the engine module to use (currently only `pokerkit` is supported).                       |
-| `EVALUATOR`             | Name of the hand evaluator to use (future use).                                                 |
-| `COACH_ENABLED`         | If set to `true`, enables the solver coach API (will remain `false` until M1 steps are complete). |
-| `COACH_CACHE_MAX_ROWS`  | Maximum number of entries in the solver cache (M1 Step 7).                                       |
-| `COACH_CACHE_TTL_DAYS`  | Time‑to‑live for solver cache entries (M1 Step 7).                                               |
-| `TEXASSOLVER_PATH`      | Absolute path to the TexasSolver binary (needed when `COACH_ENABLED=true`).                       |
-
-Environment variables can be loaded from a `.env` file if
-`python‑dotenv` is installed.  See `backend/main.py` for details.
-
-## Creating Sessions and Playing Hands
-
-Use the API endpoints described in [API‑CONTRACT.md](API-CONTRACT.md)
-to create a training session, start hands, query state and submit
-actions.  A typical workflow is:
-
-1. `POST /api/session` – configure the table (seats, blinds, stacks,
-   base_seed, human_seat).
-2. `POST /api/hand/start` – begin a new hand; bots will act until it
-   is your turn.
-3. `GET /api/hand/state` – inspect the public snapshot and the actor
-   information.
-4. `POST /api/hand/action` – submit your decision (`check`, `call`,
-   `bet`, `raise`, `fold`).
-5. Repeat steps 3–4 until the hand concludes (no actor returned).
-6. Export the hand if desired (see below).
-
-## Exporting and Replaying Hands
-
-Completed hands and sessions can be exported for analysis:
-
-- `GET /api/export/hand/{hand_id}.json` – export a single hand as JSON.
-- `GET /api/export/hand/{hand_id}.csv` – export a single hand as CSV.
-- `GET /api/export/session/{session_id}.json` – export all completed
-  hands in a session as JSON.
-- `GET /api/export/session/{session_id}.csv` – export all completed
-  hands in a session as CSV.
-
-The JSON export includes a serialised `GameState` and an `actions`
-array.  To replay a hand, you can deserialize the `state` using
-`nlh_trainer.backend.models.state.import_json`:
-
-```python
-from nlh_trainer.backend.models.state import import_json
-import json
-
-with open("hand_H1.json") as f:
-    data = json.load(f)
-game_state = import_json(json.dumps(data["state"]))
-# Now you can inspect game_state.players, game_state.action_history, etc.
+```bash
+curl -X POST "http://localhost:8000/api/hand/action?hand_id=H1" \
+  -H "Content-Type: application/json" \
+  -d '{"action": "check"}'
 ```
 
-To reproduce the hand in the engine, ensure you create a session
-with the same base seed and apply each action in order via the API.
-Logging the RNG seed for each action guarantees that the shuffled
-deck and action sequence are deterministic.
+Bots will respond automatically.  Repeat calling and checking until the hand completes.
 
-## Automated Play
+### 4. Export the Hand
 
-A convenience script will be provided in later milestones
-(`backend/scripts/autoplay.py`) to simulate matches against the bots or
-the coach.  For now you can drive the API from a test client (e.g.
-Python `requests` or `httpx`) to automate gameplay and collect
-training data.
+After the hand concludes (street transitions to `showdown`), export it:
+
+```bash
+curl "http://localhost:8000/api/export/hand/H1.json" -o hand.json
+curl "http://localhost:8000/api/export/hand/H1.csv" -o hand.csv
+```
+
+The JSON file contains the `actions` array and final `state`; the CSV contains one row per action.  The CSV header order is stable: `hand_id,idx,street,actor_seat,action,amount,bucket,to_call_after,pot_after,time_ms,rng_seed,snapped,meta,engine,evaluator,created_at`.
+
+### 5. Replay and Verify
+
+To verify determinism:
+
+1. Start a **new session** with the **same `base_seed`** (`DOCS-EXAMPLES`).  Start a new hand and apply the **same first action rule** (e.g. always check pre‑flop).
+2. Let the hand run to completion.  Export this second hand.
+3. Compare canonical subsets of the two states (e.g. deck order, final chip stacks, action history types and sizes).  They should match exactly.  The test `backend/tests/test_export_roundtrip.py` automates this comparison.
+
+## CSV Usage
+
+Exported CSV files are convenient for statistical analysis and machine learning pipelines.  Each row represents one decision in the hand or session.  The `snapped` column is `0` for unsnapped actions and `1` when a player’s requested amount was adjusted to the nearest bucket.  Timestamps can be parsed as UTC ISO‑8601 strings.
 
 ## Troubleshooting
 
-- If the server fails to start, ensure that the `nlh-trainer`
-  directory is on your `PYTHONPATH` and that all dependencies from
-  `requirements.txt` are installed in your virtual environment.
-- When exporting hands, ensure that the hand has completed (the engine
-  must have reached a terminal street).  In M0 the stub engine only
-  transitions from preflop to the flop; showdown handling will be
-  added in later milestones.
-- If environment variables are not being read, create a `.env` file in
-  the repository root or set them before starting the server.
+* If you encounter a `501` response, ensure that `COACH_ENABLED` is not set to `true` without a solver binary present.  The export endpoints function regardless of coach configuration.
+* The seed must remain the same across exports to guarantee deterministic replay.  Changing the seed will alter card order and bot decisions.
