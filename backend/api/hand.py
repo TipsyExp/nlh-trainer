@@ -1,15 +1,16 @@
 """Hand API for the NLH trainer.
 
 This module exposes endpoints to start a new hand, query the current
-state and apply actions.  It wraps the PokerKit adapter and
-incorporates per‑decision logging via the shared SQLite logger.  Each
+state and apply actions. It wraps the PokerKit adapter and
+incorporates per-decision logging via the shared SQLite logger. Each
 action taken by the human or bots is recorded in the ``actions`` table
-with an incrementing index.  When a hand completes the full
-``GameState`` is serialised and stored in the logger.
+with an incrementing index. A snapshot ``GameState`` is upserted into
+the ``hands`` table after every action so that exports work mid-hand.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
@@ -32,10 +33,9 @@ from backend.models import (
 # NOTE: no prefix here; app/main.py includes this router with prefix="/api".
 router = APIRouter(tags=["hand"])
 
+# ---------- Per-hand indexing ----------
 
-# ---------- Per‑hand indexing ----------
-
-# Maintain a mapping from hand_id to the next action index.  This allows
+# Maintain a mapping from hand_id to the next action index. This allows
 # actions to be logged in order even when bots act between human
 # decisions.
 _ACTION_IDX: Dict[str, int] = {}
@@ -66,15 +66,24 @@ class StateResponse(BaseModel):
 
 # ---------- Helpers ----------
 
+def _hand_id_str(h: Any) -> str:
+    """Coerce adapter hand id to string form (e.g., 1 -> 'H1')."""
+    if isinstance(h, str):
+        return h
+    if isinstance(h, int):
+        return f"H{h}"
+    return str(h)
+
+
 def _la_to_dict(la: Any) -> Optional[Dict[str, Any]]:
     """
-    Adapter's last_action may be a dataclass or dict.  Normalize to dict or None.
+    Adapter's last_action may be a dataclass or dict. Normalize to dict or None.
     """
     if la is None:
         return None
     if isinstance(la, dict):
         return la
-    # Dataclass‑like: try to read expected fields
+    # Dataclass-like: try to read expected fields
     out: Dict[str, Any] = {}
     for k in (
         "seat",
@@ -92,8 +101,7 @@ def _la_to_dict(la: Any) -> Optional[Dict[str, Any]]:
 
 def _to_public_state(human_seat: int) -> Dict[str, Any]:
     """
-    Convert adapter.state() dataclasses to a JSON‑friendly dict snapshot.
-
+    Convert adapter.state() dataclasses to a JSON-friendly dict snapshot.
     Hide opponents' hole cards (mask to 'XX').
     """
     adapter = get_adapter()
@@ -121,8 +129,7 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
         "players": players,
         "street": s.street,
         "deck_seed": s.deck_seed,
-        # Surface the pot
-        "pot_total": int(getattr(s, "pot_total", 0)),
+        "pot_total": int(getattr(s, "pot_total", 0)),  # surface the pot
         "last_action": _la_to_dict(getattr(s, "last_action", None)),
     }
     return resp
@@ -143,61 +150,82 @@ def _pick_bot_action(actor: Dict[str, Any]) -> Tuple[str, Optional[int]]:
 def _log_action(hand_id: str, seat: int, action: str, amount: Optional[int]) -> None:
     """Internal helper to record an action to the logger.
 
-    This function updates the per‑hand action index and writes a row to
-    the actions table.  It extracts additional metadata from the adapter's
-    last_action snapshot to populate fields such as bucket, snapped and
-    allowed buckets.
+    Updates the per-hand action index and writes a row to the actions table.
+    Extracts metadata from the adapter snapshot to populate bucket/snapped/etc.
+    Also computes pot_after and to_call_after based on the *post-action* state.
     """
+    hand_id = _hand_id_str(hand_id)
+
     logger = get_logger()
     adapter = get_adapter()
     # Determine index; initialise if necessary
     idx = _ACTION_IDX.get(hand_id, 0)
-    # Grab current street and pot
+
+    # Grab a post-action snapshot of state (caller must call this AFTER apply_action)
     snap = adapter.state()
     street = snap.street
+
     # Extract last action metadata if available
-    la = snap.last_action
+    la = getattr(snap, "last_action", None)
     bucket_label: Optional[str] = None
-    snapped: Optional[int] = None
+    snapped_val: Optional[int] = None
     meta_json: Optional[str] = None
     if la is not None:
-        # 'bucket_label' may not exist on check/call actions
         bucket_label = getattr(la, "bucket_label", None)
         snap_flag = getattr(la, "snapped", None)
         if snap_flag is not None:
-            snapped = 1 if snap_flag else 0
+            snapped_val = 1 if snap_flag else 0
         allowed = getattr(la, "allowed_buckets", None)
         if allowed is not None:
-            # store as JSON string
             import json as _json
             meta_json = _json.dumps({"allowed_buckets": allowed})
-    # Persist the action
+
+    # Post-action pot
+    pot_after = int(getattr(snap, "pot_total", 0)) if getattr(snap, "pot_total", None) is not None else None
+
+    # Post-action to_call (for the *next* actor, if any)
+    to_call_after: Optional[int] = None
+    next_actor = adapter.next_actor()
+    if next_actor:
+        try:
+            to_call_after = int(next_actor.get("to_call", 0))
+        except Exception:
+            to_call_after = None
+    else:
+        # Hand likely complete; nothing to call
+        to_call_after = 0
+
+    # Persist the action with full provenance
     logger.log_action(
         hand_id=hand_id,
         idx=idx,
         street=street,
         actor_seat=seat,
-        type=action.lower(),
+        type=(action or "").lower().strip(),
         amount=amount,
         bucket=bucket_label,
-        to_call_after=None,
-        pot_after=getattr(snap, "pot_total", None),
-        time_ms=None,
+        to_call_after=to_call_after,
+        pot_after=pot_after,
+        time_ms=None,  # could be added later if timing is recorded
         rng_seed=snap.deck_seed,
-        snapped=snapped,
+        snapped=snapped_val,
         meta=meta_json,
+        engine="PokerKit",
+        evaluator="PokerKit",
     )
+
     # Increment the index for next action
     _ACTION_IDX[hand_id] = idx + 1
 
 
 def _auto_advance_bots(hand_id: str, human_seat: int) -> List[Dict[str, Any]]:
     """
-    Loop while it's a bot's turn.  Returns a list of bot actions taken.
-
+    Loop while it's a bot's turn. Returns a list of bot actions taken.
     Each bot action is applied to the engine and recorded via the logger.
     """
     adapter = get_adapter()
+    hand_id = _hand_id_str(hand_id)
+
     actions_taken: List[Dict[str, Any]] = []
     # safety to avoid infinite loops
     for _ in range(100):
@@ -208,107 +236,33 @@ def _auto_advance_bots(hand_id: str, human_seat: int) -> List[Dict[str, Any]]:
             break
         action, amount = _pick_bot_action(actor)
         adapter.apply_action(actor["seat"], action, amount)
-        # Log the bot action
+        # Log the bot action (post-apply)
         _log_action(hand_id, actor["seat"], action, amount)
         actions_taken.append({"seat": actor["seat"], "action": action, "amount": amount})
     return actions_taken
 
 
-# ---------- Routes ----------
+def _persist_snapshot(hand_id: str) -> None:
+    """Build a GameState from the adapter snapshot and persist to ``hands``.
 
-@router.post("/hand/start", response_model=StartHandResponse)
-def start_hand() -> StartHandResponse:
-    """Begin a new hand and auto‑advance bots until the first human decision."""
-    adapter = get_adapter()
-    try:
-        hand_id = adapter.start_hand()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"start_hand failed: {e}") from e
-    # Reset index for this hand
-    _ACTION_IDX[hand_id] = 0
-    # Auto‑advance bots immediately to first human decision (if any)
-    human_seat = get_session_state().human_seat
-    _auto_advance_bots(hand_id, human_seat)
-    return StartHandResponse(hand_id=hand_id)
-
-
-@router.get("/hand/state", response_model=StateResponse)
-def get_state() -> StateResponse:
-    adapter = get_adapter()
-    human_seat = get_session_state().human_seat
-    snap = _to_public_state(human_seat)
-    actor = adapter.next_actor()
-    return StateResponse(state=snap, actor=actor)
-
-
-@router.post("/hand/action", response_model=ActionResponse)  # <-- FIXED PATH
-def post_action(req: ActionRequest) -> ActionResponse:
-    """Apply a human action and auto‑advance bots.
-
-    The human's action is applied to the engine, logged via the logger
-    and then bots are auto‑advanced.  If the hand completes as a result
-    of the action sequence the final GameState is persisted.
+    We INSERT on first write, and UPDATE thereafter to avoid REPLACE's
+    delete-then-insert behavior (which breaks FKs mid-hand).
     """
+    hand_id = _hand_id_str(hand_id)
+
     adapter = get_adapter()
-    human_seat = get_session_state().human_seat
-
-    # Only the configured human seat may act
-    if req.seat != human_seat:
-        raise HTTPException(status_code=400, detail="Only the configured human seat may post actions.")
-    # Determine current hand id from the adapter (prefixed 'H')
-    hand_id = getattr(adapter, "hand_id", None)
-    # In the PokerKitAdapter the public identifier includes the prefix; if
-    # unavailable, fallback to the last started id from our index map
-    if not hand_id:
-        if not _ACTION_IDX:
-            raise HTTPException(status_code=400, detail="no hand in progress")
-        # use most recent key
-        hand_id = next(reversed(_ACTION_IDX.keys()))
-    # Apply the human action
-    try:
-        adapter.apply_action(req.seat, req.action, req.amount)
-    except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve)) from ve
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"apply_action failed: {e}") from e
-    # Log the human action
-    _log_action(hand_id, req.seat, req.action, req.amount)
-    # Snapshot immediately after the human action
-    pre_bot_state = _to_public_state(human_seat)
-    # For bet/raise: return pre‑bot snapshot so snapping details are visible.
-    action_l = (req.action or "").lower().strip()
-    if action_l in ("bet", "raise"):
-        return ActionResponse(ok=True, bots_applied=[], state=pre_bot_state)
-    # Auto‑advance bots and return post‑bot snapshot (e.g. HU SB‑call -> BB‑check -> flop).
-    bots = _auto_advance_bots(hand_id, human_seat)
-    post_bot_state = _to_public_state(human_seat)
-    # If no further actions are available (hand complete) persist the GameState
-    if adapter.next_actor() is None:
-        _persist_hand(hand_id)
-    return ActionResponse(ok=True, bots_applied=bots, state=post_bot_state)
-
-
-def _persist_hand(hand_id: str) -> None:
-    """Build a GameState from the adapter snapshot and log it via SQLite.
-
-    This helper reconstructs a minimal :class:`GameState` instance from
-    the current engine snapshot and the logged action history.  It
-    populates only the fields required by the state schema and uses
-    sensible defaults for missing metadata (e.g., aliases and stacks).
-    The resulting state is persisted along with the session identifier
-    associated with the current session.
-    """
-    # Build GameState
-    adapter = get_adapter()
+    logger = get_logger()
     s = adapter.state()
-    # Table configuration
     tbl = s.table
+
+    # Build TableState
     table_state = TableState(
         seat_count=int(tbl.seats),
         sb=int(tbl.sb),
         bb=int(tbl.bb),
         ante=int(tbl.ante),
     )
+
     # Players: assign human/bot types based on session's human seat
     ss = get_session_state()
     players: List[PlayerState] = []
@@ -325,8 +279,8 @@ def _persist_hand(hand_id: str) -> None:
                 status=PlayerStatus.active,
             )
         )
-    # Actions: fetch from logger
-    logger = get_logger()
+
+    # Actions: reconstruct from DB so state JSON reflects full history
     action_rows = list(logger.fetch_hand_actions(hand_id))
     action_history: List[ActionRecord] = []
     for row in action_rows:
@@ -346,11 +300,13 @@ def _persist_hand(hand_id: str) -> None:
                 meta=None,
             )
         )
-    # Determine dealer, SB and BB seats from snapshot
+
+    # Seats
     dealer_seat = int(tbl.button)
     sb_seat = int(tbl.sb_seat)
     bb_seat = int(tbl.bb_seat)
-    # Build final GameState
+
+    # Build snapshot
     state = GameState(
         hand_id=hand_id,
         deck_seed=s.deck_seed,
@@ -362,5 +318,150 @@ def _persist_hand(hand_id: str) -> None:
         players=players,
         action_history=action_history,
     )
-    # Persist the hand with engine/evaluator names and session id
-    logger.log_hand(state, engine="PokerKit", evaluator="PokerKit", session_id=get_session_state().logger_session_id)
+
+    # Insert or update without breaking FKs
+    cur = logger.conn.cursor()  # type: ignore[attr-defined]
+    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    # Check if hand row exists
+    exists = cur.execute(
+        "SELECT 1 FROM hands WHERE hand_id = ? LIMIT 1", (hand_id,)
+    ).fetchone()
+    if exists is None:
+        # First write: insert a fresh parent row
+        cur.execute(
+            """
+            INSERT INTO hands (hand_id, session_id, deck_seed, engine, evaluator, created_at, state_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                hand_id,
+                ss.logger_session_id,
+                s.deck_seed,
+                "PokerKit",
+                "PokerKit",
+                now_iso,
+                state.model_dump_json(),
+            ),
+        )
+    else:
+        # Subsequent writes: update in place (no REPLACE)
+        cur.execute(
+            """
+            UPDATE hands
+               SET session_id = ?,
+                   deck_seed   = ?,
+                   engine      = ?,
+                   evaluator   = ?,
+                   created_at  = ?,
+                   state_json  = ?
+             WHERE hand_id     = ?
+            """,
+            (
+                ss.logger_session_id,
+                s.deck_seed,
+                "PokerKit",
+                "PokerKit",
+                now_iso,
+                state.model_dump_json(),
+                hand_id,
+            ),
+        )
+    logger.conn.commit()  # type: ignore[attr-defined]
+
+
+# ---------- Routes ----------
+
+@router.post("/hand/start", response_model=StartHandResponse)
+def start_hand() -> StartHandResponse:
+    """Begin a new hand and auto-advance bots until the first human decision."""
+    adapter = get_adapter()
+    try:
+        hand_id = adapter.start_hand()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"start_hand failed: {e}") from e
+
+    # Reset index for this hand
+    _ACTION_IDX[hand_id] = 0
+
+    # Ensure a parent hand row exists *before* any actions are logged
+    _persist_snapshot(hand_id)
+
+    # Auto-advance bots immediately to first human decision (if any)
+    human_seat = get_session_state().human_seat
+    _auto_advance_bots(hand_id, human_seat)
+
+    # Refresh snapshot so exports can see the post-bot state
+    _persist_snapshot(hand_id)
+
+    return StartHandResponse(hand_id=hand_id)
+
+
+@router.get("/hand/state", response_model=StateResponse)
+def get_state() -> StateResponse:
+    adapter = get_adapter()
+    human_seat = get_session_state().human_seat
+    snap = _to_public_state(human_seat)
+    actor = adapter.next_actor()
+    return StateResponse(state=snap, actor=actor)
+
+
+@router.post("/hand/action", response_model=ActionResponse)
+def post_action(req: ActionRequest) -> ActionResponse:
+    """Apply a human action and auto-advance bots.
+
+    The human's action is applied to the engine, logged via the logger
+    and then bots are auto-advanced. We upsert a hand snapshot after
+    each action so exports work mid-hand.
+    """
+    adapter = get_adapter()
+    human_seat = get_session_state().human_seat
+
+    # Only the configured human seat may act
+    if req.seat != human_seat:
+        raise HTTPException(status_code=400, detail="Only the configured human seat may post actions.")
+
+    # Determine current hand id from the adapter (internal counter is an int); normalize.
+    hand_id_any = getattr(adapter, "hand_id", None)
+    if hand_id_any:
+        hand_id = _hand_id_str(hand_id_any)
+    else:
+        if not _ACTION_IDX:
+            raise HTTPException(status_code=400, detail="no hand in progress")
+        # use most recent key
+        hand_id = next(reversed(_ACTION_IDX.keys()))
+
+    # Ensure the parent hand row exists *before* inserting an action
+    logger = get_logger()
+    if logger.fetch_hand_state_json(hand_id) is None:
+        _persist_snapshot(hand_id)
+
+    # Apply the human action
+    try:
+        adapter.apply_action(req.seat, req.action, req.amount)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve)) from ve
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"apply_action failed: {e}") from e
+
+    # Log the human action (post-apply)
+    _log_action(hand_id, req.seat, req.action, req.amount)
+
+    # Persist snapshot immediately after human action
+    _persist_snapshot(hand_id)
+
+    # Snapshot to return in bet/raise case (pre-bot view for snapping visibility)
+    human_pre_bot_state = _to_public_state(human_seat)
+
+    # For bet/raise: return pre-bot snapshot so snapping details are visible.
+    action_l = (req.action or "").lower().strip()
+    if action_l in ("bet", "raise"):
+        return ActionResponse(ok=True, bots_applied=[], state=human_pre_bot_state)
+
+    # Auto-advance bots and return post-bot snapshot (e.g., HU SB-call -> BB-check -> flop).
+    bots = _auto_advance_bots(hand_id, human_seat)
+
+    # Persist snapshot after bot auto-advance as well
+    _persist_snapshot(hand_id)
+
+    post_bot_state = _to_public_state(human_seat)
+    return ActionResponse(ok=True, bots_applied=bots, state=post_bot_state)
