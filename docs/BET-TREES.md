@@ -1,93 +1,44 @@
-# Bet Trees
+# Betting Trees and Bucket Definitions
 
-This document describes the bet sizing buckets, minimum raise rules and
-snapping behaviour used by the NLH Trainer engine.  The engine uses a
-coarse bucket model to simplify bet/raise decisions for the human
-trainee while remaining consistent with common poker practice.
+This document defines the discrete bet sizes (“buckets”) supported by the NLH Trainer and explains the rules for determining minimum raises and snapping bets to the nearest bucket.  These definitions ensure that both the engine and the solver (when enabled) agree on allowed actions.
 
-## Opening Buckets
+## Bucket Labels
 
-When there is no pending bet (i.e. `to_call` is 0) or in heads‑up
-preflop play when the small blind is first to act, the engine offers
-a set of opening buckets.  Each bucket is defined by a label and a
-**target** commitment amount (the total chips a player must be committed
-to after taking the action).  The following buckets are presented in
-ascending order:
+Buckets are shorthand labels for common bet sizes.  They are relative to the size of the pot or last raise, and may differ between opening and response situations.
 
-| Label   | Target (HU preflop / multiway) | Meaning                                         |
-|---------|--------------------------------|------------------------------------------------|
-| `call`  | `to_call` (only if `to_call > 0`) | Match the current price without raising.        |
-| `2.2x`  | `2.2 × BB`                       | Open to 2.2 times the big blind.               |
-| `2.5x`  | `2.5 × BB`                       | Open to 2.5 times the big blind.               |
-| `3.0x`  | `3.0 × BB`                       | Open to 3.0 times the big blind.               |
-| `jam`   | `∞` (10¹² chips)                | All‑in; a sentinel bucket for very large bets. |
+| Label | Meaning | When Used |
+|------|---------|----------|
+| `2.2x` | Open to 2.2× the big blind | Pre‑flop opening raises |
+| `2.5x` | Open to 2.5× the big blind | Pre‑flop opening raises |
+| `3.0x` | Open to 3.0× the big blind | Pre‑flop opening raises |
+| `2.5xR` | Raise to 2.5× the previous bet size | Facing a prior bet or raise |
+| `3.0xR` | Raise to 3.0× the previous bet size | Facing a prior bet or raise |
+| `jam` | All‑in (jam) | Any time an all‑in is permitted |
 
-The engine computes each target as `round(mult × bb)` and ensures it is
-at least equal to the big blind.  When a base raise size exists from
-a previous street the appropriate formula is used (see facing buckets below).
+Not all buckets are legal in every spot.  The engine returns the list of `allowed_buckets` for the acting player via the `/api/hand/state` endpoint.
 
-## Facing Buckets
+## Minimum Raise Rules
 
-When a player is facing a bet (i.e. `to_call > 0`), the engine uses
-the last raise size (or the big blind if no raise has occurred) to
-construct facing buckets.  The buckets include:
+The big blind (BB) is the fundamental unit used for determining minimum raises.
 
-| Label    | Target                           | Meaning                                       |
-|----------|----------------------------------|-----------------------------------------------|
-| `call`   | `to_call`                        | Call the outstanding bet.                    |
-| `2.5xR`  | `to_call + 2.5 × max(bb, last_raise_size)` | Raise to 2.5× the last raise size.        |
-| `3.0xR`  | `to_call + 3.0 × max(bb, last_raise_size)` | Raise to 3.0× the last raise size.        |
-| `jam`    | `∞`                              | All‑in.                                        |
+* **Opening action**: When no bet has been made, a raise must be at least the size of the big blind above the current bet.  For example, if blinds are 5/10, the smallest raise is to 20 (i.e. a raise of 10 chips on top of the big blind).
+* **Facing action**: If a bet or raise has been made, a further raise must add **at least** the maximum of the big blind and the size of the previous raise.  For instance, if player A raised to 30 (a raise of 20 over the big blind), player B must raise to at least 50 (call to 30 plus a minimum raise of 20).
 
-The `last_raise_size` is updated whenever a player raises and
-influences subsequent facing buckets.  As with opening buckets, the
-engine sorts the bucket list by target before presenting it.
+These rules mirror standard No‑Limit Hold’em regulations and prevent trivial min‑click raises.
 
-## Minimum Raise Rule
+## Snapping Policy
 
-In addition to bucket suggestions the engine enforces a *minimum
-raise target*.  This value is returned via the `min_raise` field in
-the `/api/hand/state` response.  It is computed as:
+Because humans may not choose exactly one of the discrete bucket sizes (e.g. they might click a slider), the engine snaps arbitrary bet amounts to the nearest allowed bucket.  The snapping algorithm works as follows:
 
-- **Opening** (`to_call ≤ 0`): `max(bb, last_raise_size)` – raising must
-  be at least a full big blind (or the last raise size if larger).
-- **Facing** (`to_call > 0`): `to_call + max(bb, last_raise_size)` –
-  raising must add at least the size of the previous bet or the big
-  blind to the amount needed to call.
+1. Compute the target raise size implied by each bucket based on the current pot or previous raise.
+2. Find the allowed bucket whose implied amount is **closest** to the user’s requested amount.
+3. On ties, snap to the **smaller** bucket (i.e. the one that yields a smaller raise).
+4. If an all‑in (jam) floor heuristic applies (e.g. stack sizes are short), the `jam` bucket may override smaller raises.
 
-Requests that fall below `min_raise` result in a `400` error from
-the API.
+### Examples
 
-## Snapping Behaviour
+* **Pre‑flop opening**: Blinds are 5/10.  The `2.2x` bucket opens to 22 chips, `2.5x` opens to 25, and `3.0x` opens to 30.  A player attempting to open to 24 will be snapped down to `2.2x` (22) because it is closer than `2.5x` (25).
+* **Facing a 30‑chip raise**: Allowed buckets might be `2.5xR` and `3.0xR`.  `2.5xR` raises to 2.5×30 = 75 chips, `3.0xR` raises to 90 chips.  A player clicking 80 chips will snap to `2.5xR` because 75 is closer than 90.
+* **Jam floor**: If stack sizes are small relative to the pot, the engine may snap any raise above a certain threshold directly to `jam` to reflect typical all‑in decisions.
 
-When a bet or raise request does not match exactly one of the
-allowed bucket targets, the engine snaps the amount to the nearest
-bucket.  The snapping process returns:
-
-- `target` – the bucket’s target commitment (rounded integer).
-- `snapped` – a boolean flag indicating whether the input was adjusted.
-- `bucket_label` – the chosen bucket label.
-- `allowed_buckets` – the list of all bucket labels available.
-
-Extremely large requests trigger the special `jam` bucket.  The jam
-“floor” is `max(bb × 100, max_non_jam_target × 20)` where
-`max_non_jam_target` is the largest non‑jam bucket.  Requests
-exceeding this floor are snapped directly to `jam`.
-
-## Example
-
-Suppose the big blind is 100 chips and no raise has occurred.  In a
-multiway pot the allowed buckets are:
-
-```
-[{"label": "call", "target": 0},
- {"label": "2.2x", "target": 220},
- {"label": "2.5x", "target": 250},
- {"label": "3.0x", "target": 300},
- {"label": "jam", "target": 1000000000000}]
-```
-
-If a player requests to raise to 275 chips, the engine snaps the
-amount to the nearest bucket (250 or 300).  Since 275 is closer to
-250, the response includes `target=250`, `snapped=true`,
-`bucket_label="2.5x"` and the full list of allowed buckets.
+These rules ensure that autoplayer logic, the coach, and the solver operate on a shared discrete action space.

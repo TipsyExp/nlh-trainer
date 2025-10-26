@@ -1,53 +1,16 @@
 # QA Checklist
 
-This checklist enumerates the key behaviours and test cases that must
-be verified to ensure the NLH Trainer meets its specification.  Each
-entry references a corresponding test in the CI suite or manual
-procedure.
+This checklist enumerates the major features and behaviours covered by the test suite for the NLH Trainer as of milestone M1.  Each item links to relevant tests in `backend/tests`.  When adding new functionality or fixing bugs, update this document to reflect new coverage.
 
-- **Session creation** – `POST /api/session` should accept valid
-  parameters (seats, blinds, stacks, human seat, base_seed) and
-  initialise the engine.  Invalid inputs (mismatched `stacks` length,
-  out‑of‑range `human_seat`) return HTTP 400.
-  - *Test:* `tests/test_session.py::test_create_session_valid` and
-    `test_create_session_invalid`.
-- **Hand lifecycle** – `POST /api/hand/start` returns a new `hand_id`
-  and auto‑advances bots to the first human decision.  `GET
-  /api/hand/state` returns the public snapshot and actor info.  `POST
-  /api/hand/action` applies a human decision and logs it.
-  - *Test:* `tests/test_hand.py::test_hand_flow`.
-- **Per‑action logging** – Every decision (human or bot) inserts a
-  row into the `actions` table with correct `idx`, `street`,
-  `actor_seat`, `type`, `amount`, `bucket`, `snapped` and metadata
-  fields.  Actions are in ascending order by `idx`.
-  - *Test:* `tests/test_logging.py::test_action_logging`.
-- **Export endpoints** – Completed hands and sessions can be
-  exported as JSON (`/api/export/hand/{hand_id}.json`,
-  `/api/export/session/{session_id}.json`) and CSV (`.csv` suffix).
-  Unknown or incomplete hands return HTTP 404.  CSV exports include a
-  header row followed by one row per action with fields in the order
-  documented in [API‑CONTRACT.md](API-CONTRACT.md).
-  - *Test:* `tests/test_export.py::test_hand_json_export`,
-    `test_hand_csv_export`, `test_session_json_export`,
-    `test_session_csv_export`.
-- **Round‑trip determinism** – Exported hand histories can be
-  deserialised using `import_json` and replayed through the engine to
-  reproduce the final state (deck order and action sequence).  This
-  ensures that the logged RNG seeds and actions capture the full
-  hand.
-  - *Test:* `tests/test_determinism.py::test_round_trip`.
-- **Documentation accuracy** – Examples in
-  `docs/API-CONTRACT.md`, `docs/BET-TREES.md`, `docs/BOT-POLICY.md`,
-  and `docs/STATE-SCHEMA.md` must match actual API responses and
-  model definitions.  The docs are linted and validated by
-  `tests/test_docs.py::test_api_contract_examples`.
-- **Packaging hygiene** – `make dist` must produce a slim
-  distributable that excludes `third_party/`, `.venv/`, caches and
-  other artefacts.  Unused dependencies are removed from
-  `requirements.txt`.
-  - *Test:* `tests/test_packaging.py::test_dist_contents`.
+| Feature | Test Coverage | Status |
+|--------|---------------|-------|
+| **Per‑decision logging**: every action records street, actor seat, amounts, bucket, snapped flag, RNG trace, engine and evaluator identifiers | [`test_export_roundtrip.py`](../backend/tests/test_export_roundtrip.py) ensures that exported actions include the correct fields and that exported hands replay deterministically. | ✅ |
+| **CSV and JSON export endpoints**: four export routes return correct payloads and stable header ordering | [`test_export_roundtrip.py`](../backend/tests/test_export_roundtrip.py) and [`test_export_csv_headers.py`](../backend/tests/test_export_csv_headers.py) verify CSV header ordering and that all endpoints deliver the expected data structures. | ✅ |
+| **Deterministic round‑trip**: exporting a hand/session and replaying with the same seed produces identical canonical state | [`test_export_roundtrip.py`](../backend/tests/test_export_roundtrip.py) replays exported hands and compares the resulting canonical states. | ✅ |
+| **Action validation**: illegal actions (wrong bucket, insufficient amount) are rejected with appropriate HTTP status codes | [`test_engine.py`](../backend/tests/test_engine.py) covers invalid action inputs and ensures proper error responses. | ✅ |
+| **Autoplay**: script runs hands between bots and collects metrics; coach disabled by default | [`test_autoplay.py`](../backend/tests/test_autoplay.py) executes the autoplay script in different modes and checks output metrics. | ✅ |
 
-This checklist should be updated as new features (coach API, solver
-cache, review UI, etc.) are implemented.  Each new endpoint or
-configuration option must be accompanied by corresponding tests and
-documentation.
+## Additional Notes
+
+* Coverage is focused on backend functionality.  Frontend UI and coach features have their own test suites not listed here.
+* To run the tests locally, install dependencies from the project root (`python -m pip install -r requirements.txt`) and execute `pytest backend/tests -q`.
