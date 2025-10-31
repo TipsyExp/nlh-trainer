@@ -1,0 +1,22 @@
+# ---- Top-level metadata & entrypoints
+README.md
+LICENSE
+Makefile
+requirements.txt
+backend/requirements.txt
+
+# ---- Backend runtime (no tests)
+backend/__init__.py
+backend/main.py
+backend/logger.py
+backend/database.py
+backend/api/**
+backend/models/**
+backend/adapters/**
+backend/policy/**
+backend/routers/**
+backend/scripts/autoplay.py
+
+# ---- Docs (API, schema, runbook, examples). Exclude scripts.
+docs/*.md
+docs/examples/*
