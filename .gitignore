@@ -24,6 +24,7 @@ __pycache__/
 venv/
 build/
 dist/
+dist/unpacked/        # <--- ADDED (makes sure unpacked test builds don't get committed)
 .eggs/
 *.egg-info/
 
@@ -37,6 +38,7 @@ htmlcov/
 *.sqlite
 *.sqlite3
 *.db
+.data/                 # <--- ADDED (your runtime DB + session logs)
 data/**/*.sqlite
 data/**/*.db
 logs/
