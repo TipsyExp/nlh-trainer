@@ -292,15 +292,29 @@ jobs:
       - name: Forbidden content check
         if: steps.detect_dist.outputs.present == 'true'
         run: |
-          # Fail if forbidden directories actually exist (not if they are only mentioned in docs)
-          FORBIDDEN_DIRS='(\.venv|__pycache__|\.pytest_cache|node_modules|\.next|third_party|\.git)'
-          if find .tmp-dist -type d -regextype posix-extended -regex ".*${FORBIDDEN_DIRS}(/.*)?"; then
-            echo "Forbidden directory found in dist"; exit 1
+          set -e
+          BAD_DIRS="$(find .tmp-dist -type d \( \
+            -name '.venv' -o \
+            -name '__pycache__' -o \
+            -name '.pytest_cache' -o \
+            -name 'node_modules' -o \
+            -name '.next' -o \
+            -name 'third_party' -o \
+            -name '.git' \
+          \))"
+          if [ -n "$BAD_DIRS" ]; then
+            echo "Forbidden directories found in dist:"
+            echo "$BAD_DIRS"
+            exit 1
           fi
-          # Fail if forbidden files exist by name patterns
-          if find .tmp-dist -type f -name ".DS_Store" -print -quit | grep -q .; then
-            echo "Forbidden file .DS_Store found in dist"; exit 1
+
+          BAD_FILES="$(find .tmp-dist -type f -name '.DS_Store')"
+          if [ -n "$BAD_FILES" ]; then
+            echo "Forbidden files found in dist:"
+            echo "$BAD_FILES"
+            exit 1
           fi
+
           echo "No forbidden content found."
 
       - name: Required files present
