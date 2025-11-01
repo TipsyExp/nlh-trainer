@@ -1,23 +1,23 @@
 # docs/scripts/capture_examples.py
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import sys
 from pathlib import Path
 from typing import Any, Dict
 
-from fastapi.testclient import TestClient
-
-# IMPORTANT: set LOG_DB_PATH BEFORE importing/starting the app so the logger
-# initializes against our docs-local DB during startup.
+# ---- Repository root & import path shim (so "import backend" works when run as a script)
 ROOT = Path(__file__).resolve().parents[2]
-
-# Ensure the repo root is importable when running this as a script
-# (so "from backend.main import app" works on Windows / direct invocations)
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from fastapi.testclient import TestClient  # noqa: E402
+
+# IMPORTANT: set LOG_DB_PATH BEFORE importing/starting the app so the logger
+# initializes against our docs-local DB during startup.
 EXAMPLES_DIR = ROOT / "docs" / "examples"
 EXAMPLES_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("LOG_DB_PATH", str(EXAMPLES_DIR / "examples.sqlite"))
@@ -25,23 +25,56 @@ os.environ.setdefault("LOG_DB_PATH", str(EXAMPLES_DIR / "examples.sqlite"))
 # Now import the FastAPI app
 from backend.main import app  # noqa: E402
 
+# Volatile fields vary run-to-run; strip them from docs artifacts to avoid drift
+VOLATILE_JSON_KEYS = {"created_at", "time_ms", "rng_seed", "meta"}
+VOLATILE_CSV_COLUMNS = {"created_at", "time_ms", "rng_seed", "meta"}
 
-def _write_json(path: Path, data: Any) -> None:
-    """
-    Write pretty JSON with stable key ordering and normalized LF newlines
-    to avoid CRLF (^M) drift on Windows.
-    """
-    text = json.dumps(data, indent=2, sort_keys=True) + "\n"
-    _write_text(path, text)
+
+def _normalize_eol(text: str) -> str:
+    # Normalize CRLF/CR to LF so examples don't flip on Windows vs Linux
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _write_text(path: Path, text: str) -> None:
-    """
-    Write text with normalized LF newlines so that example files do not
-    differ between Windows (CRLF) and Linux/macOS (LF).
-    """
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    path.write_text(text, encoding="utf-8")
+    path.write_text(_normalize_eol(text), encoding="utf-8")
+
+
+def _strip_volatile_json(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {
+            k: _strip_volatile_json(v)
+            for k, v in obj.items()
+            if k not in VOLATILE_JSON_KEYS
+        }
+    if isinstance(obj, list):
+        return [_strip_volatile_json(v) for v in obj]
+    return obj
+
+
+def _write_json(path: Path, data: Any) -> None:
+    # Canonical JSON for docs (sorted keys, pretty, LF EOLs, volatile keys removed)
+    clean = _strip_volatile_json(data)
+    _write_text(path, json.dumps(clean, indent=2, sort_keys=True) + "\n")
+
+
+def _rewrite_csv_drop_columns(csv_text: str, drop: set[str]) -> str:
+    # Drop volatile columns; keep header order for the rest; normalize EOLs to LF
+    csv_text = _normalize_eol(csv_text)
+    reader = csv.reader(io.StringIO(csv_text))
+    rows = list(reader)
+    if not rows:
+        return ""
+    header = rows[0]
+    keep_idx = [i for i, name in enumerate(header) if name not in drop]
+    new_header = [header[i] for i in keep_idx]
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(new_header)
+    for row in rows[1:]:
+        if not row:
+            continue
+        writer.writerow([row[i] for i in keep_idx if i < len(row)])
+    return out.getvalue()
 
 
 def _deterministic_human_first_action(actor: Dict[str, Any]) -> Dict[str, Any]:
@@ -106,26 +139,34 @@ def main() -> None:
         export_and_write_examples(client, session_id, hand_id)
 
 
-def export_and_write_examples(client: TestClient, session_id: int, hand_id: str) -> None:
-    # Hand JSON
+def export_and_write_examples(
+    client: TestClient, session_id: int, hand_id: str
+) -> None:
+    # Hand JSON (canonicalized)
     h_json_resp = client.get(f"/api/export/hand/{hand_id}.json")
     h_json_resp.raise_for_status()
     _write_json(EXAMPLES_DIR / "export_hand.json", h_json_resp.json())
 
-    # Hand CSV
+    # Hand CSV (drop volatile columns, normalize EOLs)
     h_csv_resp = client.get(f"/api/export/hand/{hand_id}.csv")
     h_csv_resp.raise_for_status()
-    _write_text(EXAMPLES_DIR / "export_hand.csv", h_csv_resp.text)
+    _write_text(
+        EXAMPLES_DIR / "export_hand.csv",
+        _rewrite_csv_drop_columns(h_csv_resp.text, VOLATILE_CSV_COLUMNS),
+    )
 
-    # Session JSON
+    # Session JSON (canonicalized)
     s_json_resp = client.get(f"/api/export/session/{session_id}.json")
     s_json_resp.raise_for_status()
     _write_json(EXAMPLES_DIR / "export_session.json", s_json_resp.json())
 
-    # Session CSV
+    # Session CSV (drop volatile columns, normalize EOLs)
     s_csv_resp = client.get(f"/api/export/session/{session_id}.csv")
     s_csv_resp.raise_for_status()
-    _write_text(EXAMPLES_DIR / "export_session.csv", s_csv_resp.text)
+    _write_text(
+        EXAMPLES_DIR / "export_session.csv",
+        _rewrite_csv_drop_columns(s_csv_resp.text, VOLATILE_CSV_COLUMNS),
+    )
 
 
 if __name__ == "__main__":
