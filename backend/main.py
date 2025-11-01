@@ -27,6 +27,7 @@ except ImportError:
         encoding: Optional[str] = None,
     ) -> bool:
         return False
+
 else:
     # Use the real function when available
     load_dotenv = _load_dotenv
