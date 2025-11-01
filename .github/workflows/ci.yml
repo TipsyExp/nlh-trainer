@@ -274,17 +274,14 @@ jobs:
       - name: Build dist
         if: steps.detect_dist.outputs.present == 'true'
         run: |
-          set -e
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           python tools/build_dist.py --include-file dist-include.txt --out-dir dist
-          mkdir -p .tmp-dist
-          unzip -q dist/*.zip -d .tmp-dist
+          mkdir -p .tmp-dist && unzip -q dist/*.zip -d .tmp-dist
 
       - name: Enforce slim size (< 1 MiB)
         if: steps.detect_dist.outputs.present == 'true'
         run: |
-          set -e
           BYTES=$(stat -c%s dist/nlh-trainer-*.zip)
           echo "ZIP size: $BYTES bytes"
           if [ "$BYTES" -gt 1048576 ]; then
@@ -292,14 +289,13 @@ jobs:
             exit 1
           fi
 
-      - name: Determine extract root
+      # NEW: keep this step, it finds the correct root under .tmp-dist
+      - name: Determine extracted root
         if: steps.detect_dist.outputs.present == 'true'
-        id: dist_root
+        id: find_root
         run: |
-          set -e
           ROOT_DIR=".tmp-dist"
           if [ ! -d "$ROOT_DIR/backend" ]; then
-            # If files are under a top-level folder, pick the first subdir.
             CANDIDATE="$(find .tmp-dist -mindepth 1 -maxdepth 1 -type d | head -n 1)"
             if [ -n "$CANDIDATE" ]; then
               ROOT_DIR="$CANDIDATE"
@@ -312,7 +308,7 @@ jobs:
         if: steps.detect_dist.outputs.present == 'true'
         run: |
           set -e
-          ROOT="${{ steps.dist_root.outputs.root }}"
+          ROOT="${{ steps.find_root.outputs.root }}"
           BAD_DIRS="$(find "$ROOT" -type d \( \
             -name '.venv' -o \
             -name '__pycache__' -o \
@@ -339,7 +335,7 @@ jobs:
         if: steps.detect_dist.outputs.present == 'true'
         run: |
           set -e
-          ROOT="${{ steps.dist_root.outputs.root }}"
+          ROOT="${{ steps.find_root.outputs.root }}"
           test -f "$ROOT/backend/main.py"
           test -f "$ROOT/Makefile"
           test -f "$ROOT/requirements.txt"
@@ -347,26 +343,6 @@ jobs:
           test -f "$ROOT/DIST-CONTENTS.md"
           test -f "$ROOT/docs/examples/export_hand.json"
           test -f "$ROOT/docs/examples/export_session.json"
-
-      - name: Dependency sanity (optional)
-        if: steps.detect_dist.outputs.present == 'true'
-        run: |
-          set -e
-          ROOT="${{ steps.dist_root.outputs.root }}"
-          python -m venv .venv-dist
-          . .venv-dist/bin/activate
-          pip install --upgrade pip
-          pip install -r "$ROOT/requirements.txt" || true
-          pip check || true
-
-      - name: Upload dist (on failure)
-        if: failure() && steps.detect_dist.outputs.present == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist-debug
-          path: |
-            dist/**
-            .tmp-dist/**
 
   autoplay-smoke:
     name: Autoplay Smoke (50 hands, coach off)
