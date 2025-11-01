@@ -1,5 +1,6 @@
 from backend.adapters.engines import get_adapter
 
+
 def test_preflop_raise_snaps_to_bucket():
     eng = get_adapter()
     eng.start_table(2, 50, 100, 0, [10000, 10000], "S")

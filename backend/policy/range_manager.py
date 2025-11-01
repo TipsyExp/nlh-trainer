@@ -9,11 +9,13 @@ import random
 
 log = logging.getLogger(__name__)
 
+
 @dataclass
 class RangeChoice:
-    action: str                   # "fold" | "call" | "raise"
-    size_label: Optional[str]     # e.g., "2.5x" or "3.0xR" (None for fold/call)
-    source: str                   # "chart" | "fallback"
+    action: str  # "fold" | "call" | "raise"
+    size_label: Optional[str]  # e.g., "2.5x" or "3.0xR" (None for fold/call)
+    source: str  # "chart" | "fallback"
+
 
 class RangeManager:
     """
@@ -36,6 +38,7 @@ class RangeManager:
           call: 60
           raise: {"3.0xR": 20}
     """
+
     def __init__(self, root: str = "data/ranges/preflop") -> None:
         self.root = root
         # index: (seat_count:str) -> positions mapping
@@ -81,16 +84,16 @@ class RangeManager:
                     }
         self._loaded = True
 
-    def lookup_distribution(self, seat_count: int, position: str, facing: str) -> Optional[Dict[str, Any]]:
+    def lookup_distribution(
+        self, seat_count: int, position: str, facing: str
+    ) -> Optional[Dict[str, Any]]:
         self._load()
         sc = str(seat_count)
-        return (
-            self._charts.get(sc, {})
-            .get(position, {})
-            .get(facing)
-        )
+        return self._charts.get(sc, {}).get(position, {}).get(facing)
 
-    def _sample_weighted(self, rng: random.Random, dist: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+    def _sample_weighted(
+        self, rng: random.Random, dist: Dict[str, Any]
+    ) -> Tuple[str, Optional[str]]:
         """Return (action, size_label). size_label only for 'raise'."""
         # Flatten to (action,label)->weight pairs
         pairs: Dict[Tuple[str, Optional[str]], int] = {}
@@ -123,7 +126,9 @@ class RangeManager:
         # fallback (shouldn't happen)
         return ("fold", None)
 
-    def choose_action(self, *, seat_count: int, position: str, facing: str, seed: Optional[str]) -> RangeChoice:
+    def choose_action(
+        self, *, seat_count: int, position: str, facing: str, seed: Optional[str]
+    ) -> RangeChoice:
         """
         Deterministically sample an action from the chart using `seed`.
         If no entry exists, return a safe fallback:
@@ -146,6 +151,7 @@ class RangeManager:
 
 # --- module singleton ---
 _MANAGER: Optional[RangeManager] = None
+
 
 def get_manager() -> RangeManager:
     global _MANAGER

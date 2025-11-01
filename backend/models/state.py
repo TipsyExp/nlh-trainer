@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, ConfigDict
 
 class SeatType(str, Enum):
     """Enumeration of player seat types."""
+
     human = "human"
     bot = "bot"
 
@@ -27,6 +28,7 @@ class SeatType(str, Enum):
 
 class PlayerStatus(str, Enum):
     """Enumeration of player statuses."""
+
     active = "active"
     folded = "folded"
     all_in = "all_in"
@@ -45,6 +47,7 @@ class Street(str, Enum):
     extra values are included here for forward compatibility and to
     satisfy Pydantic validation against the documented schema.
     """
+
     preflop = "preflop"
     flop = "flop"
     turn = "turn"
@@ -66,6 +69,7 @@ class ActionType(str, Enum):
     Additional members such as ``post_blind``, ``all_in`` and ``deal``
     are defined for completeness relative to the documented schema.
     """
+
     check = "check"
     call = "call"
     bet = "bet"
@@ -91,6 +95,7 @@ class TableState(BaseModel):
     ``rake`` are included for completeness relative to the documented
     schema but are not actively used in M0.
     """
+
     seat_count: int
     sb: int
     bb: int
@@ -99,6 +104,7 @@ class TableState(BaseModel):
 
 class PlayerState(BaseModel):
     """Metadata for an individual player at the table."""
+
     seat: int
     type: SeatType
     alias: str
@@ -108,6 +114,7 @@ class PlayerState(BaseModel):
 
 class ActionRecord(BaseModel):
     """Record of a single action in the hand history."""
+
     idx: int
     street: Street
     actor_seat: int
@@ -124,6 +131,7 @@ class ActionRecord(BaseModel):
 
 class GameState(BaseModel):
     """Top-level state representation for a poker hand."""
+
     hand_id: str
     deck_seed: Optional[str] = None
     table: TableState

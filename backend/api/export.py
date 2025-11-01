@@ -1,4 +1,5 @@
 """Export API for the NLH trainer."""
+
 from __future__ import annotations
 
 import csv
@@ -18,15 +19,15 @@ CSV_FIELDS: List[str] = [
     "idx",
     "street",
     "actor_seat",
-    "action",       # NOTE: mapped from DB column 'type'
+    "action",  # NOTE: mapped from DB column 'type'
     "amount",
     "bucket",
     "to_call_after",
     "pot_after",
     "time_ms",
     "rng_seed",
-    "snapped",      # bool-ish (0/1) or empty
-    "meta",         # raw string (JSON-encoded if present)
+    "snapped",  # bool-ish (0/1) or empty
+    "meta",  # raw string (JSON-encoded if present)
     "engine",
     "evaluator",
     "created_at",
@@ -62,7 +63,9 @@ def _row_get(row: Any, key: str) -> Any:
         return None
 
 
-def _actions_to_dicts(rows: Iterable[Any], include_hand_id: str | None = None) -> List[Dict[str, Any]]:
+def _actions_to_dicts(
+    rows: Iterable[Any], include_hand_id: str | None = None
+) -> List[Dict[str, Any]]:
     """Convert action rows into JSON-serialisable dicts with contract field names."""
     out: List[Dict[str, Any]] = []
     for r in rows:
@@ -123,13 +126,19 @@ def export_hand_csv(hand_id: str) -> Response:
             "pot_after": _row_get(r, "pot_after"),
             "time_ms": _row_get(r, "time_ms"),
             "rng_seed": _row_get(r, "rng_seed"),
-            "snapped": "" if _row_get(r, "snapped") is None else int(bool(_row_get(r, "snapped"))),
+            "snapped": (
+                ""
+                if _row_get(r, "snapped") is None
+                else int(bool(_row_get(r, "snapped")))
+            ),
             "meta": "" if _row_get(r, "meta") is None else _row_get(r, "meta"),
             "engine": _row_get(r, "engine"),
             "evaluator": _row_get(r, "evaluator"),
             "created_at": _row_get(r, "created_at"),
         }
-        writer.writerow([row.get(k, "") if row.get(k, "") is not None else "" for k in CSV_FIELDS])
+        writer.writerow(
+            [row.get(k, "") if row.get(k, "") is not None else "" for k in CSV_FIELDS]
+        )
 
     return Response(content=buf.getvalue(), media_type="text/csv")
 
@@ -146,7 +155,9 @@ def export_session_json(session_id: int) -> Dict[str, Any]:
         hand_id = row["hand_id"]
         state_json = row["state_json"]
         actions = _actions_to_dicts(logger.fetch_hand_actions(hand_id))
-        out.append({"hand_id": hand_id, "state": json.loads(state_json), "actions": actions})
+        out.append(
+            {"hand_id": hand_id, "state": json.loads(state_json), "actions": actions}
+        )
 
     return {"session_id": session_id, "hands": out}
 
@@ -177,12 +188,21 @@ def export_session_csv(session_id: int) -> Response:
                 "pot_after": _row_get(r, "pot_after"),
                 "time_ms": _row_get(r, "time_ms"),
                 "rng_seed": _row_get(r, "rng_seed"),
-                "snapped": "" if _row_get(r, "snapped") is None else int(bool(_row_get(r, "snapped"))),
+                "snapped": (
+                    ""
+                    if _row_get(r, "snapped") is None
+                    else int(bool(_row_get(r, "snapped")))
+                ),
                 "meta": "" if _row_get(r, "meta") is None else _row_get(r, "meta"),
                 "engine": _row_get(r, "engine"),
                 "evaluator": _row_get(r, "evaluator"),
                 "created_at": _row_get(r, "created_at"),
             }
-            writer.writerow([row.get(k, "") if row.get(k, "") is not None else "" for k in CSV_FIELDS])
+            writer.writerow(
+                [
+                    row.get(k, "") if row.get(k, "") is not None else ""
+                    for k in CSV_FIELDS
+                ]
+            )
 
     return Response(content=buf.getvalue(), media_type="text/csv")

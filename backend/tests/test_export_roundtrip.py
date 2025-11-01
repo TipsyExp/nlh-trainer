@@ -11,7 +11,9 @@ from backend.main import app
 client = TestClient(app)
 
 
-def _create_session(seats=2, sb=50, bb=100, ante=0, stacks=None, base_seed="T12-roundtrip", human_seat=0) -> int:
+def _create_session(
+    seats=2, sb=50, bb=100, ante=0, stacks=None, base_seed="T12-roundtrip", human_seat=0
+) -> int:
     stacks = stacks or [10000, 10000]
     r = client.post(
         "/api/session",
@@ -77,7 +79,17 @@ def _canonical_first_action(actions: List[Dict[str, Any]]) -> Dict[str, Any]:
     assert len(actions) >= 1
     a = actions[0]
     # Normalize keys we care about; ignore env/timestamp/seed
-    keep = ["idx", "street", "actor_seat", "action", "amount", "bucket", "snapped", "to_call_after", "pot_after"]
+    keep = [
+        "idx",
+        "street",
+        "actor_seat",
+        "action",
+        "amount",
+        "bucket",
+        "snapped",
+        "to_call_after",
+        "pot_after",
+    ]
     return {k: a.get(k) for k in keep}
 
 
@@ -104,7 +116,9 @@ def test_export_roundtrip_minimal_first_action():
     assert "created_at" in header
 
     # --- Session B (replay minimal first move) ---
-    _create_session(base_seed="T12-roundtrip-1")  # same seed to keep structure identical
+    _create_session(
+        base_seed="T12-roundtrip-1"
+    )  # same seed to keep structure identical
     hand_id_b = _start_hand()
     actor_b = _current_actor()
     assert actor_b is not None
@@ -119,4 +133,6 @@ def test_export_roundtrip_minimal_first_action():
     # Compare canonicalized first actions
     ca = _canonical_first_action(actions_a)
     cb = _canonical_first_action(actions_b)
-    assert ca == cb, f"Determinism mismatch:\nA={json.dumps(ca, sort_keys=True)}\nB={json.dumps(cb, sort_keys=True)}"
+    assert (
+        ca == cb
+    ), f"Determinism mismatch:\nA={json.dumps(ca, sort_keys=True)}\nB={json.dumps(cb, sort_keys=True)}"

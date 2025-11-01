@@ -3,10 +3,19 @@ line-length = 88
 
 [tool.ruff]
 line-length = 88
-extend-select = []
+
+# If you want custom lint rules later, add them under [tool.ruff.lint].
+# Leaving it empty avoids the deprecation warning you were seeing.
+# [tool.ruff.lint]
+# extend-select = ["E", "F"]
 
 [tool.mypy]
-python_version = "3.10"
+# Match the CI runtime
+python_version = "3.12"
+
+# IMPORTANT: tell mypy exactly what to check (avoids invalid package names)
+files = ["backend"]
+
 plugins = []
 ignore_missing_imports = true
 follow_imports = "silent"

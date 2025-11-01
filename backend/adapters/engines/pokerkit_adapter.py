@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 # intentionally omit much of the full game model (pot breakdown, action
 # history, etc.) because the early API only needs to surface a few fields.
 
+
 @dataclass
 class _TableSnap:
     seats: int
@@ -136,7 +137,9 @@ class PokerKitAdapter:
         """
         return actor_seat == self.sb_seat
 
-    def _allowed_buckets_data(self, to_call: int, actor_seat: Optional[int]) -> List[Dict[str, Any]]:
+    def _allowed_buckets_data(
+        self, to_call: int, actor_seat: Optional[int]
+    ) -> List[Dict[str, Any]]:
         """Compute the allowed bet/raise buckets for the current actor.
 
         Buckets are expressed as dicts with ``label`` and ``target`` keys.
@@ -160,7 +163,9 @@ class PokerKitAdapter:
             # Opening raise buckets: 2.2×/2.5×/3.0× big blind
             for mult in (2.2, 2.5, 3.0):
                 target = int(round(mult * self.bb))
-                buckets.append({"label": f"{mult:.1f}x", "target": max(target, self.bb)})
+                buckets.append(
+                    {"label": f"{mult:.1f}x", "target": max(target, self.bb)}
+                )
         else:
             # Facing action: raises over the current price using last raise size
             base = max(self._last_raise_size, self.bb)
@@ -209,7 +214,13 @@ class PokerKitAdapter:
                     best = {"label": "jam", "target": int(to_call)}
         else:
             # Select the allowed bucket with minimal distance to the request
-            best = min(buckets, key=lambda b: (abs(int(b["target"]) - int(requested_total)), int(b["target"])))
+            best = min(
+                buckets,
+                key=lambda b: (
+                    abs(int(b["target"]) - int(requested_total)),
+                    int(b["target"]),
+                ),
+            )
 
         return {
             "target": int(best["target"]),
@@ -343,7 +354,9 @@ class PokerKitAdapter:
             "allowed_buckets": [b["label"] for b in buckets],
         }
 
-    def apply_action(self, seat: int, action: str, amount: Optional[int] = None) -> None:
+    def apply_action(
+        self, seat: int, action: str, amount: Optional[int] = None
+    ) -> None:
         """Apply an action for a given seat.
 
         Args:
@@ -415,14 +428,20 @@ class PokerKitAdapter:
         # ----- Bet/Raise -----
         if action_l in ("bet", "raise"):
             if amount is None or not isinstance(amount, int):
-                raise ValueError("bet/raise requires integer 'amount' (total commitment)")
-            snap = self._snap_to_bucket(requested_total=amount, to_call=to_call, actor_seat=seat)
+                raise ValueError(
+                    "bet/raise requires integer 'amount' (total commitment)"
+                )
+            snap = self._snap_to_bucket(
+                requested_total=amount, to_call=to_call, actor_seat=seat
+            )
             committed_total = int(snap["target"])
             # Minimum raise enforcement
             if to_call > 0:
                 min_required = to_call + max(self.bb, self._last_raise_size)
                 if committed_total < min_required:
-                    raise ValueError(f"min-raise not met: need ≥ {min_required}, got {committed_total}")
+                    raise ValueError(
+                        f"min-raise not met: need ≥ {min_required}, got {committed_total}"
+                    )
             else:
                 # Opening bet must be at least the big blind
                 if committed_total < self.bb:
@@ -490,5 +509,6 @@ def get_adapter() -> PokerKitAdapter:
     if _ADAPTER is None:
         _ADAPTER = PokerKitAdapter()
     return _ADAPTER
+
 
 __all__ = ["PokerKitAdapter", "get_adapter"]

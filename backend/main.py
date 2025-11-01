@@ -6,25 +6,46 @@ export. Root and health endpoints provide simple liveness probes.
 """
 
 from __future__ import annotations
+from typing import IO, Optional, Union
+from os import PathLike
 
+# --- ALL IMPORTS AT THE TOP (fixes ruff E402) ---
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 # Optional env loader (no-op if python-dotenv isn't installed)
 try:
-    from dotenv import load_dotenv  # type: ignore
+    from dotenv import load_dotenv as _load_dotenv
 except ImportError:
-    def load_dotenv() -> None:  # type: ignore[no-redef]
-        return None
+    # Match the real signature exactly so mypy is satisfied
+    def load_dotenv(
+        dotenv_path: Optional[Union[str, PathLike[str]]] = None,
+        stream: Optional[IO[str]] = None,
+        verbose: bool = False,
+        override: bool = False,
+        interpolate: bool = True,
+        encoding: Optional[str] = None,
+    ) -> bool:
+        return False
 
-# Load environment variables (development convenience; harmless if empty)
-load_dotenv()
+else:
+    # Use the real function when available
+    load_dotenv = _load_dotenv
 
-# Routers
+# First-party imports (also kept above any executable statements)
+from backend.logger import get_logger  # ensure DB init on startup
 from backend.api.session import router as session_router
 from backend.api.hand import router as hand_router
 from backend.api.export import router as export_router
-from backend.logger import get_logger  # ensure DB init on startup
 
+# If/when you add coach API:
+# from backend.api.coach import router as coach_router
+
+# --- Executable statements AFTER all imports ---
+# Load environment variables (development convenience; harmless if empty)
+load_dotenv()
+
+# Create app
 app = FastAPI(
     title="NLH Trainer API",
     version="0.1.0",
@@ -32,8 +53,6 @@ app = FastAPI(
 )
 
 # CORS for local frontend dev
-from fastapi.middleware.cors import CORSMiddleware
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -45,23 +64,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # -------- Startup hook (ensure DB schema exists early) --------
 @app.on_event("startup")
 def _init_db() -> None:
     # Touch the logger to ensure schema migrations/creation have run.
     get_logger()
 
+
 # -------- Health / Root --------
 @app.get("/", tags=["health"])
 def root() -> dict:
     return {"ok": True, "message": "NLH Trainer backend is up"}
 
+
 @app.get("/health", tags=["health"])
 def health() -> dict:
     return {"status": "ok"}
+
 
 # -------- API Routers --------
 # Everything under /api/...
 app.include_router(session_router, prefix="/api")
 app.include_router(hand_router, prefix="/api")
 app.include_router(export_router, prefix="/api")
+# app.include_router(coach_router, prefix="/api")

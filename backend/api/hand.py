@@ -43,6 +43,7 @@ _ACTION_IDX: Dict[str, int] = {}
 
 # ---------- Models ----------
 
+
 class StartHandResponse(BaseModel):
     hand_id: str
 
@@ -65,6 +66,7 @@ class StateResponse(BaseModel):
 
 
 # ---------- Helpers ----------
+
 
 def _hand_id_str(h: Any) -> str:
     """Coerce adapter hand id to string form (e.g., 1 -> 'H1')."""
@@ -105,7 +107,9 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
     Hide opponents' hole cards (mask to 'XX').
     """
     adapter = get_adapter()
-    s = adapter.state()  # dataclasses: table, players, street, deck_seed, last_action, pot_total
+    s = (
+        adapter.state()
+    )  # dataclasses: table, players, street, deck_seed, last_action, pot_total
     tbl = s.table
 
     # Players: mask everyone except human_seat
@@ -178,10 +182,15 @@ def _log_action(hand_id: str, seat: int, action: str, amount: Optional[int]) -> 
         allowed = getattr(la, "allowed_buckets", None)
         if allowed is not None:
             import json as _json
+
             meta_json = _json.dumps({"allowed_buckets": allowed})
 
     # Post-action pot
-    pot_after = int(getattr(snap, "pot_total", 0)) if getattr(snap, "pot_total", None) is not None else None
+    pot_after = (
+        int(getattr(snap, "pot_total", 0))
+        if getattr(snap, "pot_total", None) is not None
+        else None
+    )
 
     # Post-action to_call (for the *next* actor, if any)
     to_call_after: Optional[int] = None
@@ -238,7 +247,9 @@ def _auto_advance_bots(hand_id: str, human_seat: int) -> List[Dict[str, Any]]:
         adapter.apply_action(actor["seat"], action, amount)
         # Log the bot action (post-apply)
         _log_action(hand_id, actor["seat"], action, amount)
-        actions_taken.append({"seat": actor["seat"], "action": action, "amount": amount})
+        actions_taken.append(
+            {"seat": actor["seat"], "action": action, "amount": amount}
+        )
     return actions_taken
 
 
@@ -371,6 +382,7 @@ def _persist_snapshot(hand_id: str) -> None:
 
 # ---------- Routes ----------
 
+
 @router.post("/hand/start", response_model=StartHandResponse)
 def start_hand() -> StartHandResponse:
     """Begin a new hand and auto-advance bots until the first human decision."""
@@ -418,7 +430,9 @@ def post_action(req: ActionRequest) -> ActionResponse:
 
     # Only the configured human seat may act
     if req.seat != human_seat:
-        raise HTTPException(status_code=400, detail="Only the configured human seat may post actions.")
+        raise HTTPException(
+            status_code=400, detail="Only the configured human seat may post actions."
+        )
 
     # Determine current hand id from the adapter (internal counter is an int); normalize.
     hand_id_any = getattr(adapter, "hand_id", None)

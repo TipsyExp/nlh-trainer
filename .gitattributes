@@ -1,0 +1,2 @@
+﻿docs/examples/*.csv text eol=lf
+docs/examples/*.json text eol=lf

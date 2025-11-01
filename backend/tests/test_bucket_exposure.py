@@ -1,10 +1,12 @@
 from backend.adapters.engines import get_adapter
 
+
 def _setup():
     eng = get_adapter()
     eng.start_table(2, 50, 100, 0, [10000, 10000], "S")
     eng.start_hand()
     return eng
+
 
 def test_allowed_buckets_exposed_on_actor():
     eng = _setup()

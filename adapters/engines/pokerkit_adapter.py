@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 # ---------------------------------------------------------------------------
 # Lightweight snapshot dataclasses
 
+
 @dataclass
 class _TableSnap:
     seats: int
@@ -116,7 +117,9 @@ class PokerKitAdapter:
         """Recompute total pot as sum of committed (antes ignored in M0)."""
         self._pot_total = int(sum(self._committed))
 
-    def _allowed_buckets_data(self, to_call: int, actor_seat: Optional[int]) -> List[Dict[str, Any]]:
+    def _allowed_buckets_data(
+        self, to_call: int, actor_seat: Optional[int]
+    ) -> List[Dict[str, Any]]:
         """Compute allowed bet/raise buckets for the current actor."""
         buckets: List[Dict[str, Any]] = []
         # Allow calling if there is something to call
@@ -133,7 +136,9 @@ class PokerKitAdapter:
             # Opening raise buckets: ~2.2×/2.5×/3.0× BB (round to nearest int)
             for mult in (2.2, 2.5, 3.0):
                 target = int(round(mult * self.bb))
-                buckets.append({"label": f"{mult:.1f}x", "target": max(target, self.bb)})
+                buckets.append(
+                    {"label": f"{mult:.1f}x", "target": max(target, self.bb)}
+                )
         else:
             # Facing action: raises over the current price using last raise size
             base = max(self._last_raise_size, self.bb)
@@ -141,11 +146,13 @@ class PokerKitAdapter:
                 target = to_call + int(round(mult * base))
                 buckets.append({"label": f"{mult:.1f}xR", "target": target})
         # Always include jam with a huge target
-        buckets.append({"label": "jam", "target": 10 ** 12})
+        buckets.append({"label": "jam", "target": 10**12})
         buckets.sort(key=lambda b: b["target"])
         return buckets
 
-    def _snap_to_bucket(self, requested_total: int, to_call: int, actor_seat: Optional[int] = None) -> Dict[str, Any]:
+    def _snap_to_bucket(
+        self, requested_total: int, to_call: int, actor_seat: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Snap requested total commitment to nearest allowed bucket."""
         buckets = self._allowed_buckets_data(to_call, actor_seat)
         jam_bucket = next((b for b in buckets if b["label"] == "jam"), None)
@@ -156,7 +163,11 @@ class PokerKitAdapter:
         # Force jam if request is absurdly large
         jam_floor = max(self.bb * 100, max_non_jam * 20)
         if requested_total >= jam_floor:
-            best = jam_bucket or (max(nonjam, key=lambda b: b["target"]) if nonjam else {"label": "jam", "target": int(to_call)})
+            best = jam_bucket or (
+                max(nonjam, key=lambda b: b["target"])
+                if nonjam
+                else {"label": "jam", "target": int(to_call)}
+            )
         else:
             best = min(
                 buckets,
@@ -254,9 +265,13 @@ class PokerKitAdapter:
         if self.seats == 2 and self.sb_seat is not None:
             self._rotate_to(self.sb_seat)
         else:
-            self._rotate_to((self.bb_seat + 1) % self.seats if self.bb_seat is not None else 0)
+            self._rotate_to(
+                (self.bb_seat + 1) % self.seats if self.bb_seat is not None else 0
+            )
         # Build deterministic seed for deck
-        self._deck_seed = f"{self.base_seed}:{self.hand_id}" if self.base_seed is not None else None
+        self._deck_seed = (
+            f"{self.base_seed}:{self.hand_id}" if self.base_seed is not None else None
+        )
         # Deal hole cards deterministically
         rng = self._seeded_rng(self._deck_seed or f"default:{self.hand_id}")
         deck = self._new_shuffled_deck(rng)
@@ -281,7 +296,9 @@ class PokerKitAdapter:
             "allowed_buckets": [b["label"] for b in buckets],
         }
 
-    def apply_action(self, seat: int, action: str, amount: Optional[int] = None) -> None:
+    def apply_action(
+        self, seat: int, action: str, amount: Optional[int] = None
+    ) -> None:
         """Apply an action for a given seat.
 
         Args:
@@ -345,16 +362,22 @@ class PokerKitAdapter:
         # ----- Bet / Raise -----
         if action_l in ("bet", "raise"):
             if amount is None or not isinstance(amount, int):
-                raise ValueError("bet/raise requires integer 'amount' (total commitment)")
+                raise ValueError(
+                    "bet/raise requires integer 'amount' (total commitment)"
+                )
 
-            snap = self._snap_to_bucket(requested_total=amount, to_call=to_call, actor_seat=seat)
+            snap = self._snap_to_bucket(
+                requested_total=amount, to_call=to_call, actor_seat=seat
+            )
             committed_total = int(snap["target"])
 
             # Minimum raise enforcement
             if to_call > 0:
                 min_required = to_call + max(self.bb, self._last_raise_size)
                 if committed_total < min_required:
-                    raise ValueError(f"min-raise not met: need ≥ {min_required}, got {committed_total}")
+                    raise ValueError(
+                        f"min-raise not met: need ≥ {min_required}, got {committed_total}"
+                    )
             else:
                 # Opening bet must be at least the big blind
                 if committed_total < self.bb:

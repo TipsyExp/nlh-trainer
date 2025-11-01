@@ -17,6 +17,9 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 import glob
+import hashlib
+import shutil
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]  # repo root (../.. from tools/)
 DEFAULT_OUT = ROOT / "dist"
@@ -76,18 +79,64 @@ def short_sha() -> str:
         return datetime.utcnow().strftime("%Y%m%d%H%M%S")
 
 
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_dist_contents(stage_root: Path, relpaths: list[str]) -> None:
+    """Write DIST-CONTENTS.md into stage_root describing the staged payload."""
+    out = stage_root / "DIST-CONTENTS.md"
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Prefer CI-provided SHA, fall back to local short sha
+    commit = os.environ.get("GITHUB_SHA") or short_sha()
+    lines: list[str] = []
+    lines.append("# Distribution Contents")
+    lines.append("")
+    lines.append(f"Built from commit {commit} on {now}")
+    lines.append("")
+    lines.append("## Files")
+    for rp in sorted(relpaths):
+        size = (stage_root / rp).stat().st_size
+        lines.append(f"- {rp}  ({size} bytes)")
+    lines.append("")
+    lines.append("## Checksums (SHA256)")
+    for rp in sorted(relpaths):
+        sha = _sha256(stage_root / rp)
+        lines.append(f"{sha}  {rp}")
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--include-file", required=True, type=Path, help="Allowlist file with glob patterns")
-    ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT, help="Output directory for archive")
+    ap.add_argument(
+        "--include-file",
+        required=True,
+        type=Path,
+        help="Allowlist file with glob patterns",
+    )
+    ap.add_argument(
+        "--out-dir", type=Path, default=DEFAULT_OUT, help="Output directory for archive"
+    )
     ap.add_argument("--name", type=str, default=None, help="Override archive base name")
-    ap.add_argument("--dry-run", action="store_true", help="List files but do not create zip")
+    ap.add_argument(
+        "--dry-run", action="store_true", help="List files but do not create zip"
+    )
     ap.add_argument("--verbose", "-v", action="store_true", help="Print matched files")
     args = ap.parse_args()
 
-    include_path = args.include_file if args.include_file.is_absolute() else ROOT / args.include_file
+    include_path = (
+        args.include_file
+        if args.include_file.is_absolute()
+        else ROOT / args.include_file
+    )
     if not include_path.exists():
-        print(f"[packer] ERROR: include file not found: {include_path}", file=sys.stderr)
+        print(
+            f"[packer] ERROR: include file not found: {include_path}", file=sys.stderr
+        )
         return 2
 
     patterns = read_patterns(include_path)
@@ -116,12 +165,28 @@ def main() -> int:
     base = args.name or f"nlh-trainer-{short_sha()}"
     out_zip = out_dir / f"{base}.zip"
 
-    with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
+    # Stage allowlisted files, generate DIST-CONTENTS.md, then zip from the stage.
+    with tempfile.TemporaryDirectory(prefix="dist-stage-") as tmpdir:
+        stage_root = Path(tmpdir)
+
+        # Copy allowlisted files into the staging directory (preserve structure).
+        relpaths_posix: list[str] = []
         for relpath in files:
-            abs_path = ROOT / relpath
-            # Use POSIX arcnames for consistency
-            arcname = relpath.as_posix()
-            z.write(abs_path, arcname)
+            src = ROOT / relpath
+            dst = stage_root / relpath
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            relpaths_posix.append(relpath.as_posix())
+
+        # Create the manifest inside the staged payload.
+        _write_dist_contents(stage_root, relpaths_posix)
+
+        # Zip everything from staging (so the manifest is included).
+        with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
+            for p in stage_root.rglob("*"):
+                if p.is_file():
+                    arcname = p.relative_to(stage_root).as_posix()
+                    z.write(p, arcname)
 
     size_kib = out_zip.stat().st_size / 1024.0
     print(f"[packer] wrote {out_zip} ({size_kib:.1f} KiB)")
