@@ -128,17 +128,7 @@ jobs:
           pip install pytest pytest-xdist
 
       - name: Run tests
-        run: pytest -q -n auto backend/tests
-
-      - name: Upload pytest report (on failure)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pytest-report-unit
-          path: |
-            ./.data/**
-            ./pytest-report.xml
-          if-no-files-found: ignore
+        run: pytest -q backend/tests
 
   export-contract:
     name: Export Contract Tests
