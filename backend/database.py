@@ -255,7 +255,11 @@ class SQLiteLogger:
         self.conn.commit()
 
     def log_hand(
-        self, state: GameState, engine: str, evaluator: str, session_id: Optional[int] = None
+        self,
+        state: GameState,
+        engine: str,
+        evaluator: str,
+        session_id: Optional[int] = None,
     ) -> None:
         """Persist a complete hand snapshot, and insert actions only if none exist.
 
@@ -295,7 +299,9 @@ class SQLiteLogger:
                 pot_after=action.pot_after,
                 time_ms=action.time_ms,
                 rng_seed=action.rng_seed,
-                snapped=1 if action.snapped else 0 if action.snapped is not None else None,
+                snapped=(
+                    1 if action.snapped else 0 if action.snapped is not None else None
+                ),
                 meta=meta_str,
                 engine=engine,
                 evaluator=evaluator,

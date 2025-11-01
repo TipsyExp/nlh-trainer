@@ -1,6 +1,7 @@
 from __future__ import annotations
-import os, sqlite3
+import sqlite3
 from fastapi.testclient import TestClient
+
 
 def test_completed_hand_writes_actions(tmp_path, monkeypatch):
     # Isolate db for this test
@@ -10,15 +11,22 @@ def test_completed_hand_writes_actions(tmp_path, monkeypatch):
 
     # Import app AFTER env vars so startup hooks bind to our DB
     from backend.main import app
+
     client = TestClient(app)
 
     # Start a simple session
-    r = client.post("/api/session", json={
-        "seats": 2, "sb": 50, "bb": 100, "ante": 0,
-        "stacks": [10000, 10000],
-        "base_seed": "T15-logging-guard",
-        "human_seat": 0
-    })
+    r = client.post(
+        "/api/session",
+        json={
+            "seats": 2,
+            "sb": 50,
+            "bb": 100,
+            "ante": 0,
+            "stacks": [10000, 10000],
+            "base_seed": "T15-logging-guard",
+            "human_seat": 0,
+        },
+    )
     assert r.status_code == 200
 
     # Start a hand and take a deterministic first action
@@ -29,18 +37,23 @@ def test_completed_hand_writes_actions(tmp_path, monkeypatch):
     if actor:
         to_call = int(actor.get("to_call") or 0)
         action = "check" if to_call == 0 else "call"
-        r = client.post("/api/hand/action", json={
-            "seat": int(actor["seat"]),
-            "action": action,
-            "amount": None,
-        })
+        r = client.post(
+            "/api/hand/action",
+            json={
+                "seat": int(actor["seat"]),
+                "action": action,
+                "amount": None,
+            },
+        )
         assert r.status_code == 200
 
     # Assert at least one action logged
     con = sqlite3.connect(str(db))
     try:
         cur = con.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='actions'")
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='actions'"
+        )
         assert cur.fetchone(), "actions table missing"
         cur.execute("SELECT COUNT(*) FROM actions")
         n = cur.fetchone()[0]

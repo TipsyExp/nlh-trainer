@@ -13,8 +13,10 @@ from fastapi import FastAPI
 try:
     from dotenv import load_dotenv  # type: ignore
 except ImportError:
+
     def load_dotenv() -> None:  # type: ignore[no-redef]
         return None
+
 
 # Load environment variables (development convenience; harmless if empty)
 load_dotenv()
@@ -45,20 +47,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # -------- Startup hook (ensure DB schema exists early) --------
 @app.on_event("startup")
 def _init_db() -> None:
     # Touch the logger to ensure schema migrations/creation have run.
     get_logger()
 
+
 # -------- Health / Root --------
 @app.get("/", tags=["health"])
 def root() -> dict:
     return {"ok": True, "message": "NLH Trainer backend is up"}
 
+
 @app.get("/health", tags=["health"])
 def health() -> dict:
     return {"status": "ok"}
+
 
 # -------- API Routers --------
 # Everything under /api/...

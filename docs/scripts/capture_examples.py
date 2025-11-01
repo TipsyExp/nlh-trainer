@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from fastapi.testclient import TestClient
 
@@ -89,7 +89,9 @@ def main() -> None:
         export_and_write_examples(client, session_id, hand_id)
 
 
-def export_and_write_examples(client: TestClient, session_id: int, hand_id: str) -> None:
+def export_and_write_examples(
+    client: TestClient, session_id: int, hand_id: str
+) -> None:
     # Hand JSON
     h_json_resp = client.get(f"/api/export/hand/{hand_id}.json")
     h_json_resp.raise_for_status()

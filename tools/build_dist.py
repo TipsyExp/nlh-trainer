@@ -78,16 +78,31 @@ def short_sha() -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--include-file", required=True, type=Path, help="Allowlist file with glob patterns")
-    ap.add_argument("--out-dir", type=Path, default=DEFAULT_OUT, help="Output directory for archive")
+    ap.add_argument(
+        "--include-file",
+        required=True,
+        type=Path,
+        help="Allowlist file with glob patterns",
+    )
+    ap.add_argument(
+        "--out-dir", type=Path, default=DEFAULT_OUT, help="Output directory for archive"
+    )
     ap.add_argument("--name", type=str, default=None, help="Override archive base name")
-    ap.add_argument("--dry-run", action="store_true", help="List files but do not create zip")
+    ap.add_argument(
+        "--dry-run", action="store_true", help="List files but do not create zip"
+    )
     ap.add_argument("--verbose", "-v", action="store_true", help="Print matched files")
     args = ap.parse_args()
 
-    include_path = args.include_file if args.include_file.is_absolute() else ROOT / args.include_file
+    include_path = (
+        args.include_file
+        if args.include_file.is_absolute()
+        else ROOT / args.include_file
+    )
     if not include_path.exists():
-        print(f"[packer] ERROR: include file not found: {include_path}", file=sys.stderr)
+        print(
+            f"[packer] ERROR: include file not found: {include_path}", file=sys.stderr
+        )
         return 2
 
     patterns = read_patterns(include_path)

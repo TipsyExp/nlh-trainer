@@ -1,18 +1,22 @@
-import copy
 from backend.adapters.engines import get_adapter
-from backend.models.state import Street, PlayerStatus
+from backend.models.state import Street
+
 
 def _setup_hu():
     eng = get_adapter()
-    eng.start_table(seats=2, sb=50, bb=100, ante=0, stacks=[10000, 10000], base_seed="A")
+    eng.start_table(
+        seats=2, sb=50, bb=100, ante=0, stacks=[10000, 10000], base_seed="A"
+    )
     eng.start_hand()
     return eng
 
+
 def _setup_6max():
     eng = get_adapter()
-    eng.start_table(seats=6, sb=50, bb=100, ante=0, stacks=[10000]*6, base_seed="B")
+    eng.start_table(seats=6, sb=50, bb=100, ante=0, stacks=[10000] * 6, base_seed="B")
     eng.start_hand()
     return eng
+
 
 def test_hu_actor_order():
     eng = _setup_hu()
@@ -26,6 +30,7 @@ def test_hu_actor_order():
     s = eng.state()
     # On flop, BB acts first in HU (first active left of button)
     assert s.street in (Street.flop, Street.turn, Street.river, Street.showdown)
+
 
 def test_dealer_rotation_hu():
     eng = _setup_hu()
@@ -53,6 +58,7 @@ def test_dealer_rotation_hu():
     second_button = eng.state().table.button
     assert second_button == (first_button + 1) % 2
 
+
 def test_6max_blinds_and_utg_acts():
     eng = _setup_6max()
     s = eng.state()
@@ -60,6 +66,7 @@ def test_6max_blinds_and_utg_acts():
     # UTG acts first preflop (left of BB)
     utg = (s.table.bb_seat + 1) % 6
     assert eng.next_actor()["seat"] == utg
+
 
 def test_determinism_same_seed_same_deal():
     eng1 = get_adapter()

@@ -24,6 +24,7 @@ router = APIRouter(tags=["session"])
 
 # ---------- In-memory session state ----------
 
+
 @dataclass
 class SessionState:
     seats: int
@@ -47,6 +48,7 @@ def get_session_state() -> SessionState:
 
 
 # ---------- Models ----------
+
 
 class SessionRequest(BaseModel):
     seats: int
@@ -74,6 +76,7 @@ class SessionResponse(BaseModel):
 
 # ---------- Routes ----------
 
+
 @router.post("/session", response_model=SessionResponse)
 def create_or_reset_session(req: SessionRequest) -> SessionResponse:
     """Create a new session or reset the current one.
@@ -88,7 +91,9 @@ def create_or_reset_session(req: SessionRequest) -> SessionResponse:
         # Matches adapter signature: (seats, sb, bb, ante, stacks, base_seed=None)
         eng.start_table(req.seats, req.sb, req.bb, req.ante, req.stacks, req.base_seed)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"failed to start table: {e}") from e
+        raise HTTPException(
+            status_code=400, detail=f"failed to start table: {e}"
+        ) from e
 
     # Create a new session in the logger
     logger = get_logger()
@@ -104,4 +109,6 @@ def create_or_reset_session(req: SessionRequest) -> SessionResponse:
         human_seat=req.human_seat,
         logger_session_id=session_id,
     )
-    return SessionResponse(ok=True, detail="session created/reset", session_id=session_id)
+    return SessionResponse(
+        ok=True, detail="session created/reset", session_id=session_id
+    )

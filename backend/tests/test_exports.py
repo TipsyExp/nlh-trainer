@@ -8,7 +8,10 @@ from backend.main import app
 
 client = TestClient(app)
 
-def _create_session(seats=2, sb=50, bb=100, ante=0, stacks=None, base_seed="T12-export", human_seat=0) -> int:
+
+def _create_session(
+    seats=2, sb=50, bb=100, ante=0, stacks=None, base_seed="T12-export", human_seat=0
+) -> int:
     stacks = stacks or [10000, 10000]
     r = client.post(
         "/api/session",
@@ -27,20 +30,24 @@ def _create_session(seats=2, sb=50, bb=100, ante=0, stacks=None, base_seed="T12-
     assert data["ok"] is True
     return int(data["session_id"])
 
+
 def _start_hand() -> str:
     r = client.post("/api/hand/start")
     assert r.status_code == 200, r.text
     return r.json()["hand_id"]
+
 
 def _get_state() -> Dict[str, Any]:
     r = client.get("/api/hand/state")
     assert r.status_code == 200, r.text
     return r.json()
 
+
 def _deterministic_first_action(actor: Dict[str, Any]) -> Dict[str, Any]:
     to_call = int(actor.get("to_call", 0) or 0)
     action = "check" if to_call == 0 else "call"
     return {"seat": int(actor["seat"]), "action": action, "amount": None}
+
 
 def _post_action(payload: Dict[str, Any]) -> Dict[str, Any]:
     r = client.post("/api/hand/action", json=payload)
@@ -49,11 +56,13 @@ def _post_action(payload: Dict[str, Any]) -> Dict[str, Any]:
     assert data["ok"] is True
     return data
 
+
 def _export_hand_json(hand_id: str) -> Dict[str, Any]:
     r = client.get(f"/api/export/hand/{hand_id}.json")
     assert r.status_code == 200, r.text
     assert r.headers["content-type"].startswith("application/json")
     return r.json()
+
 
 def _export_hand_csv(hand_id: str) -> str:
     r = client.get(f"/api/export/hand/{hand_id}.csv")
@@ -61,17 +70,20 @@ def _export_hand_csv(hand_id: str) -> str:
     assert "text/csv" in r.headers["content-type"]
     return r.text
 
+
 def _export_session_json(session_id: int) -> Dict[str, Any]:
     r = client.get(f"/api/export/session/{session_id}.json")
     assert r.status_code == 200, r.text
     assert r.headers["content-type"].startswith("application/json")
     return r.json()
 
+
 def _export_session_csv(session_id: int) -> str:
     r = client.get(f"/api/export/session/{session_id}.csv")
     assert r.status_code == 200, r.text
     assert "text/csv" in r.headers["content-type"]
     return r.text
+
 
 def test_export_endpoints_and_shapes_minimal():
     # Arrange: session + one deterministic human action

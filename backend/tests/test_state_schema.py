@@ -11,7 +11,16 @@ import json
 import os
 import tempfile
 
-from backend.models.state import GameState, TableState, Street, PlayerState, SeatType, PlayerStatus, export_json, import_json
+from backend.models.state import (
+    GameState,
+    TableState,
+    Street,
+    PlayerState,
+    SeatType,
+    PlayerStatus,
+    export_json,
+    import_json,
+)
 from backend.database import SQLiteLogger
 
 
@@ -19,8 +28,20 @@ def _sample_game_state() -> GameState:
     """Create a minimal but nontrivial GameState instance for testing."""
     table = TableState(seat_count=2, sb=50, bb=100, ante=0)
     players = [
-        PlayerState(seat=0, type=SeatType.human, alias="Hero", stack=10000, status=PlayerStatus.active),
-        PlayerState(seat=1, type=SeatType.bot, alias="Bot", stack=10000, status=PlayerStatus.active),
+        PlayerState(
+            seat=0,
+            type=SeatType.human,
+            alias="Hero",
+            stack=10000,
+            status=PlayerStatus.active,
+        ),
+        PlayerState(
+            seat=1,
+            type=SeatType.bot,
+            alias="Bot",
+            stack=10000,
+            status=PlayerStatus.active,
+        ),
     ]
     return GameState(
         hand_id="hand_1",
@@ -38,8 +59,8 @@ def test_round_trip_json():
     """Verify that exporting then importing a GameState returns an identical structure."""
     state = _sample_game_state()
     json_str = export_json(state)
-    # ensure JSON is valid
-    parsed = json.loads(json_str)
+    # ensure JSON is valid (just parse; no need to keep the value)
+    json.loads(json_str)
     # import back into a GameState
     restored = import_json(json_str)
     assert restored.model_dump() == state.model_dump()

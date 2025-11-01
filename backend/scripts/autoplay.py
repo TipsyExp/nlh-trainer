@@ -75,7 +75,11 @@ def run_autoplay(num_hands: int = 100, base_seed: str = "autoplay_seed") -> None
             # actions for other seats.  We ignore the seat returned in
             # actor because bots are advanced automatically by the API.
             to_call = int(actor.get("to_call", 0))
-            action_req = {"seat": 0, "action": "check" if to_call <= 0 else "call", "amount": None}
+            action_req = {
+                "seat": 0,
+                "action": "check" if to_call <= 0 else "call",
+                "amount": None,
+            }
             action = client.post("/api/hand/action", json=action_req)
             # Treat non‑200 as fatal
             if action.status_code != 200:
