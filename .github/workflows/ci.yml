@@ -173,23 +173,27 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
-      - name: Capture fresh examples
+      - name: Regenerate examples (writes into docs/examples)
         run: |
-          mkdir -p .tmp-docs-examples
-          python docs/scripts/capture_examples.py --out .tmp-docs-examples --seed ci --db "$LOG_DB_PATH"
-      - name: Diff against committed examples
+          python docs/scripts/capture_examples.py
+      - name: Check drift via git diff
         run: |
-          if [ -d docs/examples ]; then
-            diff -ruN docs/examples .tmp-docs-examples
+          if git diff --quiet -- docs/examples; then
+            echo "No docs/examples drift."
           else
-            echo "No docs/examples directory to compare against"; exit 1
+            echo "Docs examples drift detected. Please regenerate & commit."
+            git diff -- docs/examples | tee docs_examples.diff
+            exit 1
           fi
-      - name: Upload diff (on failure)
+      - name: Upload drift diff (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: docs-drift
-          path: .tmp-docs-examples
+          path: |
+            docs/examples/**
+            docs_examples.diff
+          if-no-files-found: warn
 
   packaging-check:
     name: Packaging Hygiene
@@ -215,6 +219,14 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           python tools/build_dist.py --include-file dist-include.txt --out-dir dist
           mkdir -p .tmp-dist && unzip -q dist/*.zip -d .tmp-dist
+      - name: Enforce slim size (< 1 MiB)
+        run: |
+          BYTES=$(stat -c%s dist/nlh-trainer-*.zip)
+          echo "ZIP size: $BYTES bytes"
+          if [ "$BYTES" -gt 1048576 ]; then
+            echo "Archive too large (>1 MiB). Check allowlist and exclusions."
+            exit 1
+          fi
       - name: Forbidden content check
         run: |
           set -e
@@ -230,6 +242,9 @@ jobs:
           test -f .tmp-dist/requirements.txt
           test -f .tmp-dist/backend/requirements.txt || true
           test -f .tmp-dist/DIST-CONTENTS.md
+          # docs/examples included per allowlist
+          test -f .tmp-dist/docs/examples/export_hand.json
+          test -f .tmp-dist/docs/examples/export_session.json
       - name: Dependency sanity (optional)
         run: |
           python -m venv .venv-dist
@@ -274,7 +289,6 @@ jobs:
         run: |
           python - <<'PY'
           import sys
-          from pathlib import Path
           try:
               from backend.scripts.autoplay import run_autoplay
           except Exception as e:
@@ -292,7 +306,7 @@ jobs:
     name: Coach Disabled Guard (expects 501)
     runs-on: ubuntu-24.04
     needs: unit-tests
-    if: ${{ hashFiles('backend/**/coach*.py') != '' && hashFiles('backend/**/main.py') != '' }}
+    if: ${{ hashFiles('backend/**/main.py') != '' }}
     env:
       LOG_DB_PATH: ${{ github.workspace }}/.data/ci-coach.sqlite
       COACH_ENABLED: "false"
