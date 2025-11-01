@@ -289,20 +289,37 @@ jobs:
             exit 1
           fi
 
-      # NEW: keep this step, it finds the correct root under .tmp-dist
+      # Robust root detection
       - name: Determine extracted root
         if: steps.detect_dist.outputs.present == 'true'
         id: find_root
         run: |
+          set -euo pipefail
           ROOT_DIR=".tmp-dist"
-          if [ ! -d "$ROOT_DIR/backend" ]; then
-            CANDIDATE="$(find .tmp-dist -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-            if [ -n "$CANDIDATE" ]; then
-              ROOT_DIR="$CANDIDATE"
+
+          # Case 1: flat archive (files land directly in .tmp-dist)
+          if [ -f "$ROOT_DIR/backend/main.py" ]; then
+            echo "root=$ROOT_DIR" >> $GITHUB_OUTPUT
+            echo "Using extracted root (flat): $ROOT_DIR"
+            exit 0
+          fi
+
+          # Case 2: single top-level folder
+          mapfile -t CANDIDATES < <(find "$ROOT_DIR" -mindepth 1 -maxdepth 1 -type d | sort)
+          if [ "${#CANDIDATES[@]}" -eq 1 ]; then
+            ROOT_DIR="${CANDIDATES[0]}"
+          else
+            # Case 3: search for folder that contains backend/main.py
+            MATCH_PARENT="$(dirname "$(find "$ROOT_DIR" -type f -path "*/backend/main.py" | head -n 1 || true)")"
+            if [ -n "$MATCH_PARENT" ]; then
+              ROOT_DIR="$MATCH_PARENT"
             fi
           fi
+
           echo "root=$ROOT_DIR" >> $GITHUB_OUTPUT
           echo "Using extracted root: $ROOT_DIR"
+          # Helpful listing for quick debugging
+          find "$ROOT_DIR" -maxdepth 2 -type f | sort
 
       - name: Forbidden content check
         if: steps.detect_dist.outputs.present == 'true'
@@ -343,6 +360,15 @@ jobs:
           test -f "$ROOT/DIST-CONTENTS.md"
           test -f "$ROOT/docs/examples/export_hand.json"
           test -f "$ROOT/docs/examples/export_session.json"
+
+      - name: Upload dist (on failure)
+        if: failure() && steps.detect_dist.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-debug
+          path: |
+            dist/**
+            .tmp-dist/**
 
   autoplay-smoke:
     name: Autoplay Smoke (50 hands, coach off)
