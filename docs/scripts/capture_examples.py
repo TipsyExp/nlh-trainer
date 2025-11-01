@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
@@ -11,6 +12,12 @@ from fastapi.testclient import TestClient
 # IMPORTANT: set LOG_DB_PATH BEFORE importing/starting the app so the logger
 # initializes against our docs-local DB during startup.
 ROOT = Path(__file__).resolve().parents[2]
+
+# Ensure the repo root is importable when running this as a script
+# (so "from backend.main import app" works on Windows / direct invocations)
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 EXAMPLES_DIR = ROOT / "docs" / "examples"
 EXAMPLES_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("LOG_DB_PATH", str(EXAMPLES_DIR / "examples.sqlite"))
@@ -20,10 +27,20 @@ from backend.main import app  # noqa: E402
 
 
 def _write_json(path: Path, data: Any) -> None:
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    """
+    Write pretty JSON with stable key ordering and normalized LF newlines
+    to avoid CRLF (^M) drift on Windows.
+    """
+    text = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    _write_text(path, text)
 
 
 def _write_text(path: Path, text: str) -> None:
+    """
+    Write text with normalized LF newlines so that example files do not
+    differ between Windows (CRLF) and Linux/macOS (LF).
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     path.write_text(text, encoding="utf-8")
 
 
@@ -89,9 +106,7 @@ def main() -> None:
         export_and_write_examples(client, session_id, hand_id)
 
 
-def export_and_write_examples(
-    client: TestClient, session_id: int, hand_id: str
-) -> None:
+def export_and_write_examples(client: TestClient, session_id: int, hand_id: str) -> None:
     # Hand JSON
     h_json_resp = client.get(f"/api/export/hand/{hand_id}.json")
     h_json_resp.raise_for_status()
