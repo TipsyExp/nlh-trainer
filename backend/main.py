@@ -7,7 +7,9 @@ export. Root and health endpoints provide simple liveness probes.
 
 from __future__ import annotations
 
+# --- ALL IMPORTS AT THE TOP (fixes ruff E402) ---
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 # Optional env loader (no-op if python-dotenv isn't installed)
 try:
@@ -18,15 +20,20 @@ except ImportError:
         return None
 
 
-# Load environment variables (development convenience; harmless if empty)
-load_dotenv()
-
-# Routers
+# First-party imports (also kept above any executable statements)
+from backend.logger import get_logger  # ensure DB init on startup
 from backend.api.session import router as session_router
 from backend.api.hand import router as hand_router
 from backend.api.export import router as export_router
-from backend.logger import get_logger  # ensure DB init on startup
 
+# If/when you add coach API:
+# from backend.api.coach import router as coach_router
+
+# --- Executable statements AFTER all imports ---
+# Load environment variables (development convenience; harmless if empty)
+load_dotenv()
+
+# Create app
 app = FastAPI(
     title="NLH Trainer API",
     version="0.1.0",
@@ -34,8 +41,6 @@ app = FastAPI(
 )
 
 # CORS for local frontend dev
-from fastapi.middleware.cors import CORSMiddleware
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -71,3 +76,4 @@ def health() -> dict:
 app.include_router(session_router, prefix="/api")
 app.include_router(hand_router, prefix="/api")
 app.include_router(export_router, prefix="/api")
+# app.include_router(coach_router, prefix="/api")
