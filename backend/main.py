@@ -6,6 +6,8 @@ export. Root and health endpoints provide simple liveness probes.
 """
 
 from __future__ import annotations
+from typing import IO, Optional, Union
+from os import PathLike
 
 # --- ALL IMPORTS AT THE TOP (fixes ruff E402) ---
 from fastapi import FastAPI
@@ -13,12 +15,21 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # Optional env loader (no-op if python-dotenv isn't installed)
 try:
-    from dotenv import load_dotenv  # type: ignore
+    from dotenv import load_dotenv as _load_dotenv
 except ImportError:
-
-    def load_dotenv() -> None:  # type: ignore[no-redef]
-        return None
-
+    # Match the real signature exactly so mypy is satisfied
+    def load_dotenv(
+        dotenv_path: Optional[Union[str, PathLike[str]]] = None,
+        stream: Optional[IO[str]] = None,
+        verbose: bool = False,
+        override: bool = False,
+        interpolate: bool = True,
+        encoding: Optional[str] = None,
+    ) -> bool:
+        return False
+else:
+    # Use the real function when available
+    load_dotenv = _load_dotenv
 
 # First-party imports (also kept above any executable statements)
 from backend.logger import get_logger  # ensure DB init on startup
