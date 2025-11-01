@@ -14,7 +14,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Global defaults; jobs also set a per-job LOG_DB_PATH for isolation
   COACH_ENABLED: "false"
   PYTHONHASHSEED: "0"
 
@@ -51,7 +50,6 @@ jobs:
     name: Build & Lint (Frontend)
     runs-on: ubuntu-24.04
     needs: lint-python
-    if: ${{ hashFiles('frontend/package.json') != '' }}
     defaults:
       run:
         working-directory: frontend
@@ -59,7 +57,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Detect frontend
+        id: detect_frontend
+        run: |
+          if [ -f frontend/package.json ]; then
+            echo "present=true" >> $GITHUB_OUTPUT
+          else
+            echo "present=false" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+        working-directory: .
+
       - name: Use Node 20
+        if: steps.detect_frontend.outputs.present == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -67,6 +77,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install
+        if: steps.detect_frontend.outputs.present == 'true'
         run: |
           if [ -f package-lock.json ]; then
             npm ci
@@ -75,13 +86,20 @@ jobs:
           fi
 
       - name: Lint (eslint) if present
+        if: steps.detect_frontend.outputs.present == 'true'
         run: npm run lint --if-present
 
       - name: Typecheck (tsc) if present
+        if: steps.detect_frontend.outputs.present == 'true'
         run: npm run typecheck --if-present
 
       - name: Build (Next) if present
+        if: steps.detect_frontend.outputs.present == 'true'
         run: npm run build --if-present
+
+      - name: Skip (no frontend)
+        if: steps.detect_frontend.outputs.present != 'true'
+        run: echo "No frontend detected; job skipped."
 
   unit-tests:
     name: Unit Tests (Backend)
@@ -126,7 +144,6 @@ jobs:
     name: Export Contract Tests
     runs-on: ubuntu-24.04
     needs: unit-tests
-    if: ${{ hashFiles('backend/tests/test_exports.py', 'backend/tests/test_export_roundtrip.py') != '' }}
     env:
       LOG_DB_PATH: ${{ github.workspace }}/.data/ci-export.sqlite
       COACH_ENABLED: "false"
@@ -135,26 +152,44 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Detect export tests
+        id: detect_export_tests
+        run: |
+          if [ -f backend/tests/test_exports.py ] || [ -f backend/tests/test_export_roundtrip.py ]; then
+            echo "present=true" >> $GITHUB_OUTPUT
+          else
+            echo "present=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Set up Python
+        if: steps.detect_export_tests.outputs.present == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
+
       - name: Install deps
+        if: steps.detect_export_tests.outputs.present == 'true'
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
           pip install pytest
+
       - name: Run export contract tests
+        if: steps.detect_export_tests.outputs.present == 'true'
         run: |
           pytest -q backend/tests/test_exports.py backend/tests/test_export_roundtrip.py
+
+      - name: Skip (no export tests)
+        if: steps.detect_export_tests.outputs.present != 'true'
+        run: echo "No export tests found; job skipped."
 
   docs-contract:
     name: Docs Examples Drift
     runs-on: ubuntu-24.04
     needs: unit-tests
-    if: ${{ hashFiles('docs/scripts/capture_examples.py') != '' }}
     env:
       LOG_DB_PATH: ${{ github.workspace }}/.data/ci-docs.sqlite
       COACH_ENABLED: "false"
@@ -163,20 +198,37 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Detect capture script
+        id: detect_capture
+        run: |
+          if [ -f docs/scripts/capture_examples.py ]; then
+            echo "present=true" >> $GITHUB_OUTPUT
+          else
+            echo "present=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Set up Python
+        if: steps.detect_capture.outputs.present == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
+
       - name: Install deps
+        if: steps.detect_capture.outputs.present == 'true'
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
+
       - name: Regenerate examples (writes into docs/examples)
+        if: steps.detect_capture.outputs.present == 'true'
         run: |
           python docs/scripts/capture_examples.py
+
       - name: Check drift via git diff
+        if: steps.detect_capture.outputs.present == 'true'
         run: |
           if git diff --quiet -- docs/examples; then
             echo "No docs/examples drift."
@@ -185,8 +237,9 @@ jobs:
             git diff -- docs/examples | tee docs_examples.diff
             exit 1
           fi
+
       - name: Upload drift diff (on failure)
-        if: failure()
+        if: failure() && steps.detect_capture.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: docs-drift
@@ -195,11 +248,14 @@ jobs:
             docs_examples.diff
           if-no-files-found: warn
 
+      - name: Skip (no capture script)
+        if: steps.detect_capture.outputs.present != 'true'
+        run: echo "No docs/scripts/capture_examples.py; job skipped."
+
   packaging-check:
     name: Packaging Hygiene
     runs-on: ubuntu-24.04
     needs: unit-tests
-    if: ${{ hashFiles('tools/build_dist.py') != '' }}
     env:
       LOG_DB_PATH: ${{ github.workspace }}/.data/ci-pack.sqlite
       COACH_ENABLED: "false"
@@ -208,18 +264,33 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Detect dist builder
+        id: detect_dist
+        run: |
+          if [ -f tools/build_dist.py ]; then
+            echo "present=true" >> $GITHUB_OUTPUT
+          else
+            echo "present=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Set up Python
+        if: steps.detect_dist.outputs.present == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
+
       - name: Build dist
+        if: steps.detect_dist.outputs.present == 'true'
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           python tools/build_dist.py --include-file dist-include.txt --out-dir dist
           mkdir -p .tmp-dist && unzip -q dist/*.zip -d .tmp-dist
+
       - name: Enforce slim size (< 1 MiB)
+        if: steps.detect_dist.outputs.present == 'true'
         run: |
           BYTES=$(stat -c%s dist/nlh-trainer-*.zip)
           echo "ZIP size: $BYTES bytes"
@@ -227,7 +298,9 @@ jobs:
             echo "Archive too large (>1 MiB). Check allowlist and exclusions."
             exit 1
           fi
+
       - name: Forbidden content check
+        if: steps.detect_dist.outputs.present == 'true'
         run: |
           set -e
           if grep -R -E '(\.venv/|__pycache__/|\.pytest_cache/|node_modules/|\.next/|third_party/|\.git/|\.DS_Store)' .tmp-dist; then
@@ -235,25 +308,29 @@ jobs:
           else
             echo "No forbidden content found."
           fi
+
       - name: Required files present
+        if: steps.detect_dist.outputs.present == 'true'
         run: |
           test -f .tmp-dist/backend/main.py
           test -f .tmp-dist/Makefile
           test -f .tmp-dist/requirements.txt
           test -f .tmp-dist/backend/requirements.txt || true
           test -f .tmp-dist/DIST-CONTENTS.md
-          # docs/examples included per allowlist
           test -f .tmp-dist/docs/examples/export_hand.json
           test -f .tmp-dist/docs/examples/export_session.json
+
       - name: Dependency sanity (optional)
+        if: steps.detect_dist.outputs.present == 'true'
         run: |
           python -m venv .venv-dist
           . .venv-dist/bin/activate
           pip install --upgrade pip
           pip install -r .tmp-dist/requirements.txt || true
           pip check || true
+
       - name: Upload dist (on failure)
-        if: failure()
+        if: failure() && steps.detect_dist.outputs.present == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: dist-debug
@@ -261,11 +338,14 @@ jobs:
             dist/**
             .tmp-dist/**
 
+      - name: Skip (no dist builder)
+        if: steps.detect_dist.outputs.present != 'true'
+        run: echo "No tools/build_dist.py; job skipped."
+
   autoplay-smoke:
     name: Autoplay Smoke (50 hands, coach off)
     runs-on: ubuntu-24.04
     needs: unit-tests
-    if: ${{ hashFiles('backend/scripts/autoplay.py') != '' }}
     timeout-minutes: 10
     env:
       LOG_DB_PATH: ${{ github.workspace }}/.data/ci-autoplay.sqlite
@@ -275,17 +355,32 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Detect autoplay script
+        id: detect_autoplay
+        run: |
+          if [ -f backend/scripts/autoplay.py ]; then
+            echo "present=true" >> $GITHUB_OUTPUT
+          else
+            echo "present=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Set up Python
+        if: steps.detect_autoplay.outputs.present == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
+
       - name: Install deps
+        if: steps.detect_autoplay.outputs.present == 'true'
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
+
       - name: Run autoplay 50 hands
+        if: steps.detect_autoplay.outputs.present == 'true'
         run: |
           python - <<'PY'
           import sys
@@ -302,11 +397,14 @@ jobs:
               sys.exit(1)
           PY
 
+      - name: Skip (no autoplay)
+        if: steps.detect_autoplay.outputs.present != 'true'
+        run: echo "No backend/scripts/autoplay.py; job skipped."
+
   coach-off-guard:
     name: Coach Disabled Guard (expects 501)
     runs-on: ubuntu-24.04
     needs: unit-tests
-    if: ${{ hashFiles('backend/**/main.py') != '' }}
     env:
       LOG_DB_PATH: ${{ github.workspace }}/.data/ci-coach.sqlite
       COACH_ENABLED: "false"
@@ -315,17 +413,32 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Detect backend app
+        id: detect_app
+        run: |
+          if [ -f backend/main.py ]; then
+            echo "present=true" >> $GITHUB_OUTPUT
+          else
+            echo "present=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Set up Python
+        if: steps.detect_app.outputs.present == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
+
       - name: Install deps
+        if: steps.detect_app.outputs.present == 'true'
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
+
       - name: Assert 501 from /api/coach/advice when disabled
+        if: steps.detect_app.outputs.present == 'true'
         run: |
           python - <<'PY'
           import sys
@@ -342,3 +455,7 @@ jobs:
               sys.exit(1)
           print("Coach disabled guard OK (501).")
           PY
+
+      - name: Skip (no backend app)
+        if: steps.detect_app.outputs.present != 'true'
+        run: echo "No backend/main.py; job skipped."
