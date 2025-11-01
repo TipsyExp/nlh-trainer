@@ -274,14 +274,17 @@ jobs:
       - name: Build dist
         if: steps.detect_dist.outputs.present == 'true'
         run: |
+          set -e
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           python tools/build_dist.py --include-file dist-include.txt --out-dir dist
-          mkdir -p .tmp-dist && unzip -q dist/*.zip -d .tmp-dist
+          mkdir -p .tmp-dist
+          unzip -q dist/*.zip -d .tmp-dist
 
       - name: Enforce slim size (< 1 MiB)
         if: steps.detect_dist.outputs.present == 'true'
         run: |
+          set -e
           BYTES=$(stat -c%s dist/nlh-trainer-*.zip)
           echo "ZIP size: $BYTES bytes"
           if [ "$BYTES" -gt 1048576 ]; then
@@ -289,11 +292,28 @@ jobs:
             exit 1
           fi
 
+      - name: Determine extract root
+        if: steps.detect_dist.outputs.present == 'true'
+        id: dist_root
+        run: |
+          set -e
+          ROOT_DIR=".tmp-dist"
+          if [ ! -d "$ROOT_DIR/backend" ]; then
+            # If files are under a top-level folder, pick the first subdir.
+            CANDIDATE="$(find .tmp-dist -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+            if [ -n "$CANDIDATE" ]; then
+              ROOT_DIR="$CANDIDATE"
+            fi
+          fi
+          echo "root=$ROOT_DIR" >> $GITHUB_OUTPUT
+          echo "Using extracted root: $ROOT_DIR"
+
       - name: Forbidden content check
         if: steps.detect_dist.outputs.present == 'true'
         run: |
           set -e
-          BAD_DIRS="$(find .tmp-dist -type d \( \
+          ROOT="${{ steps.dist_root.outputs.root }}"
+          BAD_DIRS="$(find "$ROOT" -type d \( \
             -name '.venv' -o \
             -name '__pycache__' -o \
             -name '.pytest_cache' -o \
@@ -307,34 +327,36 @@ jobs:
             echo "$BAD_DIRS"
             exit 1
           fi
-
-          BAD_FILES="$(find .tmp-dist -type f -name '.DS_Store')"
+          BAD_FILES="$(find "$ROOT" -type f -name '.DS_Store')"
           if [ -n "$BAD_FILES" ]; then
             echo "Forbidden files found in dist:"
             echo "$BAD_FILES"
             exit 1
           fi
-
           echo "No forbidden content found."
 
       - name: Required files present
         if: steps.detect_dist.outputs.present == 'true'
         run: |
-          test -f .tmp-dist/backend/main.py
-          test -f .tmp-dist/Makefile
-          test -f .tmp-dist/requirements.txt
-          test -f .tmp-dist/backend/requirements.txt || true
-          test -f .tmp-dist/DIST-CONTENTS.md
-          test -f .tmp-dist/docs/examples/export_hand.json
-          test -f .tmp-dist/docs/examples/export_session.json
+          set -e
+          ROOT="${{ steps.dist_root.outputs.root }}"
+          test -f "$ROOT/backend/main.py"
+          test -f "$ROOT/Makefile"
+          test -f "$ROOT/requirements.txt"
+          test -f "$ROOT/backend/requirements.txt" || true
+          test -f "$ROOT/DIST-CONTENTS.md"
+          test -f "$ROOT/docs/examples/export_hand.json"
+          test -f "$ROOT/docs/examples/export_session.json"
 
       - name: Dependency sanity (optional)
         if: steps.detect_dist.outputs.present == 'true'
         run: |
+          set -e
+          ROOT="${{ steps.dist_root.outputs.root }}"
           python -m venv .venv-dist
           . .venv-dist/bin/activate
           pip install --upgrade pip
-          pip install -r .tmp-dist/requirements.txt || true
+          pip install -r "$ROOT/requirements.txt" || true
           pip check || true
 
       - name: Upload dist (on failure)
@@ -345,10 +367,6 @@ jobs:
           path: |
             dist/**
             .tmp-dist/**
-
-      - name: Skip (no dist builder)
-        if: steps.detect_dist.outputs.present != 'true'
-        run: echo "No tools/build_dist.py; job skipped."
 
   autoplay-smoke:
     name: Autoplay Smoke (50 hands, coach off)
