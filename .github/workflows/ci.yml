@@ -44,7 +44,7 @@ jobs:
         run: black --check .
 
       - name: Mypy (backend)
-        run: mypy backend
+        run: mypy --config-file pyproject.toml backend
 
   build-and-lint-web:
     name: Build & Lint (Frontend)
