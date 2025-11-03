@@ -1,94 +1,237 @@
 # State Schema
 
-This document describes the structure of the game state objects returned by the NLH Trainer API.  These objects are serialised to JSON using Pydantic models in `backend/models/state.py`.  The schema below is authoritative for milestone M1.
+This document describes the **actual** JSON shapes the backend returns today (M1).  
+There are two closely related snapshots you’ll see:
 
-## GameState
+1) **Live state** – returned by `/api/hand/state` and `/api/hand/action` (under `state`).  
+2) **Exported state** – embedded as `state` inside `/api/export/hand/{id}.json` and `/api/export/session/{id}.json`.
 
-The top‑level state structure returned by `/api/hand/state` and included in the `state` object in export payloads.  All fields are required unless otherwise noted.
+They differ slightly (e.g., where seat positions live, which fields are summarized).  
+When behavior changes, re-run `docs/scripts/capture_examples.py` and update this document to match the captured examples.
 
-| Field | Type | Description |
-|------|------|-------------|
-| `hand_id` | string | Unique identifier for the hand. |
-| `deck_seed` | string | Seed used to initialise the deck.  Allows deterministic replay. |
-| `table` | object | Table configuration (see below). |
-| `dealer_seat` | integer | Index of the dealer (button) seat. |
-| `sb_seat` | integer | Index of the small blind seat. |
-| `bb_seat` | integer | Index of the big blind seat. |
-| `street` | string | Current street: one of `"preflop"`, `"flop"`, `"turn"`, `"river"`, or `"showdown"`. |
-| `players` | array of PlayerState | Snapshot of each player’s status.  See PlayerState below. |
-| `pot_total` | integer | Total chips in the pot, including blinds and antes. |
-| `last_action` | object or null | The most recent action, with fields `idx`, `actor_seat`, `action`, and `amount`.  Null before any action has occurred. |
-| `action_history` | array of ActionRecord | Chronological list of every action taken so far.  See ActionRecord below. |
+---
 
-### PlayerState
+## 1) Live State (for `/api/hand/state` and `/api/hand/action`)
 
-Represents a single seat at the table.
+Top-level object:
 
-| Field | Type | Description |
-|------|------|-------------|
-| `seat` | integer | Seat index. |
-| `type` | string | Either `"human"` or `"bot"`. |
-| `alias` | string | Nickname of the player. |
-| `stack` | integer | Number of chips remaining. |
-| `status` | string | One of `"active"`, `"allin"`, `"folded"`, or `"out"`. |
-| `hole_cards` | array of strings | Two card strings for the hero; bots show `?` until showdown. |
+| Field        | Type                         | Description |
+|-------------|------------------------------|-------------|
+| `deck_seed` | string                        | Seed used to initialize the deck (e.g., `"DOCS-EXAMPLE-SEED-1:1"`). |
+| `street`    | string                        | One of `"preflop"`, `"flop"`, `"turn"`, `"river"`. |
+| `players`   | array of **PlayerLive**       | Minimal per-seat info for the UI (hero cards shown; opponents masked). |
+| `table`     | **TableLive**                 | Table configuration + seat positions **nested under `table`**. |
+| `pot_total` | integer                       | Current total pot chips (includes blinds/antes). |
+| `last_action` | **LastActionSummary** \| null | UI-oriented summary of the most recent action; `null` before any action. |
 
-### Table
+### 1.1 PlayerLive
 
-| Field | Type | Description |
-|------|------|-------------|
-| `seat_count` | integer | Number of seats at the table (e.g. 2 for heads‑up). |
-| `sb` | integer | Size of the small blind. |
-| `bb` | integer | Size of the big blind. |
-| `ante` | integer | Ante posted by each player (zero in heads‑up examples). |
+Represents minimal seat/card visibility at the table.
 
-### ActionRecord
+| Field         | Type            | Description |
+|---------------|-----------------|-------------|
+| `seat`        | integer         | Seat index. |
+| `hole_cards`  | array of string | Hero shows two cards (e.g., `["5s","4s"]`); opponents masked as `["XX","XX"]` until showdown. |
 
-Each entry in `action_history` has the following fields:
+> Note: In live responses today, fields like `alias`, `type`, `stack`, and `status` are **not** included (they appear in exported state instead).
 
-| Field | Type | Description |
-|------|------|-------------|
-| `idx` | integer | Zero‑based index of the decision within the hand. |
-| `street` | string | Street on which the action was taken. |
-| `actor_seat` | integer | Seat index of the acting player. |
-| `type` | string | Action type: `"fold"`, `"check"`, `"call"`, `"bet"`, `"raise"`, or `"allin"`. |
-| `amount` | integer or null | Amount of chips bet or raised.  Null for folds and checks. |
-| `bucket` | string or null | Bucket label chosen, if applicable (see [BET‑TREES](BET-TREES.md)). |
-| `to_call_after` | integer | Chips needed to call after the action resolves. |
-| `pot_after` | integer | Pot size immediately after the action. |
-| `time_ms` | integer or null | Duration of the action in milliseconds, if measured. |
-| `rng_seed` | integer or null | RNG seed used for randomised decisions (currently unused for the bot). |
-| `snapped` | boolean | Whether the bet size was snapped to the nearest bucket. |
-| `meta` | object or null | Reserved for solver metadata. |
-| `engine` | string | Engine identifier (e.g. `"rlcard"`). |
-| `evaluator` | string or null | Evaluator identifier, if used. |
-| `created_at` | string | ISO‑8601 timestamp when the action was recorded. |
+### 1.2 TableLive
 
-## Full Example
+| Field      | Type    | Description |
+|------------|---------|-------------|
+| `seats`    | integer | Number of seats (e.g. `2` for heads-up). |
+| `sb`       | integer | Small blind amount. |
+| `bb`       | integer | Big blind amount. |
+| `ante`     | integer | Per-player ante (often `0` HU). |
+| `button`   | integer | Dealer/button seat index. |
+| `sb_seat`  | integer | Small blind seat index. |
+| `bb_seat`  | integer | Big blind seat index. |
 
-The following condensed example shows the structure of a GameState at the end of a hand.  It is derived from `docs/examples/export_hand.json`.  For brevity, only two actions are included in the `action_history`.
+> Positions (`button`, `sb_seat`, `bb_seat`) are nested inside `table` in live responses.
+
+### 1.3 LastActionSummary
+
+A compact, UI-facing description of the most recent action. Present after `/api/hand/action` and `null` initially.
+
+| Field             | Type                 | Description |
+|-------------------|----------------------|-------------|
+| `type`            | string               | `"fold"`, `"check"`, `"call"`, `"bet"`, `"raise"`, etc. |
+| `seat`            | integer              | Acting seat for this last action. |
+| `bucket_label`    | string \| null       | Bucket label if applicable (see BET-TREES); otherwise `null`. |
+| `snapped`         | boolean \| null      | `true/false` if a bet/raise was snapped to a bucket; `null` when N/A. |
+| `requested`       | integer \| null      | Raw user-entered size when present. |
+| `committed`       | integer \| null      | Effective committed amount when present. |
+| `allowed_buckets` | array \| null        | Usually `null` in this summary; present when relevant UI context exists. |
+
+> This is **not** the full action record used in exports; it’s a concise summary for the table UI.
+
+### 1.4 Live Example (excerpt)
+
+From `docs/examples/hand_state.json` and `docs/examples/hand_action.json`:
 
 ```json
 {
+  "deck_seed": "DOCS-EXAMPLE-SEED-1:1",
+  "street": "flop",
+  "players": [
+    {"seat": 0, "hole_cards": ["5s","4s"]},
+    {"seat": 1, "hole_cards": ["XX","XX"]}
+  ],
+  "pot_total": 0,
+  "table": {
+    "ante": 0,
+    "bb": 100,
+    "bb_seat": 1,
+    "button": 0,
+    "sb": 50,
+    "sb_seat": 0,
+    "seats": 2
+  },
+  "last_action": {
+    "type": "check",
+    "seat": 1,
+    "bucket_label": null,
+    "snapped": null,
+    "requested": null,
+    "committed": null,
+    "allowed_buckets": null
+  }
+}
+2) Exported State (embedded under state in export payloads)
+
+When you call:
+
+GET /api/export/hand/{hand_id}.json
+
+GET /api/export/session/{session_id}.json
+
+…the state object inside each hand export looks slightly different from the live state:
+| Field            | Type                          | Description                                                  |
+| ---------------- | ----------------------------- | ------------------------------------------------------------ |
+| `hand_id`        | string                        | Hand identifier (e.g., `"H1"`).                              |
+| `deck_seed`      | string                        | Same seed used during the hand.                              |
+| `table`          | **TableExport**               | Table configuration **with seat count** (no positions here). |
+| `dealer_seat`    | integer                       | Dealer/button seat index (top-level in export).              |
+| `sb_seat`        | integer                       | Small blind seat index (top-level in export).                |
+| `bb_seat`        | integer                       | Big blind seat index (top-level in export).                  |
+| `street`         | string                        | Final (or current at export time) street.                    |
+| `players`        | array of **PlayerExport**     | Rich per-seat info (alias, type, stack, status).             |
+| `action_history` | array of **ActionRecordLite** | Chronological list of actions so far (compact form).         |
+
+Note: In exported state, positions are top-level (dealer_seat, sb_seat, bb_seat), and pot_total is not included.
+The total pot and timing metadata live with the per-action rows in the export actions list (see section 3).
+
+2.1 PlayerExport
+| Field    | Type    | Description                                    |
+| -------- | ------- | ---------------------------------------------- |
+| `seat`   | integer | Seat index.                                    |
+| `type`   | string  | `"human"` or `"bot"`.                          |
+| `alias`  | string  | Nickname.                                      |
+| `stack`  | integer | Remaining stack at snapshot time.              |
+| `status` | string  | `"active"`, `"allin"`, `"folded"`, or `"out"`. |
+
+Opponent hole cards are not included here in current exports; visibility rules apply at showdown.
+
+2.2 TableExport
+| Field        | Type    | Description                   |
+| ------------ | ------- | ----------------------------- |
+| `seat_count` | integer | Number of seats at the table. |
+| `sb`         | integer | Small blind.                  |
+| `bb`         | integer | Big blind.                    |
+| `ante`       | integer | Per-player ante.              |
+
+2.3 ActionRecordLite (for state.action_history)
+
+This list is a compact mirror of what happened, used for quick replay context inside the exported state.
+It is not the same as the richer per-action rows found under the top-level actions array in the export.
+| Field           | Type           | Description                                             |
+| --------------- | -------------- | ------------------------------------------------------- |
+| `idx`           | integer        | Zero-based decision index.                              |
+| `street`        | string         | Street on which the action occurred.                    |
+| `actor_seat`    | integer        | Acting seat.                                            |
+| `type`          | string         | `"fold"`, `"check"`, `"call"`, `"bet"`, `"raise"`, etc. |
+| `amount`        | integer | null | Chips bet/raised; `null` for check/fold.                |
+| `bucket`        | string | null  | Bucket label if applicable (see BET-TREES).             |
+| `to_call_after` | integer        | To-call after the action resolves.                      |
+| `pot_after`     | integer        | Pot size right after the action.                        |
+| `snapped`       | boolean | null | `true/false` when snapping applied; `null` when N/A.    |
+
+Notice there is no engine, evaluator, time_ms, rng_seed, or created_at in action_history.
+Those appear with the top-level export actions (see below).
+
+2.4 Exported State Example (excerpt)
+
+From docs/examples/export_hand.json:
+{
   "hand_id": "H1",
-  "deck_seed": "DOCS-EXAMPLES",
-  "table": {"seat_count": 2, "sb": 5, "bb": 10, "ante": 0},
+  "deck_seed": "DOCS-EXAMPLE-SEED-1:1",
   "dealer_seat": 0,
   "sb_seat": 0,
   "bb_seat": 1,
-  "street": "showdown",
+  "street": "flop",
   "players": [
-    {"seat": 0, "type": "human", "alias": "Hero", "stack": 0, "status": "allin", "hole_cards": ["Td", "2s"]},
-    {"seat": 1, "type": "bot", "alias": "Bot",  "stack": 0, "status": "allin", "hole_cards": ["?", "?"]}
+    {"seat": 0, "type": "human", "alias": "Hero", "stack": 10000, "status": "active"},
+    {"seat": 1, "type": "bot", "alias": "Bot1", "stack": 10000, "status": "active"}
   ],
-  "pot_total": 1000,
-  "last_action": {"idx": 39, "actor_seat": 1, "action": "call", "amount": 100, "street": "river"},
+  "table": {"seat_count": 2, "sb": 50, "bb": 100, "ante": 0},
   "action_history": [
-    {"idx": 0, "street": "preflop", "actor_seat": 0, "type": "call",  "amount": 10, "bucket": null, "to_call_after": 10, "pot_after": 25, "time_ms": null, "rng_seed": null, "snapped": false, "meta": null, "engine": "rlcard", "evaluator": null, "created_at": "2025-10-24T12:34:56Z"},
-    {"idx": 1, "street": "preflop", "actor_seat": 1, "type": "raise", "amount": 30, "bucket": "3.0x", "to_call_after": 20, "pot_after": 55, "time_ms": null, "rng_seed": null, "snapped": false, "meta": null, "engine": "rlcard", "evaluator": null, "created_at": "2025-10-24T12:34:57Z"}
-    // ...remaining actions omitted for brevity
+    {"idx": 0, "street": "preflop", "actor_seat": 0, "type": "call",  "amount": null, "bucket": null, "to_call_after": 0, "pot_after": 0, "snapped": null},
+    {"idx": 1, "street": "flop",    "actor_seat": 1, "type": "check", "amount": null, "bucket": null, "to_call_after": 0, "pot_after": 0, "snapped": null}
   ]
 }
-```
+3) Export Actions (top-level actions in export payloads)
 
-Refer to `docs/examples/export_hand.json` for the full list of actions and the exact final state.
+In export_hand.json and export_session.json, each exported hand includes actions: [...].
+These rows match the CSV columns and carry the richer metadata:
+
+Stable CSV header (current):
+hand_id,idx,street,actor_seat,action,amount,bucket,to_call_after,pot_after,snapped,engine,evaluator
+
+ExportAction fields (JSON):
+| Field           | Type           | Description                                             |
+| --------------- | -------------- | ------------------------------------------------------- |
+| `idx`           | integer        | Zero-based decision index.                              |
+| `street`        | string         | Street.                                                 |
+| `actor_seat`    | integer        | Acting seat.                                            |
+| `action`        | string         | `"fold"`, `"check"`, `"call"`, `"bet"`, `"raise"`, etc. |
+| `amount`        | integer | null | Chips bet/raised; `null` for check/fold.                |
+| `bucket`        | string | null  | Bucket label when applicable.                           |
+| `to_call_after` | integer        | To-call after resolution.                               |
+| `pot_after`     | integer        | Pot right after the action.                             |
+| `snapped`       | boolean | null | `true/false` if snapping occurred; `null` when N/A.     |
+| `engine`        | string         | Engine identifier (e.g., `"PokerKit"`).                 |
+| `evaluator`     | string | null  | Evaluator identifier (e.g., `"PokerKit"`), or `null`.   |
+
+Not present in current exports: time_ms, rng_seed, meta, created_at.
+If those get added later, update this schema and the CSV header accordingly.
+
+ExportAction example (from docs/examples/export_hand.json):
+{
+  "idx": 0,
+  "street": "preflop",
+  "actor_seat": 0,
+  "action": "call",
+  "amount": null,
+  "bucket": null,
+  "to_call_after": 0,
+  "pot_after": 0,
+  "snapped": null,
+  "engine": "PokerKit",
+  "evaluator": "PokerKit"
+}
+
+4) Notes & Invariants
+
+Masking: Opponent hole cards are "XX" in live state until showdown.
+
+Buckets: Labels and semantics are defined in BET-TREES.md. Off-tree sizes may be snapped; when snapping is not applicable, snapped is null.
+
+Shape differences:
+
+Live state nests positions inside table and includes pot_total and a UI-oriented last_action.
+
+Exported state moves positions to top-level, omits pot_total, and includes a compact action_history.
+
+Rich per-action metadata appears only in the top-level export actions array (and CSV).
+
+Stability: The CSV header and JSON field set above are considered stable for M1. If runtime fields change, regenerate examples and update this document in the same commit.
