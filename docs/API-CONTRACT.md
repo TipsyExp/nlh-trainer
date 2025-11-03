@@ -1,219 +1,205 @@
-# API Contract
+API Contract
 
-This document defines the public API for the NLH Trainer backend.  Each route is described with its HTTP method, URL path, query or body parameters, and example responses captured from live runs.  The examples below are drawn from the `docs/examples` directory to ensure they accurately reflect the current behaviour of the API.  When new endpoints are added or behaviour changes, this contract must be updated accordingly.
+This document defines the public API for the NLH-Trainer backend. Each route lists its method, path, parameters, and example responses captured from live runs. The examples referenced are stored under docs/examples/ and should be regenerated via docs/scripts/capture_examples.py whenever behavior changes.
 
-## Base URL
+Base URL
 
-All endpoints are served under the `/api` path by the FastAPI application defined in `backend/main.py`.  The server returns JSON responses and uses standard HTTP status codes.
+All endpoints are served under /api by the FastAPI app in backend/main.py. Responses are JSON unless otherwise noted.
 
----
+Health
 
-## Health Check
+GET /api/health
 
-* **GET** `/api/health`
+Returns a simple heartbeat.
 
-  Returns a simple JSON payload indicating that the service is running.  No parameters are required.
+Response
+{"ok": true}
 
-  **Response Example**
+Session
 
-  ```json
-  {"ok": true}
-  ```
+A session configures table parameters and groups hands.
 
----
+Create/Reset Session
 
-## Session Management
+POST /api/session
 
-These endpoints reset or create a new game session.  A session groups hands together and configures game parameters like starting stacks and RNG seed.
+Request body (typical)
+{
+  "seats": 2,
+  "sb": 50,
+  "bb": 100,
+  "ante": 0,
+  "stacks": [10000, 10000],
+  "base_seed": "DOCS-EXAMPLE-SEED-1",
+  "human_seat": 0
+}
+Notes
 
-### Create or Reset Session
+The server maintains a single active session in-process; no query params are required.
 
-* **POST** `/api/session`
+Fields shown reflect typical usage from the UI. Additional fields may be ignored or defaulted by the server.
 
-  **Query Parameters**
-  - `base_seed` (string, optional): When provided, all subsequent RNG values derive from this seed, ensuring repeatability of hands.  If omitted, a random seed is used.
+Response
+Taken from docs/examples/session_create.json:
+{
+  "detail": "session created/reset",
+  "ok": true,
+  "session_id": 1
+}
 
-  **Request Body**
-  This endpoint does not require a JSON body.  Parameters are passed as query strings.
+Hand
 
-  **Response Fields**
-  - `detail` (string): Human‐readable message indicating that a session was created or reset.
-  - `ok` (boolean): Always `true` on success.
-  - `session_id` (integer): Unique identifier for the newly created session.
+Hands must be started before you can fetch state or act.
 
-  **Example Response**
+Start Hand
 
-  The following example is taken from `docs/examples/session_create.json`:
+POST /api/hand/start
 
-  ```json
-  {"detail": "session created/reset", "ok": true, "session_id": 10}
-  ```
+Starts a new hand in the active session.
 
----
+Response
+Taken from docs/examples/hand_start.json:
+{"hand_id": "H1"}
 
-## Hand Management
+Get Current Hand State
 
-A hand represents a single round of poker within a session.  Hands must be explicitly started before any state or actions can be requested.
+GET /api/hand/state
 
-### Start a Hand
+Returns the acting player context and a snapshot of public state for the current hand.
 
-* **POST** `/api/hand/start`
-
-  **Query Parameters**
-  - `session_id` (integer, required): The session identifier returned by `POST /api/session`.
-
-  **Response Fields**
-  - `hand_id` (string): Unique identifier for the newly created hand.
-
-  **Example Response**
-
-  ```json
-  {"hand_id": "H1"}
-  ```
-
-### Get Hand State
-
-* **GET** `/api/hand/state`
-
-  **Query Parameters**
-  - `hand_id` (string, required): Identifier of the hand to inspect.
-
-  **Response Fields**
-  - `actor` (object): Describes the current player whose turn it is to act.  Contains:
-    - `seat` (integer): Seat index of the acting player.
-    - `to_call` (integer): Number of chips needed to call.
-    - `allowed_buckets` (array of strings): Buckets (bet sizes) permitted for this action, e.g. `"2.2x"`, `"3.0xR"`, `"jam"`.  See [BET‑TREES](BET-TREES.md) for definitions.
-    - `min_raise` (integer): Minimum raise amount allowed in this spot (in chips).
-  - `state` (object): Complete game state snapshot.  See [STATE‑SCHEMA](STATE-SCHEMA.md) for field definitions.
-
-  **Example Response**
-
-  The following excerpt from `docs/examples/hand_state.json` illustrates the structure of the `actor` and `state` fields:
-
-  ```json
-  {
-    "actor": {
-      "seat": 0,
-      "to_call": 0,
-      "allowed_buckets": ["2.2x", "2.5x", "3.0x", "jam"],
-      "min_raise": 20
-    },
-    "state": {
-      "hand_id": "H1",
-      "deck_seed": "DOCS-EXAMPLES",
-      "street": "preflop",
-      "players": [
-        {"seat": 0, "type": "human", "alias": "Hero", "stack": 500, "status": "active", "hole_cards": ["Td", "2s"]},
-        {"seat": 1, "type": "bot", "alias": "Bot", "stack": 500, "status": "active", "hole_cards": ["?", "?"]}
-      ],
-      "table": {"seat_count": 2, "sb": 5, "bb": 10, "ante": 0},
-      "dealer_seat": 0, "sb_seat": 0, "bb_seat": 1,
-      "pot_total": 15
+Response (excerpt)
+From docs/examples/hand_state.json:
+{
+  "actor": {
+    "allowed_buckets": ["call","2.2x","2.5x","3.0x","jam"],
+    "min_raise": 150,
+    "seat": 0,
+    "to_call": 50
+  },
+  "state": {
+    "deck_seed": "DOCS-EXAMPLE-SEED-1:1",
+    "last_action": null,
+    "players": [
+      {"hole_cards": ["5s","4s"], "seat": 0},
+      {"hole_cards": ["XX","XX"], "seat": 1}
+    ],
+    "pot_total": 0,
+    "street": "preflop",
+    "table": {
+      "ante": 0,
+      "bb": 100,
+      "bb_seat": 1,
+      "button": 0,
+      "sb": 50,
+      "sb_seat": 0,
+      "seats": 2
     }
   }
-  ```
+}
 
-### Apply an Action
+Notes
 
-* **POST** `/api/hand/action`
+Hole cards for non-hero seats are masked as "XX".
 
-  **Query Parameters**
-  - `hand_id` (string, required): Identifier of the hand to act on.
+Bucket labels are defined in BET-TREES.md
+{
+  "action": "check" | "call" | "bet" | "raise" | "fold",
+  "bucket": "2.5x" | "3.0x" | "jam" | null   // optional; required when betting/raising
+}
+On success, the server applies automatic bot responses (if any) and returns the updated state.
 
-  **Request Body**
-  - `action` (string, required): One of `"check"`, `"call"`, `"bet"`, `"raise"`, or `"fold"`.
-  - `bucket` (string, optional): For bets or raises, the bucket label chosen (e.g. `"2.5x"` or `"jam"`).  Must be one of the values listed in `allowed_buckets`.
-
-  **Response Fields**
-  - `bots_applied` (array): Zero or more actions automatically taken by bots in response to the player’s action.  Each entry has a structure similar to entries in the `actions` list returned by export endpoints (see below).
-  - `ok` (boolean): Always `true` when the action is valid.
-  - `state` (object): Updated game state after all automatic responses.
-
-  **Example Response**
-
-  From `docs/examples/hand_action.json` after the human checks preflop:
-
-  ```json
-  {
-    "bots_applied": [
-      {"actor_seat": 1, "action": "check", "street": "preflop", "idx": 1},
-      {"actor_seat": 1, "action": "check", "street": "flop",    "idx": 2}
+Response (excerpt)
+From docs/examples/hand_action.json:
+{
+  "bots_applied": [
+    {"action": "check", "amount": null, "seat": 1},
+    {"action": "check", "amount": null, "seat": 1}
+  ],
+  "ok": true,
+  "state": {
+    "deck_seed": "DOCS-EXAMPLE-SEED-1:1",
+    "last_action": {
+      "allowed_buckets": null,
+      "bucket_label": null,
+      "committed": null,
+      "requested": null,
+      "seat": 1,
+      "snapped": null,
+      "type": "check"
+    },
+    "players": [
+      {"hole_cards": ["5s","4s"], "seat": 0},
+      {"hole_cards": ["XX","XX"], "seat": 1}
     ],
-    "ok": true,
-    "state": {"street": "flop", "last_action": {"actor_seat": 1, "action": "check", "idx": 2}, ... }
+    "pot_total": 0,
+    "street": "flop",
+    "table": {
+      "ante": 0, "bb": 100, "bb_seat": 1, "button": 0, "sb": 50, "sb_seat": 0, "seats": 2
+    }
   }
-  ```
+}
 
----
+Export
 
-## Export Endpoints
+Completed hands/sessions can be exported in JSON or CSV. The JSON contains a final state snapshot and an actions array. The CSV has one row per action.
 
-Completed hands and sessions can be exported as JSON or CSV for downstream analysis or replay.  Both formats include a list of actions and the final state snapshot.  In the CSV, each action is one row; the JSON nests actions in an array and includes the full `state` object.
+Stable CSV header (current format)
+hand_id,idx,street,actor_seat,action,amount,bucket,to_call_after,pot_after,snapped,engine,evaluator
 
-The CSV header order is stable and documented below.  It always begins with `hand_id` and includes `action` and `created_at` towards the end.  The `snapped` field appears as a boolean in JSON but as `0`/`1` in CSV.
+Export Hand (JSON)
 
-### Export Hand (JSON)
+GET /api/export/hand/{hand_id}.json
 
-* **GET** `/api/export/hand/{hand_id}.json`
+Shape
+{
+  "hand_id": "H1",
+  "actions": [
+    {
+      "action": "call" | "check" | "bet" | "raise" | "fold",
+      "actor_seat": 0,
+      "amount": null | number,
+      "bucket": null | "2.2x" | "2.5x" | "3.0x" | "jam",
+      "engine": "PokerKit",
+      "evaluator": "PokerKit",
+      "idx": 0,
+      "pot_after": 0,
+      "snapped": null | true | false,
+      "street": "preflop" | "flop" | "turn" | "river",
+      "to_call_after": 0
+    }
+  ],
+  "state": { /* final state snapshot */ }
+}
 
-  Returns a JSON object with:
-  - `actions` (array): Each entry records one decision in the hand.  Fields include `idx`, `street`, `actor_seat`, `action`, `amount`, `bucket`, `to_call_after`, `pot_after`, `time_ms`, `rng_seed`, `snapped`, `meta`, `engine`, `evaluator`, and `created_at` (ISO‑8601 timestamp).
-  - `state` (object): Final game state after the hand concludes.  See [STATE‑SCHEMA](STATE-SCHEMA.md).
+See docs/examples/export_hand.json for a full example.
 
-  **Example**
+Export Hand (CSV)
 
-  See `docs/examples/export_hand.json` for a full example.  Below is a small excerpt showing the first two actions:
+GET /api/export/hand/{hand_id}.csv
 
-  ```json
-  {
-    "actions": [
-      {"idx": 0, "street": "preflop", "actor_seat": 0, "action": "call",  "amount": 10, "bucket": null, "to_call_after": 10, "pot_after": 25, "snapped": false, "engine": "rlcard", "evaluator": null, "created_at": "2025-10-24T12:34:56Z"},
-      {"idx": 1, "street": "preflop", "actor_seat": 1, "action": "raise", "amount": 30, "bucket": "3.0x", "to_call_after": 20, "pot_after": 55, "snapped": false, "engine": "rlcard", "evaluator": null, "created_at": "2025-10-24T12:34:57Z"}
-      ...
-    ],
-    "state": {"hand_id": "H1", ... }
-  }
-  ```
+Header and sample rows are shown in docs/examples/export_hand.csv.
 
-### Export Hand (CSV)
+Export Session (JSON)
 
-* **GET** `/api/export/hand/{hand_id}.csv`
+GET /api/export/session/{session_id}.json
 
-  Produces a comma‑separated file where each row corresponds to one action.  The header columns are:
+Returns an object with hands: [...], where each element has the same structure as a hand export.
 
-  ```csv
-  hand_id,idx,street,actor_seat,action,amount,bucket,to_call_after,pot_after,time_ms,rng_seed,snapped,meta,engine,evaluator,created_at
-  ```
+See docs/examples/export_session.json.
 
-  An example can be found in `docs/examples/export_hand.csv`.
+Export Session (CSV)
 
-### Export Session (JSON)
+GET /api/export/session/{session_id}.csv
 
-* **GET** `/api/export/session/{session_id}.json`
+Header is identical to hand CSV. Example: docs/examples/export_session.csv.
 
-  Returns an array of exported hands for the given session.  Each entry has the same structure as the hand export described above.
+Conventions & Notes
 
-  **Example**
+Nullability: Some fields (e.g., amount, bucket, snapped) may be null depending on the action or phase.
 
-  See `docs/examples/export_session.json`.
+Buckets: See BET-TREES.md
+State shape: The state object in responses reflects the live implementation and may include derived fields such as pot_total and a summarized last_action.
 
-### Export Session (CSV)
+Single-session model: This server operates a single in-memory session by default; /hand/* endpoints act on the active session/hand without requiring query parameters.
 
-* **GET** `/api/export/session/{session_id}.csv`
-
-  Concatenates all actions from every hand in the session into a single CSV.  The header is identical to the hand export and appears once at the top of the file.
-
-  **Header Example**
-
-  ```csv
-  hand_id,idx,street,actor_seat,action,amount,bucket,to_call_after,pot_after,time_ms,rng_seed,snapped,meta,engine,evaluator,created_at
-  ```
-
----
-
-## Notes
-
-* All timestamps (`created_at`) are ISO‑8601 strings in UTC.  They are truncated to seconds in these examples for readability.
-* Enum values such as `street` and action `type` are always returned as lowercase strings (`"preflop"`, `"flop"`, `"turn"`, `"river"`, `"showdown"`, etc.).
-* The `snapped` field in JSON is a boolean (`true` or `false`), while in CSV it is represented as `1` for `true` and `0` for `false`.
-* Buckets are defined in [BET‑TREES](BET-TREES.md).  Unknown or unsupported buckets will produce validation errors.
+If you change response shapes or add/remove fields, regenerate examples with docs/scripts/capture_examples.py and update this document to match.
