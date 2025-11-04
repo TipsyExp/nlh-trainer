@@ -169,7 +169,7 @@ class TagBot(BaseBotPolicy):
         # Range manager API:
         mgr = rm.get_manager()
 
-        choice = None
+        choice: Any = None
         if hasattr(mgr, "choose_preflop"):
             # Preferred modern API
             choice = mgr.choose_preflop(position=position, facing=facing, stack_bb=100, rng=rng)
