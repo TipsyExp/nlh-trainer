@@ -11,6 +11,7 @@ from backend.policy.range_manager import RangeChoice
 
 # ---------- tiny helpers ----------
 
+
 def ctx(
     *,
     street: str = "preflop",
@@ -40,6 +41,7 @@ def ctx(
 
 # ---------- CallCheckBot basic behavior ----------
 
+
 def test_callcheck_policy_checks_when_nothing_to_call() -> None:
     policy = CallCheckBot()
     decision = policy.decide(ctx(street="flop", to_call=0), rng=bot_rng(["seed"]))
@@ -53,6 +55,7 @@ def test_callcheck_policy_calls_when_facing_bet() -> None:
 
 
 # ---------- TagBot postflop (thin rule) ----------
+
 
 def test_tag_postflop_ip_uncapped_stabs_with_smallest_nx_bucket() -> None:
     policy = TagBot()
@@ -103,6 +106,7 @@ def test_tag_postflop_oop_checks_when_to_call_zero() -> None:
 # We don't rely on on-disk YAML fixtures in this thin test. Instead we
 # monkeypatch the range manager singleton to return a desired RangeChoice.
 
+
 class _DummyMgr:
     def __init__(self, choice: RangeChoice) -> None:
         self.choice = choice
@@ -118,11 +122,15 @@ class _DummyMgr:
         ("3.5x", ["2.2x", "2.5x", "3.0x"], 300),  # snap DOWN to nearest allowed (3.0x)
     ],
 )
-def test_tag_preflop_raise_respects_or_snaps_bucket(monkeypatch, size_label, allowed, expected_amount) -> None:
+def test_tag_preflop_raise_respects_or_snaps_bucket(
+    monkeypatch, size_label, allowed, expected_amount
+) -> None:
     # Arrange the range manager to request a RAISE with given size_label
     from backend.policy import range_manager as rm
 
-    monkeypatch.setattr(rm, "get_manager", lambda: _DummyMgr(RangeChoice("raise", size_label, "chart")))
+    monkeypatch.setattr(
+        rm, "get_manager", lambda: _DummyMgr(RangeChoice("raise", size_label, "chart"))
+    )
     policy = TagBot()
 
     c = ctx(
@@ -136,7 +144,10 @@ def test_tag_preflop_raise_respects_or_snaps_bucket(monkeypatch, size_label, all
     decision = policy.decide(c, rng=bot_rng(["preflop", "raise"]))
 
     # Assert
-    assert decision["action"] in ("bet", "raise")  # depending on implementation name for open
+    assert decision["action"] in (
+        "bet",
+        "raise",
+    )  # depending on implementation name for open
     assert decision.get("amount") == expected_amount
 
 
@@ -144,12 +155,14 @@ def test_tag_preflop_missing_chart_fallback_calls(monkeypatch) -> None:
     # Arrange: range manager returns a fallback CALL (e.g., chart missing)
     from backend.policy import range_manager as rm
 
-    monkeypatch.setattr(rm, "get_manager", lambda: _DummyMgr(RangeChoice("call", None, "fallback")))
+    monkeypatch.setattr(
+        rm, "get_manager", lambda: _DummyMgr(RangeChoice("call", None, "fallback"))
+    )
     policy = TagBot()
 
     c = ctx(
         street="preflop",
-        to_call=100,          # facing an open
+        to_call=100,  # facing an open
         bb=100,
         allowed_buckets=["call", "2.5xR", "3.0xR", "jam"],
     )
@@ -159,6 +172,7 @@ def test_tag_preflop_missing_chart_fallback_calls(monkeypatch) -> None:
 
 
 # ---------- RNG helper determinism ----------
+
 
 def test_bot_rng_deterministic_same_components() -> None:
     r1 = bot_rng(["a", 1, "H1", 0, 2, "bot"])

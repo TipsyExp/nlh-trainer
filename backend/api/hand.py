@@ -59,6 +59,7 @@ def _get_next_db_idx(hand_id: str) -> int:
 
 # ---------- Bot policy selection ----------
 
+
 def _select_bot_policy() -> BaseBotPolicy:
     """Select a bot policy based on environment. Default remains CALL/CHECK."""
     name = os.environ.get("BOT_PROFILE", "CALLCHECK").strip().upper()
@@ -178,7 +179,9 @@ def _build_actor_ctx_for_policy(actor: Dict[str, Any]) -> Dict[str, Any]:
     # "First action on this street" ≈ to_call==0 and last_action is not bet/raise
     la = getattr(s, "last_action", None)
     last_type = getattr(la, "type", None) if la else None
-    first_action_this_street = (int(actor.get("to_call", 0)) == 0) and (last_type not in ("bet", "raise"))
+    first_action_this_street = (int(actor.get("to_call", 0)) == 0) and (
+        last_type not in ("bet", "raise")
+    )
 
     ctx = {
         "seat": seat,
@@ -300,7 +303,16 @@ def _auto_advance_bots(hand_id: str, human_seat: int) -> List[Dict[str, Any]]:
         # Build deterministic RNG for this exact decision
         ss = get_session_state()
         next_idx = _get_next_db_idx(hand_id)
-        rng = bot_rng([ss.base_seed or "", ss.logger_session_id, hand_id, next_idx, int(actor["seat"]), "bot"])
+        rng = bot_rng(
+            [
+                ss.base_seed or "",
+                ss.logger_session_id,
+                hand_id,
+                next_idx,
+                int(actor["seat"]),
+                "bot",
+            ]
+        )
 
         # Build policy context and get decision
         ctx = _build_actor_ctx_for_policy(actor)

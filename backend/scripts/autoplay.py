@@ -98,7 +98,9 @@ def run_autoplay(
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Autoplay NLH trainer hands using FastAPI TestClient.")
+    p = argparse.ArgumentParser(
+        description="Autoplay NLH trainer hands using FastAPI TestClient."
+    )
     p.add_argument(
         "--hands",
         "-n",

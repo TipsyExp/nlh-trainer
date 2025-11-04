@@ -8,8 +8,8 @@ import random
 
 @dataclass
 class Decision:
-    action: str                  # "check" | "call" | "bet" | "raise"
-    amount: Optional[int] = None # total commitment when betting/raising
+    action: str  # "check" | "call" | "bet" | "raise"
+    amount: Optional[int] = None  # total commitment when betting/raising
 
 
 class BaseBotPolicy:
@@ -34,7 +34,9 @@ class BaseBotPolicy:
 class CallCheckBot(BaseBotPolicy):
     """Default behavior: check when nothing to call; otherwise call."""
 
-    def decide(self, ctx: Dict[str, Any], rng: random.Random) -> Dict[str, Any]:  # noqa: ARG002
+    def decide(
+        self, ctx: Dict[str, Any], rng: random.Random
+    ) -> Dict[str, Any]:  # noqa: ARG002
         to_call = int(ctx.get("to_call", 0))
         if to_call <= 0:
             return {"action": "check"}
@@ -117,7 +119,9 @@ class TagBot(BaseBotPolicy):
       - No raises/folds postflop in this slice.
     """
 
-    def decide(self, ctx: Dict[str, Any], rng: random.Random) -> Dict[str, Any]:  # noqa: ARG002
+    def decide(
+        self, ctx: Dict[str, Any], rng: random.Random
+    ) -> Dict[str, Any]:  # noqa: ARG002
         street = str(ctx.get("street", "preflop"))
         to_call = int(ctx.get("to_call", 0))
         bb = int(ctx.get("bb", 100))
@@ -172,7 +176,9 @@ class TagBot(BaseBotPolicy):
         choice: Any = None
         if hasattr(mgr, "choose_preflop"):
             # Preferred modern API
-            choice = mgr.choose_preflop(position=position, facing=facing, stack_bb=100, rng=rng)
+            choice = mgr.choose_preflop(
+                position=position, facing=facing, stack_bb=100, rng=rng
+            )
         elif hasattr(mgr, "choose_action"):
             # Back-compat with older API variants (different signatures):
             # Try rng-based signature first
@@ -191,6 +197,7 @@ class TagBot(BaseBotPolicy):
                 def __init__(self) -> None:
                     self.action = "call"
                     self.size_label = None
+
             choice = _Fallback()
 
         act = str(getattr(choice, "action", "call"))

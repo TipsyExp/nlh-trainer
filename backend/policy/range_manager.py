@@ -179,7 +179,13 @@ class RangeManager:
             if seed is not None:
                 rng.seed(f"ranges:{seat_count}:{position}:{facing}:{seed}")
         # Reuse the same logic
-        return self.choose_preflop(position=position, facing=facing, stack_bb=100, rng=rng, seat_count=seat_count)
+        return self.choose_preflop(
+            position=position,
+            facing=facing,
+            stack_bb=100,
+            rng=rng,
+            seat_count=seat_count,
+        )
 
 
 # --- module singleton ---
