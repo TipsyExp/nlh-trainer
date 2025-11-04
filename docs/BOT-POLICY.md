@@ -1,26 +1,90 @@
 # Bot Policy
 
-The NLH Trainer includes a simple deterministic bot used for automatic opponent actions in test scenarios and in the examples captured in `docs/examples`. This section documents its behaviour and hints at potential future extensions.
+The NLH Trainer ships with a deterministic bot system used for automated opponent
+actions in tests and examples. The default behavior remains **check/call only** for
+stability, and an optional **TAG** profile can be enabled via an environment
+variable for a slightly richer, still deterministic flow.
 
-## Current Behaviour (M1)
+---
 
-The bot’s decision policy is intentionally minimalist to provide a stable baseline for unit tests:
+## Profiles
 
-* If the amount to call (`to_call`) is **zero**, the bot will **check**.
-* Otherwise (if there is a call amount), the bot will **call** the full amount.
+| Profile       | Enabled by                      | Preflop                         | Postflop                                                   | Notes |
+| ---           | ---                             | ---                             | ---                                                        | --- |
+| `CALLCHECK`   | Default (no env needed)         | Check if `to_call == 0`, else call | Check if `to_call == 0`, else call                         | Never folds/raises. Used for docs/examples and baseline tests. |
+| `TAG` (opt-in)| `BOT_PROFILE=TAG`               | Uses `range_manager` to pick fold/call/**raise bucket** | IP + first action on street + `to_call == 0` → **stab** with the **smallest simple Nx** bucket (e.g. `2.2x`); otherwise **check/call** | Deterministic via seeded RNG. Never raises postflop in this thin slice. |
 
-This policy means that the bot never folds, never raises, and never bluffs. As a result, hands proceed quickly to showdown once a human player begins betting.
+> Determinism: bot decisions are driven by a seeded RNG constructed from
+> `[base_seed, session_id, hand_id, decision_idx, bot_seat, "bot"]`. With the same
+> path and seed, the bot produces identical actions across runs.
 
-### Example
+---
 
-In the pre-flop example contained in `docs/examples/hand_action.json`, the human checks. The bot responds with a check on the pre-flop street and then, because there is still no amount to call on the flop, checks again. This deterministic behaviour makes hand replays deterministic when the RNG seed is fixed.
+## Decision Details
 
-## Future Extensions
+### Default `CALLCHECK`
+- **If `to_call == 0`** → `check`
+- **Else** → `call`
+- Applies **preflop and postflop**.
+- Used by default to keep existing docs/examples stable.
 
-While the current bot is extremely simple, the infrastructure supports richer policies. Potential enhancements include:
+### `TAG` (thin slice)
 
-* **Mixing Strategies**: Introducing randomised thresholds for betting or folding to simulate variance in decision making.
-* **Aggression Multipliers**: Scaling bucket sizes up or down to create loose or tight opponents.
-* **Positional Awareness**: Choosing different buckets based on whether the bot is in or out of position.
+**Preflop**
+- Uses the `range_manager` to obtain a structured choice:
+{"action": "fold"|"call"|"raise", "bucket": "2.2x"|"2.5x"|..., "freq": float}
 
-These features are not enabled in milestone M1 to keep the environment deterministic. When such knobs are introduced, they will be documented in this file and exposed via configuration flags.
+- If `action == "raise"` and the suggested bucket is **not** present in `allowed_buckets`,
+snap **down** to the nearest allowed simple `Nx` size (down on ties).  
+If nothing legal remains, **fall back to call**.
+- Raise amounts are computed from bucket labels:
+- For simple `Nx`: `amount = round(N * bb)` (total commitment).
+- Missing charts fall back safely (prefer `call` over inventing raises).
+
+**Postflop**
+- If **in position (IP)**, **first action on the street**, and **`to_call == 0`**:
+- **Bet (stab)** using the **smallest simple `Nx`** bucket in `allowed_buckets`
+  (e.g., `2.2x`). *(Today the engine exposes `Nx`/`NxR` buckets, not %pot labels
+  like `33`. When %pot labels appear, the policy can be updated to prefer those.)*
+- Otherwise:
+- **If facing a bet** → `call`
+- **Else** → `check`
+- No raises/folds postflop in this slice.
+
+---
+
+## Enabling the `TAG` Profile
+
+**bash/zsh**
+```bash
+export BOT_PROFILE=TAG
+uvicorn backend.main:app --reload
+
+PowerShell
+$env:BOT_PROFILE = "TAG"
+uvicorn backend.main:app --reload
+
+With BOT_PROFILE unset, the default CALLCHECK profile is used.
+Logging & Exports
+
+Each action (human or bot) is logged with:
+
+idx (per-hand decision index), street, actor_seat, type, amount
+
+bucket (as emitted by the engine), snapped (if engine auto-adjusts),
+
+to_call_after, pot_after, and rng_seed (for replay/debugging).
+
+Snapshots are upserted into hands after every action, so JSON/CSV exports
+reflect mid-hand state.
+
+Notes & Gotchas
+
+Never invent labels. Bots only emit bucket labels that appear in the current
+allowed_buckets.
+
+Determinism: Avoid global random.* calls. All bot randomness must come
+from the seeded RNG passed into the policy.
+
+Docs/examples stability: The default profile remains CALLCHECK, so existing
+example outputs don’t change.

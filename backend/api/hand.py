@@ -10,8 +10,9 @@ the ``hands`` table after every action so that exports work mid-hand.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -19,6 +20,8 @@ from pydantic import BaseModel
 from backend.adapters.engines import get_adapter
 from backend.api.session import get_session_state
 from backend.logger import get_logger
+from backend.policy.bot_profiles import CallCheckBot, TagBot, BaseBotPolicy
+from backend.policy.rng import bot_rng
 from backend.models import (
     GameState,
     TableState,
@@ -39,6 +42,31 @@ router = APIRouter(tags=["hand"])
 # actions to be logged in order even when bots act between human
 # decisions.
 _ACTION_IDX: Dict[str, int] = {}
+
+
+def _get_next_db_idx(hand_id: str) -> int:
+    """Read the current max idx for this hand from DB and return the next value.
+    This prevents UNIQUE(idx) collisions when process state drifts or after errors.
+    """
+    logger = get_logger()
+    cur = logger.conn.cursor()  # type: ignore[attr-defined]
+    row = cur.execute(
+        "SELECT COALESCE(MAX(idx), -1) + 1 AS next_idx FROM actions WHERE hand_id = ?",
+        (hand_id,),
+    ).fetchone()
+    return int(row["next_idx"] if row and "next_idx" in row.keys() else 0)
+
+
+# ---------- Bot policy selection ----------
+
+
+def _select_bot_policy() -> BaseBotPolicy:
+    """Select a bot policy based on environment. Default remains CALL/CHECK."""
+    name = os.environ.get("BOT_PROFILE", "CALLCHECK").strip().upper()
+    if name == "TAG":
+        return TagBot()
+    # default
+    return CallCheckBot()
 
 
 # ---------- Models ----------
@@ -139,16 +167,37 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
     return resp
 
 
-def _pick_bot_action(actor: Dict[str, Any]) -> Tuple[str, Optional[int]]:
-    """
-    Naive heuristic for M0:
-      - if to_call == 0: "check"
-      - else: "call"
-    """
-    to_call = int(actor.get("to_call", 0))
-    if to_call <= 0:
-        return "check", None
-    return "call", None
+def _build_actor_ctx_for_policy(actor: Dict[str, Any]) -> Dict[str, Any]:
+    """Assemble context the policy needs (street, IP flag, first-action-this-street, etc.)."""
+    adapter = get_adapter()
+    s = adapter.state()
+    tbl = s.table
+    seat = int(actor.get("seat", -1))
+    # Postflop IP heuristic in HU: button acts last on flop/turn/river
+    is_postflop = str(s.street) in ("flop", "turn", "river")
+    in_position = is_postflop and (seat == int(tbl.button))
+    # "First action on this street" ≈ to_call==0 and last_action is not bet/raise
+    la = getattr(s, "last_action", None)
+    last_type = getattr(la, "type", None) if la else None
+    first_action_this_street = (int(actor.get("to_call", 0)) == 0) and (
+        last_type not in ("bet", "raise")
+    )
+
+    ctx = {
+        "seat": seat,
+        "street": str(s.street),
+        "bb": int(tbl.bb),
+        "to_call": int(actor.get("to_call", 0)),
+        "min_raise": int(actor.get("min_raise", 0)),
+        "allowed_buckets": list(actor.get("allowed_buckets", [])),
+        "in_position": bool(in_position),
+        "first_action_this_street": bool(first_action_this_street),
+        # raw bits the policy might find handy
+        "button": int(tbl.button),
+        "sb_seat": int(tbl.sb_seat),
+        "bb_seat": int(tbl.bb_seat),
+    }
+    return ctx
 
 
 def _log_action(hand_id: str, seat: int, action: str, amount: Optional[int]) -> None:
@@ -162,8 +211,13 @@ def _log_action(hand_id: str, seat: int, action: str, amount: Optional[int]) -> 
 
     logger = get_logger()
     adapter = get_adapter()
-    # Determine index; initialise if necessary
-    idx = _ACTION_IDX.get(hand_id, 0)
+    # Determine index robustly from DB to avoid UNIQUE collisions.
+    # Keep the in-memory counter in sync afterwards.
+    try:
+        idx = _get_next_db_idx(hand_id)
+    except Exception:
+        # Fallback to in-memory counter if DB read fails
+        idx = _ACTION_IDX.get(hand_id, 0)
 
     # Grab a post-action snapshot of state (caller must call this AFTER apply_action)
     snap = adapter.state()
@@ -236,6 +290,8 @@ def _auto_advance_bots(hand_id: str, human_seat: int) -> List[Dict[str, Any]]:
     hand_id = _hand_id_str(hand_id)
 
     actions_taken: List[Dict[str, Any]] = []
+    policy = _select_bot_policy()
+
     # safety to avoid infinite loops
     for _ in range(100):
         actor = adapter.next_actor()
@@ -243,7 +299,28 @@ def _auto_advance_bots(hand_id: str, human_seat: int) -> List[Dict[str, Any]]:
             break
         if int(actor["seat"]) == human_seat:
             break
-        action, amount = _pick_bot_action(actor)
+
+        # Build deterministic RNG for this exact decision
+        ss = get_session_state()
+        next_idx = _get_next_db_idx(hand_id)
+        rng = bot_rng(
+            [
+                ss.base_seed or "",
+                ss.logger_session_id,
+                hand_id,
+                next_idx,
+                int(actor["seat"]),
+                "bot",
+            ]
+        )
+
+        # Build policy context and get decision
+        ctx = _build_actor_ctx_for_policy(actor)
+        decision = policy.decide(ctx, rng)
+        action = str(decision.get("action", "check")).lower().strip()
+        amount = decision.get("amount")
+
+        # Apply
         adapter.apply_action(actor["seat"], action, amount)
         # Log the bot action (post-apply)
         _log_action(hand_id, actor["seat"], action, amount)
@@ -394,6 +471,7 @@ def start_hand() -> StartHandResponse:
 
     # Reset index for this hand
     _ACTION_IDX[hand_id] = 0
+    # Also ensure DB-derived next idx starts at 0 by not relying on previous hand rows
 
     # Ensure a parent hand row exists *before* any actions are logged
     _persist_snapshot(hand_id)

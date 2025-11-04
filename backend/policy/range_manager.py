@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any
 import os
@@ -51,23 +52,29 @@ class RangeManager:
             return
         pattern = os.path.join(self.root, "*.yaml")
         for path in glob.glob(pattern):
-            with open(path, "r", encoding="utf-8") as f:
-                doc = yaml.safe_load(f) or {}
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    doc = yaml.safe_load(f) or {}
+            except Exception as exc:
+                log.warning("Skipping %s (read error: %s)", path, exc)
+                continue
+
             if not isinstance(doc, dict) or doc.get("schema") != "v1":
                 log.warning("Skipping %s (bad or missing schema)", path)
                 continue
+
             seat_count = str(doc.get("seat_count"))
             positions = doc.get("positions") or {}
             if not seat_count or not isinstance(positions, dict):
                 log.warning("Skipping %s (missing seat_count/positions)", path)
                 continue
+
             self._charts.setdefault(seat_count, {})
             for pos, facings in positions.items():
                 if not isinstance(facings, dict):
                     continue
                 self._charts[seat_count].setdefault(pos, {})
                 for facing, weights in facings.items():
-                    # normalize structure: ensure keys exist
                     if not isinstance(weights, dict):
                         continue
                     # expected keys: fold (int), call (int), raise (dict label->int)
@@ -76,7 +83,6 @@ class RangeManager:
                     raise_w = weights.get("raise", {})
                     if not isinstance(raise_w, dict):
                         raise_w = {}
-                    # keep as-is
                     self._charts[seat_count][pos][facing] = {
                         "fold": fold_w,
                         "call": call_w,
@@ -97,6 +103,7 @@ class RangeManager:
         """Return (action, size_label). size_label only for 'raise'."""
         # Flatten to (action,label)->weight pairs
         pairs: Dict[Tuple[str, Optional[str]], int] = {}
+
         # fold/call singletons
         fw = int(dist.get("fold", 0) or 0)
         cw = int(dist.get("call", 0) or 0)
@@ -104,6 +111,7 @@ class RangeManager:
             pairs[("fold", None)] = fw
         if cw > 0:
             pairs[("call", None)] = cw
+
         # raises
         rmap = dist.get("raise") or {}
         if isinstance(rmap, dict):
@@ -126,27 +134,58 @@ class RangeManager:
         # fallback (shouldn't happen)
         return ("fold", None)
 
-    def choose_action(
-        self, *, seat_count: int, position: str, facing: str, seed: Optional[str]
+    # ---- Preferred modern API used by TagBot ----
+    def choose_preflop(
+        self,
+        *,
+        position: str,
+        facing: str,
+        stack_bb: int,
+        rng: random.Random,
+        seat_count: int = 2,
     ) -> RangeChoice:
         """
-        Deterministically sample an action from the chart using `seed`.
-        If no entry exists, return a safe fallback:
-          - if facing == "no_raise": fold
-          - else: call
+        Deterministically sample an action for preflop using the provided rng.
+        Returns RangeChoice. stack_bb is present for future chart selection.
         """
         dist = self.lookup_distribution(seat_count, position, facing)
         if dist:
-            rng = random.Random()
-            rng.seed(f"ranges:{seat_count}:{position}:{facing}:{seed}")
             act, lab = self._sample_weighted(rng, dist)
             return RangeChoice(action=act, size_label=lab, source="chart")
 
-        # safe fallback policy
+        # Safe fallback policy when chart key missing
         if facing == "no_raise":
             return RangeChoice(action="fold", size_label=None, source="fallback")
-        else:
-            return RangeChoice(action="call", size_label=None, source="fallback")
+        return RangeChoice(action="call", size_label=None, source="fallback")
+
+    # ---- Back-compat API expected by some tests ----
+    def choose_action(
+        self,
+        *,
+        seat_count: int,
+        position: str,
+        facing: str,
+        rng: Optional[random.Random] = None,
+        seed: Optional[str] = None,
+    ) -> RangeChoice:
+        """
+        Backward-compatible wrapper:
+          - If rng is provided, use it.
+          - Else if seed is provided, derive a deterministic rng from seed.
+          - Else use a local Random() (non-deterministic).
+        """
+        if rng is None:
+            rng = random.Random()
+            if seed is not None:
+                rng.seed(f"ranges:{seat_count}:{position}:{facing}:{seed}")
+        # Reuse the same logic
+        return self.choose_preflop(
+            position=position,
+            facing=facing,
+            stack_bb=100,
+            rng=rng,
+            seat_count=seat_count,
+        )
 
 
 # --- module singleton ---
