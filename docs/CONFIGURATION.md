@@ -1,31 +1,40 @@
+
+---
+
+# docs/CONFIGURATION.md
+
+```markdown
 # CONFIGURATION
 
-This app is a local, single-user NLH training simulator. Third-party engines/evaluators/solvers live **outside** the repo and are accessed via thin adapters. Defaults are chosen so the backend runs out-of-the-box with no extra binaries.
+The app is a local, single-user NLH training simulator. Third-party engines/evaluators
+live outside the repo behind thin adapters. Defaults are chosen so the backend runs
+out-of-the-box with no extra binaries.
 
 ---
 
 ## 1) Environment Variables (runtime switches)
 
-> Put these in your shell, a `.env` for your process manager, or export them inline when launching `uvicorn`.
+> Put these in your shell, a `.env`, or export inline when launching `uvicorn`.
 
-| Key                  | Values                            | Default            | Notes |
-|----------------------|-----------------------------------|--------------------|------|
-| `ENGINE`             | `PokerKit`                        | `PokerKit`         | Primary gameplay engine (adapter under `adapters/engines/`). |
-| `EVALUATOR`          | `PokerKit` \| `HenryRLee`         | `PokerKit`         | Hand/equity evaluator. `HenryRLee` requires `phevaluator`. |
-| `LOG_DB_PATH`        | file path                         | `./.data/app.sqlite` | SQLite log DB (sessions, hands, actions, exports). Make sure `.data/` is git-ignored (it is by default). |
-| `COACH_ENABLED`      | `true` \| `false`                 | `false`            | **M1+ only.** Gates all solver/coach features. When `false`, coach codepaths remain inert. |
-| `TEXASSOLVER_PATH`   | absolute path to executable       | *(unset)*          | **M1+ only.** Required iff `COACH_ENABLED=true`. Not bundled; user supplies locally. |
-| `COACH_CACHE_MAX_ROWS` | integer                         | `5000`             | **M1+ only.** Max rows for solver advice cache. |
-| `COACH_CACHE_TTL_DAYS` | integer                         | `30`               | **M1+ only.** Consider entries older than this expired. |
-
-**Cross-platform examples:**
+| Key                     | Values                      | Default              | Notes |
+|-------------------------|-----------------------------|----------------------|-------|
+| `ENGINE`                | `PokerKit`                  | `PokerKit`           | Primary gameplay engine (adapter under `adapters/engines/`). |
+| `EVALUATOR`             | `PokerKit` \| `HenryRLee`   | `PokerKit`           | Hand/equity evaluator. `HenryRLee` requires `phevaluator`. |
+| `LOG_DB_PATH`           | file path                   | `./.data/app.sqlite` | SQLite log DB (sessions, hands, actions, exports). `.data/` is git-ignored. |
+| `BOT_PROFILE`           | `CALLCHECK` \| `TAG`        | `CALLCHECK`          | **Bot policy select.** Default keeps legacy check/call behavior. |
+| `COACH_ENABLED`         | `true` \| `false`           | `false`              | **Future.** Gates solver/coach codepaths. |
+| `TEXASSOLVER_PATH`      | absolute path               | *(unset)*            | **Future.** Required iff `COACH_ENABLED=true`. Not bundled. |
+| `COACH_CACHE_MAX_ROWS`  | integer                     | `5000`               | **Future.** Solver advice cache size. |
+| `COACH_CACHE_TTL_DAYS`  | integer                     | `30`                 | **Future.** Solver cache TTL. |
 
 **bash/zsh**
 ```bash
 export LOG_DB_PATH="./.data/app.sqlite"
 export ENGINE="PokerKit"
 export EVALUATOR="PokerKit"
-# M1+ (optional):
+# Optional bot profile:
+# export BOT_PROFILE="TAG"
+# Future (coach):
 # export COACH_ENABLED="true"
 # export TEXASSOLVER_PATH="/ABS/PATH/TO/TexasSolver"
 
@@ -33,7 +42,9 @@ PowerShell
 $env:LOG_DB_PATH = ".\.data\app.sqlite"
 $env:ENGINE = "PokerKit"
 $env:EVALUATOR = "PokerKit"
-# M1+ (optional):
+# Optional bot profile:
+# $env:BOT_PROFILE = "TAG"
+# Future (coach):
 # $env:COACH_ENABLED = "true"
 # $env:TEXASSOLVER_PATH = "C:\ABS\PATH\TexasSolver.exe"
 
@@ -47,67 +58,75 @@ Install: pip install pokerkit
 
 Adapter: adapters/engines/pokerkit_adapter.py
 
-Selected by: ENGINE=PokerKit
-
-Rationale: modern, deterministic, actively maintained.
+Select: ENGINE=PokerKit
 
 PyPokerEngine is not used in this milestone.
 
 3) Evaluators
-Default: PokerKit evaluator
 
-Bundled with PokerKit, no extra setup.
-
+Default: PokerKit evaluator (bundled with PokerKit)
 Used for showdown/sanity in current flow.
 
-Optional: HenryRLee
+Optional: HenryRLee (phevaluator)
 
 Install: pip install phevaluator
 
 Adapter: adapters/evaluator/pheval_adapter.py
 
-Select with: EVALUATOR=HenryRLee
+Select: EVALUATOR=HenryRLee
 
-Use case: cross-checks / experimentation (not required).
+4) Bot Profiles
 
-4) TexasSolver (Coach, M1+)
+CALLCHECK (default): deterministic check/call only; used by tests and docs/examples.
 
-We do not bundle TexasSolver (AGPL). When you want coaching:
+TAG (opt-in):
 
-Set: COACH_ENABLED=true
+Preflop: integrates with backend/policy/range_manager.py to select fold/call/raise buckets deterministically.
 
-Provide absolute path: TEXASSOLVER_PATH=/abs/path/to/TexasSolver
+Postflop (thin slice): if IP + first action on street + to_call==0, stabs with the smallest simple Nx bucket; else check/call.
 
-Optional cache tuning: COACH_CACHE_MAX_ROWS, COACH_CACHE_TTL_DAYS
+Deterministic via a stable RNG seeded from session/hand/action context.
 
-If COACH_ENABLED=true but TEXASSOLVER_PATH is missing/invalid, coach endpoints should return 501 Not Implemented. When COACH_ENABLED=false (default), the app runs without any solver.
+Enable TAG with:
+export BOT_PROFILE=TAG
 
-See also: docs/THIRD-PARTY-INTEGRATION.md, docs/LICENSING-NOTES.md.
+or on Windows PowerShell:
+$env:BOT_PROFILE = "TAG"
 
-5) Backend/Frontend Services
+5) Determinism & Seeding
+
+Determinism is per session via base_seed when calling POST /api/session.
+
+Each hand derives a deck_seed from the base_seed.
+
+Bot decisions (for either profile) use a stable RNG:
+seed_components = [base_seed, session_id, hand_id, decision_idx, bot_seat, "bot"]
+
+ensuring identical decisions with the same seed and path.
+
+Exports include enough info to replay deterministically.
+
+6) Storage & Exports
+
+SQLite at LOG_DB_PATH for sessions, hands, and actions.
+
+Every action is indexed and a hands snapshot is upserted after each action.
+
+JSON/CSV exports are available via the /api/export/* endpoints.
+
+7) Services
 
 Backend: FastAPI + Uvicorn, Pydantic models.
 
-Frontend: Next.js + Tailwind (minimal shell in this milestone).
+Frontend: (Optional) Next.js + Tailwind (minimal shell).
 
-Storage: SQLite at LOG_DB_PATH for logs; JSON/CSV export endpoints for analysis.
+Install: use root requirements.txt.
 
-Install deps from the repo root: the top-level requirements.txt includes/transitively references backend requirements.
+8) Distribution (slim .zip)
 
-6) Determinism & Seeding
+CI can produce a slim source archive (dist/*.zip) including repo source only
+(no third-party sources or solver binaries).
 
-Determinism is per session, not via a global env var.
-
-Create/reset a session with POST /api/session?base_seed=YOUR-SEED.
-
-Each hand derives a deck_seed from the base seed; exports include enough to replay deterministically.
-
-Replaying with the same base_seed and the same first-action rule yields identical canonical outcomes (see docs/RUNBOOK.md and tests).
-
-7) Distribution (slim .zip)
-
-CI produces a slim source archive (dist/*.zip) via tools/build_dist.py and the allowlist in dist-include.txt.
-
-Contents: our source only. No third-party sources, no solver binaries.
-
-After unzip: pip install -r requirements.txt to fetch Python deps.
+After unzip:
+pip install -r requirements.txt
+to fetch Python deps.

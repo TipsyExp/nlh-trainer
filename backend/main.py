@@ -3,6 +3,10 @@
 Constructs a FastAPI app, configures CORS for local development, and
 registers routers for session management, hand interaction, and data
 export. Root and health endpoints provide simple liveness probes.
+
+Note: Optional bot profile selection is env-gated (BOT_PROFILE).
+`backend/api/hand.py` reads BOT_PROFILE directly, and this file loads
+.env on startup for convenience.
 """
 
 from __future__ import annotations
