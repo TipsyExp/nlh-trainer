@@ -21,8 +21,8 @@ Top-level object:
 | `street`    | string                        | One of `"preflop"`, `"flop"`, `"turn"`, `"river"`. |
 | `players`   | array of **PlayerLive**       | Minimal per-seat info for the UI (hero cards shown; opponents masked). |
 | `table`     | **TableLive**                 | Table configuration + seat positions **nested under `table`**. |
-| `pot_total` | integer                       | Current total pot chips (includes blinds/antes). |
-| `last_action` | **LastActionSummary** \| null | UI-oriented summary of the most recent action; `null` before any action. |
+
+> **Derived fields:** `pot_total` and `last_action` are not stored in the authoritative schema.  They are computed client‑side from the action history and may appear in live responses for convenience.
 
 ### 1.1 PlayerLive
 
@@ -57,13 +57,15 @@ A compact, UI-facing description of the most recent action. Present after `/api/
 |-------------------|----------------------|-------------|
 | `type`            | string               | `"fold"`, `"check"`, `"call"`, `"bet"`, `"raise"`, etc. |
 | `seat`            | integer              | Acting seat for this last action. |
-| `bucket_label`    | string \| null       | Bucket label if applicable (see BET-TREES); otherwise `null`. |
+| `bucket_label`    | string \| null       | Bucket label if applicable (see BET-TREES.md); otherwise `null`. |
 | `snapped`         | boolean \| null      | `true/false` if a bet/raise was snapped to a bucket; `null` when N/A. |
 | `requested`       | integer \| null      | Raw user-entered size when present. |
 | `committed`       | integer \| null      | Effective committed amount when present. |
 | `allowed_buckets` | array \| null        | Usually `null` in this summary; present when relevant UI context exists. |
 
 > This is **not** the full action record used in exports; it’s a concise summary for the table UI.
+
+> In live responses, `actor.allowed_buckets` lists the bet/raise buckets available for the player who is about to act.  The `allowed_buckets` field inside `last_action` summarises the completed action and is usually `null` because it describes what has just happened rather than what is allowed next.
 
 ### 1.4 Live Example (excerpt)
 
@@ -97,7 +99,9 @@ From `docs/examples/hand_state.json` and `docs/examples/hand_action.json`:
     "allowed_buckets": null
   }
 }
-2) Exported State (embedded under state in export payloads)
+```
+
+## 2) Exported State (embedded under state in export payloads)
 
 When you call:
 
@@ -106,6 +110,7 @@ GET /api/export/hand/{hand_id}.json
 GET /api/export/session/{session_id}.json
 
 …the state object inside each hand export looks slightly different from the live state:
+
 | Field            | Type                          | Description                                                  |
 | ---------------- | ----------------------------- | ------------------------------------------------------------ |
 | `hand_id`        | string                        | Hand identifier (e.g., `"H1"`).                              |
@@ -118,10 +123,10 @@ GET /api/export/session/{session_id}.json
 | `players`        | array of **PlayerExport**     | Rich per-seat info (alias, type, stack, status).             |
 | `action_history` | array of **ActionRecordLite** | Chronological list of actions so far (compact form).         |
 
-Note: In exported state, positions are top-level (dealer_seat, sb_seat, bb_seat), and pot_total is not included.
-The total pot and timing metadata live with the per-action rows in the export actions list (see section 3).
+Note: In exported state, positions are top-level (dealer_seat, sb_seat, bb_seat), and pot_total is not included.  
+The total pot and timing metadata live with the per-action rows in the export actions list (see section 3).
 
-2.1 PlayerExport
+### 2.1 PlayerExport
 | Field    | Type    | Description                                    |
 | -------- | ------- | ---------------------------------------------- |
 | `seat`   | integer | Seat index.                                    |
@@ -132,7 +137,7 @@ The total pot and timing metadata live with the per-action rows in the export ac
 
 Opponent hole cards are not included here in current exports; visibility rules apply at showdown.
 
-2.2 TableExport
+### 2.2 TableExport
 | Field        | Type    | Description                   |
 | ------------ | ------- | ----------------------------- |
 | `seat_count` | integer | Number of seats at the table. |
@@ -140,28 +145,31 @@ Opponent hole cards are not included here in current exports; visibility rules a
 | `bb`         | integer | Big blind.                    |
 | `ante`       | integer | Per-player ante.              |
 
-2.3 ActionRecordLite (for state.action_history)
+### 2.3 ActionRecordLite (for state.action_history)
 
-This list is a compact mirror of what happened, used for quick replay context inside the exported state.
+This list is a compact mirror of what happened, used for quick replay context inside the exported state.  
 It is not the same as the richer per-action rows found under the top-level actions array in the export.
+
 | Field           | Type           | Description                                             |
 | --------------- | -------------- | ------------------------------------------------------- |
 | `idx`           | integer        | Zero-based decision index.                              |
 | `street`        | string         | Street on which the action occurred.                    |
 | `actor_seat`    | integer        | Acting seat.                                            |
 | `type`          | string         | `"fold"`, `"check"`, `"call"`, `"bet"`, `"raise"`, etc. |
-| `amount`        | integer | null | Chips bet/raised; `null` for check/fold.                |
-| `bucket`        | string | null  | Bucket label if applicable (see BET-TREES).             |
+| `amount`        | integer \| null | Chips bet/raised; `null` for check/fold.                |
+| `bucket`        | string \| null  | Bucket label if applicable (see BET-TREES.md).             |
 | `to_call_after` | integer        | To-call after the action resolves.                      |
 | `pot_after`     | integer        | Pot size right after the action.                        |
-| `snapped`       | boolean | null | `true/false` when snapping applied; `null` when N/A.    |
+| `snapped`       | boolean \| null | `true/false` when snapping applied; `null` when N/A.    |
 
-Notice there is no engine, evaluator, time_ms, rng_seed, or created_at in action_history.
+Notice there is no engine, evaluator, time_ms, rng_seed, or created_at in action_history.  
 Those appear with the top-level export actions (see below).
 
-2.4 Exported State Example (excerpt)
+### 2.4 Exported State Example (excerpt)
 
-From docs/examples/export_hand.json:
+From `docs/examples/export_hand.json`:
+
+```json
 {
   "hand_id": "H1",
   "deck_seed": "DOCS-EXAMPLE-SEED-1:1",
@@ -179,13 +187,18 @@ From docs/examples/export_hand.json:
     {"idx": 1, "street": "flop",    "actor_seat": 1, "type": "check", "amount": null, "bucket": null, "to_call_after": 0, "pot_after": 0, "snapped": null}
   ]
 }
-3) Export Actions (top-level actions in export payloads)
+```
 
-In export_hand.json and export_session.json, each exported hand includes actions: [...].
+## 3) Export Actions (top-level actions in export payloads)
+
+In export_hand.json and export_session.json, each exported hand includes `actions: [...]`.  
 These rows match the CSV columns and carry the richer metadata:
 
-Stable CSV header (current):
+Stable CSV header (M1):
+
 hand_id,idx,street,actor_seat,action,amount,bucket,to_call_after,pot_after,snapped,engine,evaluator
+
+*The CSV header and JSON field set above are considered stable for M1; future versions will be versioned in docs and capture outputs.*
 
 ExportAction fields (JSON):
 | Field           | Type           | Description                                             |
@@ -194,18 +207,20 @@ ExportAction fields (JSON):
 | `street`        | string         | Street.                                                 |
 | `actor_seat`    | integer        | Acting seat.                                            |
 | `action`        | string         | `"fold"`, `"check"`, `"call"`, `"bet"`, `"raise"`, etc. |
-| `amount`        | integer | null | Chips bet/raised; `null` for check/fold.                |
-| `bucket`        | string | null  | Bucket label when applicable.                           |
+| `amount`        | integer \| null | Chips bet/raised; `null` for check/fold.                |
+| `bucket`        | string \| null  | Bucket label when applicable.                           |
 | `to_call_after` | integer        | To-call after resolution.                               |
 | `pot_after`     | integer        | Pot right after the action.                             |
-| `snapped`       | boolean | null | `true/false` if snapping occurred; `null` when N/A.     |
+| `snapped`       | boolean \| null | `true/false` if snapping occurred; `null` when N/A.     |
 | `engine`        | string         | Engine identifier (e.g., `"PokerKit"`).                 |
-| `evaluator`     | string | null  | Evaluator identifier (e.g., `"PokerKit"`), or `null`.   |
+| `evaluator`     | string \| null  | Evaluator identifier (e.g., `"PokerKit"`), or `null`.   |
 
-Not present in current exports: time_ms, rng_seed, meta, created_at.
+Not present in current exports: time_ms, rng_seed, meta, created_at.  
 If those get added later, update this schema and the CSV header accordingly.
 
-ExportAction example (from docs/examples/export_hand.json):
+ExportAction example (from `docs/examples/export_hand.json`):
+
+```json
 {
   "idx": 0,
   "street": "preflop",
@@ -219,19 +234,20 @@ ExportAction example (from docs/examples/export_hand.json):
   "engine": "PokerKit",
   "evaluator": "PokerKit"
 }
+```
 
 4) Notes & Invariants
 
-Masking: Opponent hole cards are "XX" in live state until showdown.
+Masking: Opponent hole cards are `"XX"` in live state until showdown.
 
-Buckets: Labels and semantics are defined in BET-TREES.md. Off-tree sizes may be snapped; when snapping is not applicable, snapped is null.
+Buckets: Labels and semantics are defined in BET-TREES.md. Off-tree sizes may be snapped; when snapping is not applicable, `snapped` is null.
 
 Shape differences:
 
-Live state nests positions inside table and includes pot_total and a UI-oriented last_action.
+Live state nests positions inside `table`.  Some fields such as `pot_total` and `last_action` are computed client‑side from the action history and may appear in responses for convenience.
 
-Exported state moves positions to top-level, omits pot_total, and includes a compact action_history.
+Exported state moves positions to top-level, omits `pot_total`, and includes a compact `action_history`.
 
 Rich per-action metadata appears only in the top-level export actions array (and CSV).
 
-Stability: The CSV header and JSON field set above are considered stable for M1. If runtime fields change, regenerate examples and update this document in the same commit.
+Stability: The CSV header and JSON field set above are considered stable for M1.  If runtime fields change, regenerate examples and update this schema and the CSV header accordingly.
