@@ -71,3 +71,12 @@ frontend/.env.local
 
 # Ignore runtime DB
 .data/**
+
+# docs example sqlite (scratch artifacts)
+docs/examples/*.sqlite
+docs/examples/*.sqlite-shm
+docs/examples/*.sqlite-wal
+# docs example sqlite (scratch artifacts)
+docs/examples/*.sqlite
+docs/examples/*.sqlite-shm
+docs/examples/*.sqlite-wal

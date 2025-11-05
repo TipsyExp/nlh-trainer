@@ -23,4 +23,5 @@ adapters/solver/**          # TexasSolver stub adapter (kept out of backend/)
 
 # ---- Docs (API, schema, runbook, examples). Exclude scripts.
 docs/*.md
-docs/examples/*
+docs/examples/*.json
+docs/examples/*.csv
