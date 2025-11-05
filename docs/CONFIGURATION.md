@@ -130,3 +130,14 @@ CI can produce a slim source archive (dist/*.zip) including repo source only
 After unzip:
 pip install -r requirements.txt
 to fetch Python deps.
+
+9) TexasSolver adapter settings
+
+- COACH_ENABLED=true            # gate for calling external solver
+- TEXASSOLVER_PATH=/abs/path/to/console_solver(.exe)
+
+Tuning (deterministic by default):
+- COACH_TS_THREADS=1            # threads for solver; 1 keeps results stable
+- COACH_TS_ACCURACY=1.0         # smaller => slower, more accurate
+- COACH_TS_MAX_ITERS=200        # iteration cap for quick goldens
+- COACH_TS_TIMEOUT_S=90         # subprocess timeout seconds
