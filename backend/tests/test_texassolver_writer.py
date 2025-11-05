@@ -1,11 +1,12 @@
 from pathlib import Path
 from backend.adapters.solver.texassolver_adapter import TexasSolverAdapter, SolveRequest
 
+
 def test_write_input_script_flop_only(tmp_path: Path):
     adapter = TexasSolverAdapter()
     req = SolveRequest(
         street="flop",
-        board=["Qs","Jh","2h"],
+        board=["Qs", "Jh", "2h"],
         pot=300,
         ip_stack=9900,
         oop_stack=9900,

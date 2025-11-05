@@ -31,15 +31,16 @@ class SolveRequest:
     Canonical minimal inputs we need to call the solver.
     NOTE: We'll gradually expand this as our canonical node grows.
     """
-    street: str                    # "flop" | "turn" | "river"
-    board: List[str]               # ["Ah", "Kd", "3s"] etc.
-    pot: int                       # current pot size (chips)
-    ip_stack: int                  # stack behind IP (chips)
-    oop_stack: int                 # stack behind OOP (chips)
-    ip_range: str                  # solver-native text, e.g. "AA,KK,AKs:0.5,..."
-    oop_range: str                 # same format as ip_range
-    bucket_labels: List[str]       # our labels; e.g. ["33%", "66%", "pot", "jam"]
-    spot: str = "SRP"              # "SRP" | "3BP" (limited scope for Task-16)
+
+    street: str  # "flop" | "turn" | "river"
+    board: List[str]  # ["Ah", "Kd", "3s"] etc.
+    pot: int  # current pot size (chips)
+    ip_stack: int  # stack behind IP (chips)
+    oop_stack: int  # stack behind OOP (chips)
+    ip_range: str  # solver-native text, e.g. "AA,KK,AKs:0.5,..."
+    oop_range: str  # same format as ip_range
+    bucket_labels: List[str]  # our labels; e.g. ["33%", "66%", "pot", "jam"]
+    spot: str = "SRP"  # "SRP" | "3BP" (limited scope for Task-16)
 
 
 def _require_solver_enabled() -> Path:
@@ -135,7 +136,9 @@ class TexasSolverAdapter:
         self._solver_path = solver_path  # cache after first check
 
         if not _is_supported(req):
-            raise UnsupportedSpotError("Only HU postflop SRP/3BP on flop/turn/river are supported")
+            raise UnsupportedSpotError(
+                "Only HU postflop SRP/3BP on flop/turn/river are supported"
+            )
 
         # Build a temp workdir with input + output files
         with tempfile.TemporaryDirectory(prefix="texassolver_node_") as tmp:
@@ -157,13 +160,17 @@ class TexasSolverAdapter:
                     timeout=self._timeout_s,
                 )
             except subprocess.TimeoutExpired as e:
-                raise UnsupportedSpotError(f"TexasSolver timed out after {self._timeout_s}s") from e
+                raise UnsupportedSpotError(
+                    f"TexasSolver timed out after {self._timeout_s}s"
+                ) from e
             except subprocess.CalledProcessError as e:
                 raise UnsupportedSpotError(
                     f"TexasSolver failed (exit={e.returncode}): {e.stderr or e.stdout}"
                 ) from e
 
-            output = output_path if output_path.exists() else (tmpdir / "output_result.json")
+            output = (
+                output_path if output_path.exists() else (tmpdir / "output_result.json")
+            )
             if not output.exists():
                 raise UnsupportedSpotError("TexasSolver produced no output JSON")
 
@@ -180,7 +187,9 @@ class TexasSolverAdapter:
 
     # ---------- internals ----------
 
-    def _write_input_script(self, req: SolveRequest, input_path: Path, output_path: Path) -> None:
+    def _write_input_script(
+        self, req: SolveRequest, input_path: Path, output_path: Path
+    ) -> None:
         """
         Emit a *street-focused* HU script aligned with our bucket labels.
         We only configure the street in `req.street` to keep the tree minimal and deterministic.
@@ -206,7 +215,9 @@ class TexasSolverAdapter:
         bet_sizes, has_allin = _labels_to_sizes(req.bucket_labels)
 
         if req.street not in {"flop", "turn", "river"}:
-            raise UnsupportedSpotError(f"Unsupported street for TexasSolver: {req.street}")
+            raise UnsupportedSpotError(
+                f"Unsupported street for TexasSolver: {req.street}"
+            )
 
         board_str = ",".join(req.board)
 
@@ -232,9 +243,9 @@ class TexasSolverAdapter:
         # Solver controls (thread=1 for determinism; other knobs from env)
         lines.append("set_allin_threshold 0.67")
         lines.append("build_tree")
-        lines.append(f"set_thread_num {self._threads}")     # default 1
-        lines.append(f"set_accuracy {self._accuracy}")      # default 1.0
-        lines.append(f"set_max_iteration {self._max_iters}")# default 200
+        lines.append(f"set_thread_num {self._threads}")  # default 1
+        lines.append(f"set_accuracy {self._accuracy}")  # default 1.0
+        lines.append(f"set_max_iteration {self._max_iters}")  # default 200
         lines.append("set_print_interval 10")
         lines.append("set_use_isomorphism 1")
         lines.append("start_solve")
@@ -267,15 +278,25 @@ class TexasSolverAdapter:
         root: Optional[dict] = None
         if isinstance(raw.get("root"), dict):
             root = raw["root"]
-        elif isinstance(raw.get("infosets"), list) and raw["infosets"] and isinstance(raw["infosets"][0], dict):
+        elif (
+            isinstance(raw.get("infosets"), list)
+            and raw["infosets"]
+            and isinstance(raw["infosets"][0], dict)
+        ):
             root = raw["infosets"][0]
-        elif isinstance(raw.get("nodes"), list) and raw["nodes"] and isinstance(raw["nodes"][0], dict):
+        elif (
+            isinstance(raw.get("nodes"), list)
+            and raw["nodes"]
+            and isinstance(raw["nodes"][0], dict)
+        ):
             root = raw["nodes"][0]
         else:
             root = raw  # fall back to the top object
 
         if not isinstance(root, dict):
-            raise UnsupportedSpotError("Could not locate a root object in solver output")
+            raise UnsupportedSpotError(
+                "Could not locate a root object in solver output"
+            )
 
         # 2) Determine action labels (prefer explicit; fallback to childrens keys)
         action_labels: Optional[List[str]] = None
@@ -293,16 +314,28 @@ class TexasSolverAdapter:
 
         def _kv_from_list(lst: list, labels: List[str]) -> Dict[str, float]:
             n = min(len(lst), len(labels))
-            return {labels[i]: float(lst[i]) for i in range(n) if isinstance(lst[i], (int, float))}
+            return {
+                labels[i]: float(lst[i])
+                for i in range(n)
+                if isinstance(lst[i], (int, float))
+            }
 
-        def _find_first_list_of_len(d: dict, keys: List[str], n: int) -> Optional[List[float]]:
+        def _find_first_list_of_len(
+            d: dict, keys: List[str], n: int
+        ) -> Optional[List[float]]:
             for k in keys:
                 v = d.get(k)
-                if isinstance(v, list) and len(v) >= n and all(isinstance(x, (int, float)) for x in v[:n]):
+                if (
+                    isinstance(v, list)
+                    and len(v) >= n
+                    and all(isinstance(x, (int, float)) for x in v[:n])
+                ):
                     return [float(x) for x in v[:n]]
             return None
 
-        def _find_first_dict_numeric(d: dict, keys: List[str]) -> Optional[Dict[str, float]]:
+        def _find_first_dict_numeric(
+            d: dict, keys: List[str]
+        ) -> Optional[Dict[str, float]]:
             # Accept dict of numeric values OR dict of dicts with 'prob-like' numeric
             prob_keys = {"prob", "p", "probability", "weight", "w"}
             for k in keys:
@@ -330,8 +363,12 @@ class TexasSolverAdapter:
         if isinstance(strat_raw, dict):
             # Special handling for TexasSolver tree dumps:
             # strat_raw may look like: {"actions":[...], "strategy": { "AcKd":[p0,p1,...], ... } }
-            if ("strategy" in strat_raw and isinstance(strat_raw["strategy"], dict)
-                    and isinstance(action_labels, list) and len(action_labels) > 0):
+            if (
+                "strategy" in strat_raw
+                and isinstance(strat_raw["strategy"], dict)
+                and isinstance(action_labels, list)
+                and len(action_labels) > 0
+            ):
                 per_combo = strat_raw["strategy"]
                 # aggregate equal-weight across all combos present
                 m = len(action_labels)
@@ -340,7 +377,10 @@ class TexasSolverAdapter:
                 for vec in per_combo.values():
                     if isinstance(vec, list) and len(vec) >= m:
                         ok = True
-                        tmp = [float(x) if isinstance(x, (int, float)) else None for x in vec[:m]]
+                        tmp = [
+                            float(x) if isinstance(x, (int, float)) else None
+                            for x in vec[:m]
+                        ]
                         if any(x is None for x in tmp):
                             ok = False
                         if ok:
@@ -367,8 +407,16 @@ class TexasSolverAdapter:
             if action_labels:
                 alt_list = _find_first_list_of_len(
                     root,
-                    ["probs", "policy", "policies", "avg_strategy", "average_strategy",
-                     "strategy_sum", "sum_strategy", "sigma"],
+                    [
+                        "probs",
+                        "policy",
+                        "policies",
+                        "avg_strategy",
+                        "average_strategy",
+                        "strategy_sum",
+                        "sum_strategy",
+                        "sigma",
+                    ],
                     len(action_labels),
                 )
                 if alt_list:
@@ -376,20 +424,32 @@ class TexasSolverAdapter:
             if strategy_kv is None:
                 alt_dict = _find_first_dict_numeric(
                     root,
-                    ["probs", "policy", "policies", "avg_strategy", "average_strategy",
-                     "strategy_sum", "sum_strategy"],
+                    [
+                        "probs",
+                        "policy",
+                        "policies",
+                        "avg_strategy",
+                        "average_strategy",
+                        "strategy_sum",
+                        "sum_strategy",
+                    ],
                 )
                 if alt_dict:
                     strategy_kv = alt_dict
 
         # (D) Derive from regrets if present (regret matching)
         if strategy_kv is None and action_labels:
-            regrets = _find_first_list_of_len(root, ["regret_sum", "regretsum", "regret"], len(action_labels))
+            regrets = _find_first_list_of_len(
+                root, ["regret_sum", "regretsum", "regret"], len(action_labels)
+            )
             if regrets:
                 positives = [max(0.0, r) for r in regrets]
                 s = sum(positives)
                 if s > 0:
-                    strategy_kv = {action_labels[i]: positives[i] / s for i in range(len(action_labels))}
+                    strategy_kv = {
+                        action_labels[i]: positives[i] / s
+                        for i in range(len(action_labels))
+                    }
                 else:
                     u = 1.0 / len(action_labels)
                     strategy_kv = {a: u for a in action_labels}
@@ -404,9 +464,17 @@ class TexasSolverAdapter:
 
         # 4) Normalize action names → our bucket labels
         def nearest_bucket_of_percent(p: int) -> str:
-            candidates = [b for b in req.bucket_labels if _map_bucket_to_pot_percent(b) is not None]
+            candidates = [
+                b
+                for b in req.bucket_labels
+                if _map_bucket_to_pot_percent(b) is not None
+            ]
             if not candidates:
-                return "jam" if any(b.lower() == "jam" for b in req.bucket_labels) else "call"
+                return (
+                    "jam"
+                    if any(b.lower() == "jam" for b in req.bucket_labels)
+                    else "call"
+                )
             best_b = candidates[0]
             best_d = abs(_map_bucket_to_pot_percent(best_b) - p)  # type: ignore[arg-type]
             for b in candidates[1:]:
@@ -420,7 +488,11 @@ class TexasSolverAdapter:
             if s in {"check", "call", "fold"}:
                 return s
             if "allin" in s or "all-in" in s or s == "all in":
-                return "jam" if any(b.lower() == "jam" for b in req.bucket_labels) else "allin"
+                return (
+                    "jam"
+                    if any(b.lower() == "jam" for b in req.bucket_labels)
+                    else "allin"
+                )
 
             # e.g., "bet_66", "raise_100", "bet 2.000000", "raise 0.5"
             digits = re.findall(r"(\d+(?:\.\d+)?)", s)
@@ -431,7 +503,7 @@ class TexasSolverAdapter:
                     if x <= 5.0:
                         pct = int(round(x * 100))  # treat as pot-multiple
                     else:
-                        pct = int(round(x))        # treat as percent
+                        pct = int(round(x))  # treat as percent
                 except ValueError:
                     pct = None
             if pct is not None:
@@ -450,7 +522,9 @@ class TexasSolverAdapter:
             bucket_strategy[label] = bucket_strategy.get(label, 0.0) + float(p)
 
         if not bucket_strategy:
-            raise UnsupportedSpotError("No usable strategy entries found in solver output")
+            raise UnsupportedSpotError(
+                "No usable strategy entries found in solver output"
+            )
 
         # Normalize to 1 if necessary
         ssum = sum(bucket_strategy.values())
@@ -487,4 +561,6 @@ class TexasSolverAdapter:
 
         # 6) Recommend argmax
         best = max(bucket_strategy.items(), key=lambda kv: kv[1])[0]
-        return AdvicePayload(recommended_bucket=best, strategy=bucket_strategy, ev_map=ev_map)
+        return AdvicePayload(
+            recommended_bucket=best, strategy=bucket_strategy, ev_map=ev_map
+        )

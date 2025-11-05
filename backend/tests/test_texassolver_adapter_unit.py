@@ -10,6 +10,7 @@ from backend.adapters.solver.texassolver_adapter import (
     _require_solver_enabled,
 )
 
+
 def _srp_req() -> SolveRequest:
     return SolveRequest(
         street="flop",
@@ -23,6 +24,7 @@ def _srp_req() -> SolveRequest:
         spot="SRP",
     )
 
+
 def test_env_gate_disabled():
     # COACH off should raise before anything else
     monkey_env = dict(os.environ)
@@ -33,6 +35,7 @@ def test_env_gate_disabled():
     finally:
         os.environ.clear()
         os.environ.update(monkey_env)
+
 
 def test_env_gate_missing_path():
     monkey_env = dict(os.environ)
@@ -45,6 +48,7 @@ def test_env_gate_missing_path():
     finally:
         os.environ.clear()
         os.environ.update(monkey_env)
+
 
 def test_unsupported_preflop_shortcircuits(tmp_path: Path):
     # Bypass env gate by stubbing a fake solver path that exists
@@ -66,6 +70,7 @@ def test_unsupported_preflop_shortcircuits(tmp_path: Path):
     with pytest.raises(UnsupportedSpotError):
         adapter.solve(bad)
 
+
 def test_bucket_mapping_smoke():
     # Fake a tiny root payload that looks like a dict strategy
     raw = {
@@ -78,9 +83,7 @@ def test_bucket_mapping_smoke():
         }
     }
     adapter = TexasSolverAdapter()
-    advice = adapter._parse_output(  # type: ignore[attr-defined]
-        _srp_req(), raw
-    )
+    advice = adapter._parse_output(_srp_req(), raw)  # type: ignore[attr-defined]
     # 60% should map to nearest bucket "66%"; allin -> "jam"
     assert advice["strategy"]["66%"] == pytest.approx(0.6, rel=1e-6)
     assert advice["strategy"]["jam"] == pytest.approx(0.3, rel=1e-6)

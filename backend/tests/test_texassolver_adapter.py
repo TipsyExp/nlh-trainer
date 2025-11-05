@@ -10,6 +10,7 @@ from backend.adapters.solver.texassolver_adapter import (
     CoachDisabledError,
 )
 
+
 def test_env_gating_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("COACH_ENABLED", raising=False)
     monkeypatch.delenv("TEXASSOLVER_PATH", raising=False)
@@ -30,7 +31,9 @@ def test_env_gating_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
         adapter.solve(req)
 
 
-@pytest.mark.skipif(os.getenv("TS_FIXTURE") is None, reason="No local TexasSolver fixture available")
+@pytest.mark.skipif(
+    os.getenv("TS_FIXTURE") is None, reason="No local TexasSolver fixture available"
+)
 def test_parse_golden_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     Local-only test:
@@ -45,7 +48,9 @@ def test_parse_golden_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # Fake env to pass gating
     monkeypatch.setenv("COACH_ENABLED", "true")
-    monkeypatch.setenv("TEXASSOLVER_PATH", str(Path("/abs/path/to/console_solver")))  # not executed
+    monkeypatch.setenv(
+        "TEXASSOLVER_PATH", str(Path("/abs/path/to/console_solver"))
+    )  # not executed
 
     adapter = TexasSolverAdapter()
 
@@ -71,7 +76,10 @@ def test_parse_golden_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
     # At least one of our buckets should appear
     assert any(b in advice["strategy"] for b in req.bucket_labels)
 
-@pytest.mark.skipif(os.getenv("TS_FIXTURE") is None, reason="No local TexasSolver fixture available")
+
+@pytest.mark.skipif(
+    os.getenv("TS_FIXTURE") is None, reason="No local TexasSolver fixture available"
+)
 def test_parse_golden_fixture_3bp(monkeypatch: pytest.MonkeyPatch) -> None:
     fixture_dir = Path(os.environ["TS_FIXTURE"])
     json_path = fixture_dir / "3bp_output.json"
@@ -84,7 +92,7 @@ def test_parse_golden_fixture_3bp(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = TexasSolverAdapter()
     req = SolveRequest(
         street="flop",
-        board=["Qs","Jh","2h"],
+        board=["Qs", "Jh", "2h"],
         pot=900,
         ip_stack=2000,
         oop_stack=2000,
