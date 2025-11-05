@@ -15,7 +15,11 @@ backend/models/**
 backend/adapters/**
 backend/policy/**
 backend/routers/**
+backend/coach/**            # coach scaffold (node_key/cache/api runtime)
 backend/scripts/autoplay.py
+
+# ---- External adapters (if any live outside backend/)
+adapters/solver/**          # TexasSolver stub adapter (kept out of backend/)
 
 # ---- Docs (API, schema, runbook, examples). Exclude scripts.
 docs/*.md
