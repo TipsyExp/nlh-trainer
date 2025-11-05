@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, TypedDict, Optional
+from typing import Dict, List, TypedDict, Optional, cast
 import json
 import os
 import re
@@ -385,7 +385,9 @@ class TexasSolverAdapter:
                             ok = False
                         if ok:
                             for i in range(m):
-                                acc[i] += tmp[i]  # type: ignore[index]
+                                # mypy: tmp[i] is Optional[float]; we've checked it's all not None
+                                val = cast(float, tmp[i])
+                                acc[i] += val
                             cnt += 1
                 if cnt > 0:
                     # mean over combos
@@ -464,21 +466,23 @@ class TexasSolverAdapter:
 
         # 4) Normalize action names → our bucket labels
         def nearest_bucket_of_percent(p: int) -> str:
-            candidates = [
-                b
-                for b in req.bucket_labels
-                if _map_bucket_to_pot_percent(b) is not None
-            ]
-            if not candidates:
+            # Build (bucket_label, percent_int) pairs up-front to avoid Optional math
+            pairs: list[tuple[str, int]] = []
+            for b in req.bucket_labels:
+                mp = _map_bucket_to_pot_percent(b)
+                if mp is not None:
+                    pairs.append((b, mp))
+
+            if not pairs:
                 return (
                     "jam"
                     if any(b.lower() == "jam" for b in req.bucket_labels)
                     else "call"
                 )
-            best_b = candidates[0]
-            best_d = abs(_map_bucket_to_pot_percent(best_b) - p)  # type: ignore[arg-type]
-            for b in candidates[1:]:
-                d = abs(_map_bucket_to_pot_percent(b) - p)  # type: ignore[arg-type]
+            best_b, best_pp = pairs[0]
+            best_d = abs(best_pp - p)
+            for b, bp in pairs[1:]:
+                d = abs(bp - p)
                 if d < best_d:
                     best_d, best_b = d, b
             return best_b
