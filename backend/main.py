@@ -7,6 +7,10 @@ export. Root and health endpoints provide simple liveness probes.
 Note: Optional bot profile selection is env-gated (BOT_PROFILE).
 `backend/api/hand.py` reads BOT_PROFILE directly, and this file loads
 .env on startup for convenience.
+
+Coach API:
+- Router is always registered under /api, but the endpoint itself returns 501
+  unless COACH_ENABLED=true (see backend/api/coach.py).
 """
 
 from __future__ import annotations
@@ -41,9 +45,7 @@ from backend.logger import get_logger  # ensure DB init on startup
 from backend.api.session import router as session_router
 from backend.api.hand import router as hand_router
 from backend.api.export import router as export_router
-
-# If/when you add coach API:
-# from backend.api.coach import router as coach_router
+from backend.api.coach import router as coach_router  # coach scaffold (501 by default)
 
 # --- Executable statements AFTER all imports ---
 # Load environment variables (development convenience; harmless if empty)
@@ -92,4 +94,4 @@ def health() -> dict:
 app.include_router(session_router, prefix="/api")
 app.include_router(hand_router, prefix="/api")
 app.include_router(export_router, prefix="/api")
-# app.include_router(coach_router, prefix="/api")
+app.include_router(coach_router, prefix="/api")
