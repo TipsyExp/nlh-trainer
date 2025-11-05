@@ -80,3 +80,5 @@ docs/examples/*.sqlite-wal
 docs/examples/*.sqlite
 docs/examples/*.sqlite-shm
 docs/examples/*.sqlite-wal
+/local/
+/srp_input.txt
