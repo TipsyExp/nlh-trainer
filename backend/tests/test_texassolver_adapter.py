@@ -1,8 +1,6 @@
 # backend/tests/test_texassolver_adapter.py
-from __future__ import annotations
-
-import json
 import os
+import json
 from pathlib import Path
 import pytest
 
@@ -10,9 +8,7 @@ from backend.adapters.solver.texassolver_adapter import (
     TexasSolverAdapter,
     SolveRequest,
     CoachDisabledError,
-    UnsupportedSpotError,
 )
-
 
 def test_env_gating_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("COACH_ENABLED", raising=False)

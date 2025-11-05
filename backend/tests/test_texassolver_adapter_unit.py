@@ -1,5 +1,4 @@
 import os
-import json
 from pathlib import Path
 import pytest
 
@@ -8,7 +7,7 @@ from backend.adapters.solver.texassolver_adapter import (
     SolveRequest,
     CoachDisabledError,
     UnsupportedSpotError,
-    _require_solver_enabled,  # module-level helper; safe to import for unit checks
+    _require_solver_enabled,
 )
 
 def _srp_req() -> SolveRequest:
