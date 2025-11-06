@@ -1,16 +1,38 @@
 // frontend/pages/table.tsx
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Api } from "../lib/api";
+import { CoachPanel } from "../components/CoachPanel";
 
 type Actor = { seat: number; to_call: number; allowed_buckets: string[] } | null;
+
+const COACH_TOGGLE_KEY = "coachEnabled";
+const HUMAN_SEAT_KEY = "humanSeat";
 
 export default function TablePage() {
   const [loading, setLoading] = useState(false);
   const [state, setState] = useState<any>(null);
   const [actor, setActor] = useState<Actor>(null);
   const [err, setErr] = useState<string | null>(null);
+
+  // Coach UI toggle (persist to localStorage)
+  const [coachEnabled, setCoachEnabled] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    const raw = localStorage.getItem(COACH_TOGGLE_KEY);
+    return raw === "1";
+  });
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem(COACH_TOGGLE_KEY, coachEnabled ? "1" : "0");
+    }
+  }, [coachEnabled]);
+
+  // Track current hand id (from startHand response or from state if backend includes it)
+  const [handId, setHandId] = useState<string | null>(null);
+
+  // Human seat remembered from Settings page
   const humanSeat =
-    typeof window !== "undefined" ? parseInt(localStorage.getItem("humanSeat") || "0", 10) : 0;
+    typeof window !== "undefined" ? parseInt(localStorage.getItem(HUMAN_SEAT_KEY) || "0", 10) : 0;
 
   const bb = useMemo(() => state?.table?.bb ?? 100, [state]);
 
@@ -21,6 +43,14 @@ export default function TablePage() {
       const r = await Api.getState();
       setState(r.state);
       setActor(r.actor ?? null);
+
+      // Try to lift hand id from state if present
+      const sid =
+        (r as any)?.hand_id ??
+        r?.state?.hand_id ??
+        r?.state?.handId ??
+        null;
+      if (sid) setHandId(String(sid));
     } catch (e: any) {
       setErr(e?.message || String(e));
     } finally {
@@ -36,7 +66,8 @@ export default function TablePage() {
     setErr(null);
     setLoading(true);
     try {
-      await Api.startHand();
+      const res = await Api.startHand(); // { hand_id: string }
+      if (res?.hand_id) setHandId(String(res.hand_id));
       await refresh();
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -52,11 +83,18 @@ export default function TablePage() {
     try {
       const res = await Api.postAction({ seat: humanSeat, action, amount });
       setState(res.state);
-      // After bet/raise, the backend returns pre-bot state so snapping is visible.
-      // After check/call, backend auto-advances bots and returns post-bot state.
+
       const next = await Api.getState();
       setState(next.state);
       setActor(next.actor ?? null);
+
+      // Keep hand id fresh if backend includes it
+      const sid =
+        (next as any)?.hand_id ??
+        next?.state?.hand_id ??
+        next?.state?.handId ??
+        null;
+      if (sid) setHandId(String(sid));
     } catch (e: any) {
       setErr(e?.message || String(e));
     } finally {
@@ -69,7 +107,6 @@ export default function TablePage() {
     const m = label.match(/^(\d+(?:\.\d+)?)x$/);
     if (!m) return undefined;
     const mult = parseFloat(m[1]);
-    // Use exact target (engine will snap anyway)
     return Math.round(mult * bb);
   }
 
@@ -77,6 +114,15 @@ export default function TablePage() {
   function jamAmount(): number {
     return 1_000_000_000;
   }
+
+  // Decision index for coaching:
+  // Prefer a backend-provided index; otherwise if there's an actor, use 0 as a safe fallback.
+  const decisionIdx =
+    typeof state?.decision_idx === "number"
+      ? state.decision_idx
+      : actor
+      ? 0
+      : null;
 
   const canAct = actor && actor.seat === humanSeat;
 
@@ -86,6 +132,15 @@ export default function TablePage() {
         <header className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">NLH Trainer — Table</h1>
           <div className="flex items-center gap-3">
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={coachEnabled}
+                onChange={(e) => setCoachEnabled(e.target.checked)}
+              />
+              <span>Coach</span>
+            </label>
+
             <button
               onClick={onStartHand}
               className="rounded-xl bg-black text-white px-4 py-2 disabled:opacity-50"
@@ -112,13 +167,19 @@ export default function TablePage() {
               <h2 className="font-semibold">Table</h2>
               <div className="text-sm text-gray-700">
                 <div>Seats: {state.table.seats}</div>
-                <div>Blinds: {state.table.sb}/{state.table.bb}</div>
+                <div>
+                  Blinds: {state.table.sb}/{state.table.bb}
+                </div>
                 <div>Button: {state.table.button}</div>
                 <div>SB Seat: {state.table.sb_seat}</div>
                 <div>BB Seat: {state.table.bb_seat}</div>
                 <div>Street: {state.street}</div>
                 {"pot_total" in state && <div>Pot: {state.pot_total}</div>}
                 <div className="text-gray-500 text-xs">Seed: {state.deck_seed}</div>
+                {handId && <div className="text-gray-500 text-xs">Hand: {handId}</div>}
+                {typeof decisionIdx === "number" && (
+                  <div className="text-gray-500 text-xs">Decision: {decisionIdx}</div>
+                )}
               </div>
             </div>
 
@@ -210,12 +271,12 @@ export default function TablePage() {
             </div>
 
             {/* Custom raise for other scenarios (postflop, facing raise, etc.) */}
-            <CustomRaise
-              disabled={loading}
-              onSubmit={(amt) => postAction("raise", amt)}
-            />
+            <CustomRaise disabled={loading} onSubmit={(amt) => postAction("raise", amt)} />
           </div>
         )}
+
+        {/* Coach Panel */}
+        <CoachPanel enabled={coachEnabled} handId={handId} idx={decisionIdx} />
 
         {/* Last action panel */}
         {state?.last_action && (
@@ -257,11 +318,7 @@ function CustomRaise({
         value={val}
         onChange={(e) => setVal(e.target.value)}
       />
-      <button
-        type="submit"
-        className="rounded-xl border px-3 py-2 disabled:opacity-50"
-        disabled={disabled}
-      >
+      <button type="submit" className="rounded-xl border px-3 py-2 disabled:opacity-50" disabled={disabled}>
         Raise (custom)
       </button>
     </form>

@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Dict, List, Literal
+from typing import Any, Dict, List, Literal, cast
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -26,16 +26,78 @@ def _coach_enabled() -> bool:
 
 # -------------------------
 # GET /api/coach/advice
-# (Contract in place; integration with gameplay comes next)
 # -------------------------
 @router.get("/coach/advice")
-def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> Dict:
-    # For now, keep existing behavior so CI and current tests remain stable.
+def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
     if not _coach_enabled():
-        # 501 with a simple string (matches existing scaffold behavior)
-        raise HTTPException(status_code=501, detail="Coach is disabled.")
-    # We’ll replace this with real integration when we have the node builder + snapshot write.
-    raise HTTPException(status_code=501, detail="Coach is not available in this build.")
+        return JSONResponse({"meta": {"status": "disabled"}}, status_code=501)
+
+    # Build canonical node (stub / may raise UnsupportedSpotError)
+    try:
+        from backend.coach.node_builder import build_solve_request_from_hand
+
+        node_req = build_solve_request_from_hand(hand_id, idx)
+    except UnsupportedSpotError as e:
+        msg = str(e).lower()
+        if "timed out" in msg or "timeout" in msg:
+            return JSONResponse({"meta": {"status": "timeout"}}, status_code=504)
+        return JSONResponse({"meta": {"status": "unsupported"}}, status_code=501)
+    except Exception:
+        return JSONResponse({"meta": {"status": "error"}}, status_code=500)
+
+    adapter = TexasSolverAdapter()
+    started = time.perf_counter()
+    try:
+        advice_raw = adapter.solve(node_req)
+        advice = cast(Dict[str, Any], advice_raw)  # mypy: treat as plain dict
+        latency_ms = (time.perf_counter() - started) * 1000.0
+
+        # Pull fields safely with fallbacks
+        recommended_bucket = cast(str, advice.get("recommended_bucket", ""))
+        strategy = cast(Dict[str, float], advice.get("strategy", {}))
+        ev_map = cast(Dict[str, float], advice.get("ev_map", {}))
+
+        payload: Dict[str, Any] = {
+            "recommended_bucket": recommended_bucket,
+            "strategy": strategy,
+            "ev_map": ev_map,
+            "meta": {
+                "status": "ok",
+                "cached": False,
+                "latency_ms": round(latency_ms, 3),
+                "node_key": None,  # Task-18 will populate this
+            },
+        }
+
+        # Success only: persist snapshot
+        try:
+            from backend.coach.advice_store import write_snapshot
+
+            write_snapshot(hand_id, idx, node_key=None, advice_json=payload)
+        except Exception:
+            # Never fail the request on snapshot errors
+            pass
+
+        # tiny structured log
+        try:
+            top = recommended_bucket or "-"
+            print(
+                f"coach_advice hand={hand_id} idx={idx} status=ok latency_ms={payload['meta']['latency_ms']} top={top}"
+            )
+        except Exception:
+            pass
+
+        return JSONResponse(payload, status_code=200)
+
+    except CoachDisabledError:
+        return JSONResponse({"meta": {"status": "disabled"}}, status_code=501)
+    except UnsupportedSpotError as e:
+        msg = str(e).lower()
+        if "timed out" in msg or "timeout" in msg:
+            return JSONResponse({"meta": {"status": "timeout"}}, status_code=504)
+        return JSONResponse({"meta": {"status": "unsupported"}}, status_code=501)
+    except Exception:
+        return JSONResponse({"meta": {"status": "error"}}, status_code=500)
 
 
 # -------------------------
@@ -64,7 +126,7 @@ def post_test_solve(req: SolveRequestModel = Body(...)) -> JSONResponse:
     adapter = TexasSolverAdapter()
     started = time.perf_counter()
     try:
-        advice = adapter.solve(
+        advice_raw = adapter.solve(
             SolveRequest(
                 street=req.street,
                 board=req.board,
@@ -77,12 +139,17 @@ def post_test_solve(req: SolveRequestModel = Body(...)) -> JSONResponse:
                 spot=req.spot,
             )
         )
+        advice = cast(Dict[str, Any], advice_raw)  # mypy: treat as plain dict
         latency_ms = (time.perf_counter() - started) * 1000.0
-        # No cache in this task; no node_key yet (Task-18)
-        payload = {
-            "recommended_bucket": advice["recommended_bucket"],
-            "strategy": advice["strategy"],
-            "ev_map": advice.get("ev_map", {}),
+
+        recommended_bucket = cast(str, advice.get("recommended_bucket", ""))
+        strategy = cast(Dict[str, float], advice.get("strategy", {}))
+        ev_map = cast(Dict[str, float], advice.get("ev_map", {}))
+
+        payload: Dict[str, Any] = {
+            "recommended_bucket": recommended_bucket,
+            "strategy": strategy,
+            "ev_map": ev_map,
             "meta": {
                 "status": "ok",
                 "cached": False,
@@ -93,16 +160,13 @@ def post_test_solve(req: SolveRequestModel = Body(...)) -> JSONResponse:
         return JSONResponse(payload, status_code=200)
 
     except CoachDisabledError:
-        # Adapter double-check; map to disabled
         return JSONResponse({"meta": {"status": "disabled"}}, status_code=501)
 
     except UnsupportedSpotError as e:
-        # Adapter uses UnsupportedSpotError for several cases (including timeout).
         msg = str(e).lower()
         if "timed out" in msg or "timeout" in msg:
             return JSONResponse({"meta": {"status": "timeout"}}, status_code=504)
         return JSONResponse({"meta": {"status": "unsupported"}}, status_code=501)
 
     except Exception:
-        # Unexpected adapter failure
         return JSONResponse({"meta": {"status": "error"}}, status_code=500)
