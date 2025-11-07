@@ -46,6 +46,7 @@ from backend.api.session import router as session_router
 from backend.api.hand import router as hand_router
 from backend.api.export import router as export_router
 from backend.api.coach import router as coach_router  # coach scaffold (501 by default)
+from backend.api.review import router as review_router
 
 # --- Executable statements AFTER all imports ---
 # Load environment variables (development convenience; harmless if empty)
@@ -95,3 +96,4 @@ app.include_router(session_router, prefix="/api")
 app.include_router(hand_router, prefix="/api")
 app.include_router(export_router, prefix="/api")
 app.include_router(coach_router, prefix="/api")
+app.include_router(review_router, prefix="/api")
