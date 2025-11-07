@@ -110,3 +110,62 @@ Coach disabled / 501 responses: If you hit a coach/solver endpoint while coachin
 Determinism drift: Ensure you’re using the same base_seed and making the same initial decision policy; otherwise, action sequences can diverge.
 
 Ports in use: If :8000 is busy, either stop the other service or run Uvicorn on a different port with --port 8001.
+
+6) Warm the cache
+Pre-populate the SQLite cache with a small grid of common flop nodes so the first user hit is fast.
+
+Prerequisites
+
+COACH_ENABLED=true
+
+TEXASSOLVER_PATH set to the solver binary
+
+(Optional) COACH_TS_THREADS — set via --threads flag below
+
+Usage
+
+macOS/Linux
+export COACH_ENABLED=true
+export TEXASSOLVER_PATH=/path/to/solver_binary
+python -m backend.scripts.warm_cache --preset hu_srp --boards 50 --spr 20,40 --threads 1
+
+Windows (PowerShell)
+$env:COACH_ENABLED='true'
+$env:TEXASSOLVER_PATH='C:\path\to\solver.exe'
+python -m backend.scripts.warm_cache --preset hu_srp --boards 50 --spr 20,40 --threads 1
+
+What it does
+
+Generates a deterministic sample of flop boards and SPR values for HU SRP only.
+For each node, computes the node_key, checks the cache, solves on miss, and stores the result.
+Prints per-node progress and a summary:
+warm_cache: preset=hu_srp boards=50 sprs=[20.0, 40.0] threads=1
+node=8f3e1a9c2bde street=flop board=AhKd3s spr~2.0 cached=false latency_ms=842.1
+...
+warm_cache: done total=100 hits=0 misses=100 avg_ms=810.3 p50_ms=795.4
+
+Notes & Scope
+
+Currently warms only HU postflop (flop); other spots can be added later.
+
+This is compute-intensive; start small (e.g., --boards 25) and increase as needed.
+
+The cache is TTL-aware (COACH_CACHE_TTL_DAYS) and LRU-pruned (COACH_CACHE_MAX_ROWS).
+
+POST /coach/test_solve remains uncached; only GET /coach/advice uses the cache.
+
+Troubleshooting
+
+COACH_ENABLED is not true: Set COACH_ENABLED=true.
+
+TEXASSOLVER_PATH is not set: Point it to your solver binary.
+
+Slow warm-up: Increase --threads (and ensure your solver supports it). Consider fewer boards or fewer SPRs.
+
+Force refresh: Lower COACH_CACHE_TTL_DAYS temporarily or clear the cache:
+DELETE FROM solver_cache;
+
+Observability
+
+API log line (GET /coach/advice) includes cached=true|false and a short node_key prefix.
+Cache ops log as coach_cache hit/miss/expired/put/prune (info level).

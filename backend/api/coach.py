@@ -15,6 +15,7 @@ from backend.adapters.solver.texassolver_adapter import (
     CoachDisabledError,
     UnsupportedSpotError,
 )
+from backend.coach.texassolver_cache import resolve_with_cache
 
 router = APIRouter(tags=["coach"])
 
@@ -45,17 +46,15 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
     except Exception:
         return JSONResponse({"meta": {"status": "error"}}, status_code=500)
 
-    adapter = TexasSolverAdapter()
     started = time.perf_counter()
     try:
-        advice_raw = adapter.solve(node_req)
-        advice = cast(Dict[str, Any], advice_raw)  # mypy: treat as plain dict
+        advice_payload, cached, node_key = resolve_with_cache(node_req)
         latency_ms = (time.perf_counter() - started) * 1000.0
 
         # Pull fields safely with fallbacks
-        recommended_bucket = cast(str, advice.get("recommended_bucket", ""))
-        strategy = cast(Dict[str, float], advice.get("strategy", {}))
-        ev_map = cast(Dict[str, float], advice.get("ev_map", {}))
+        recommended_bucket = cast(str, advice_payload.get("recommended_bucket", ""))
+        strategy = cast(Dict[str, float], advice_payload.get("strategy", {}))
+        ev_map = cast(Dict[str, float], advice_payload.get("ev_map", {}))
 
         payload: Dict[str, Any] = {
             "recommended_bucket": recommended_bucket,
@@ -63,9 +62,9 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
             "ev_map": ev_map,
             "meta": {
                 "status": "ok",
-                "cached": False,
+                "cached": bool(cached),
                 "latency_ms": round(latency_ms, 3),
-                "node_key": None,  # Task-18 will populate this
+                "node_key": node_key,
             },
         }
 
@@ -73,7 +72,7 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
         try:
             from backend.coach.advice_store import write_snapshot
 
-            write_snapshot(hand_id, idx, node_key=None, advice_json=payload)
+            write_snapshot(hand_id, idx, node_key=node_key, advice_json=payload)
         except Exception:
             # Never fail the request on snapshot errors
             pass
@@ -81,8 +80,10 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
         # tiny structured log
         try:
             top = recommended_bucket or "-"
+            ck = "true" if cached else "false"
+            nk = (node_key or "")[:12]
             print(
-                f"coach_advice hand={hand_id} idx={idx} status=ok latency_ms={payload['meta']['latency_ms']} top={top}"
+                f"coach_advice hand={hand_id} idx={idx} status=ok latency_ms={payload['meta']['latency_ms']} top={top} cached={ck} node_key={nk}"
             )
         except Exception:
             pass
@@ -123,6 +124,7 @@ def post_test_solve(req: SolveRequestModel = Body(...)) -> JSONResponse:
     if not _coach_enabled():
         return JSONResponse({"meta": {"status": "disabled"}}, status_code=501)
 
+    # Intentionally uncached for a clean dev endpoint
     adapter = TexasSolverAdapter()
     started = time.perf_counter()
     try:
