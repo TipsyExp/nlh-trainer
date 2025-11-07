@@ -85,9 +85,14 @@ def test_advice_cached_and_node_key(monkeypatch: pytest.MonkeyPatch) -> None:
     # Ensure the cache is clean for this node
     from backend.coach.node_key import make_node_key_from_solve_request
     from backend.logger import get_logger
+    from backend.coach.cache import ensure_tables
 
     nk = make_node_key_from_solve_request(dummy)
     conn = get_logger().conn
+
+    # Ensure table exists before manipulating it
+    ensure_tables(conn)
+
     conn.execute("DELETE FROM solver_cache WHERE node_key = ?", (nk,))
     conn.commit()
 
