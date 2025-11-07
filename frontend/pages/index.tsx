@@ -1,6 +1,7 @@
 // frontend/pages/index.tsx
 import { useState } from "react";
 import { useRouter } from "next/router";
+import Link from "next/link";
 import { Api } from "../lib/api";
 
 export default function SettingsPage() {
@@ -52,7 +53,15 @@ export default function SettingsPage() {
   return (
     <main className="min-h-screen flex items-center justify-center p-6 bg-gray-50">
       <div className="w-full max-w-2xl rounded-2xl bg-white shadow p-6 space-y-6">
-        <h1 className="text-2xl font-bold">NLH Trainer — Settings</h1>
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold">NLH Trainer — Settings</h1>
+          <Link
+            href="/review"
+            className="rounded-xl border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+          >
+            Review Hands
+          </Link>
+        </div>
 
         <form onSubmit={onSubmit} className="grid grid-cols-2 gap-4">
           <label className="col-span-1">
@@ -128,7 +137,7 @@ export default function SettingsPage() {
             />
           </label>
 
-          <div className="col-span-2 flex gap-3">
+          <div className="col-span-2 flex gap-3 items-center">
             <button
               type="submit"
               disabled={busy}

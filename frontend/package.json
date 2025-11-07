@@ -9,6 +9,7 @@
     "test": "echo \"No frontend tests implemented in M0\""
   },
   "dependencies": {
+    "clsx": "^2.1.1",
     "next": "^13.5.11",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
