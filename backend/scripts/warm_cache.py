@@ -7,7 +7,11 @@ import sys
 import time
 from typing import Iterable, List, Sequence
 
-from backend.adapters.solver.texassolver_adapter import SolveRequest, CoachDisabledError, UnsupportedSpotError
+from backend.adapters.solver.texassolver_adapter import (
+    SolveRequest,
+    CoachDisabledError,
+    UnsupportedSpotError,
+)
 from backend.coach.texassolver_cache import resolve_with_cache
 from backend.coach.cache import ensure_tables
 from backend.logger import get_logger
@@ -51,7 +55,12 @@ def _ensure_env_threads(threads: int | None) -> None:
 
 
 def _guard_env() -> None:
-    ce = os.environ.get("COACH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    ce = os.environ.get("COACH_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     if not ce:
         print("warm_cache: COACH_ENABLED is not true — enable it to warm the cache.")
         sys.exit(2)
@@ -64,7 +73,9 @@ def _guard_env() -> None:
 DEFAULT_BUCKETS = ["TOP", "MID", "LOW"]
 
 
-def _build_requests(preset: str, boards: Sequence[Sequence[str]], sprs: Sequence[float]) -> List[SolveRequest]:
+def _build_requests(
+    preset: str, boards: Sequence[Sequence[str]], sprs: Sequence[float]
+) -> List[SolveRequest]:
     reqs: List[SolveRequest] = []
     # Heuristics for HU SRP postflop warm-up
     if preset == "hu_srp":
@@ -94,10 +105,26 @@ def _build_requests(preset: str, boards: Sequence[Sequence[str]], sprs: Sequence
 
 def main(argv: Iterable[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Warm the solver advice cache (SQLite)")
-    p.add_argument("--preset", default="hu_srp", help="Preset to generate nodes (default: hu_srp)")
-    p.add_argument("--boards", type=int, default=50, help="Number of flop boards to sample (default: 50)")
-    p.add_argument("--spr", default="20,40", help="Comma-separated SPR values (e.g., '20,40' or '30')")
-    p.add_argument("--threads", type=int, default=None, help="Passthrough for COACH_TS_THREADS (optional)")
+    p.add_argument(
+        "--preset", default="hu_srp", help="Preset to generate nodes (default: hu_srp)"
+    )
+    p.add_argument(
+        "--boards",
+        type=int,
+        default=50,
+        help="Number of flop boards to sample (default: 50)",
+    )
+    p.add_argument(
+        "--spr",
+        default="20,40",
+        help="Comma-separated SPR values (e.g., '20,40' or '30')",
+    )
+    p.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help="Passthrough for COACH_TS_THREADS (optional)",
+    )
     args = p.parse_args(list(argv) if argv is not None else None)
 
     _guard_env()
@@ -121,7 +148,9 @@ def main(argv: Iterable[str] | None = None) -> int:
     errors = 0
     latencies: List[float] = []
 
-    print(f"warm_cache: preset={args.preset} boards={len(boards)} sprs={sprs} threads={args.threads or '-'}")
+    print(
+        f"warm_cache: preset={args.preset} boards={len(boards)} sprs={sprs} threads={args.threads or '-'}"
+    )
 
     for req in reqs:
         start = time.perf_counter()
