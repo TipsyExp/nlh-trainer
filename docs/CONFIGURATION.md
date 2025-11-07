@@ -141,3 +141,26 @@ Tuning (deterministic by default):
 - COACH_TS_ACCURACY=1.0         # smaller => slower, more accurate
 - COACH_TS_MAX_ITERS=200        # iteration cap for quick goldens
 - COACH_TS_TIMEOUT_S=90         # subprocess timeout seconds
+
+10) Coach / Solver Configuration
+Enabling
+•	Set COACH_ENABLED=true to turn on coach routes and logic.
+•	With COACH_ENABLED=false (default), coach endpoints return 501 with {"meta":{"status":"disabled"}}.
+Solver path
+•	When enabled and hitting nodes that require solving, set:
+o	TEXASSOLVER_PATH to an absolute path to the TexasSolver console binary (e.g., C:\path\to\console_solver.exe on Windows).
+•	If the binary is missing/invalid, solver calls will fail; endpoints may surface "unsupported" or "disabled" depending on the code path.
+Supported spots (Task-17)
+•	Heads-up postflop only:
+o	Single-raised pots (SRP)
+o	3-bet pots (3BP)
+•	Preflop and multi-way are intentionally unsupported and return 501 with {"meta":{"status":"unsupported"}}.
+Tuning / determinism
+•	Optional environment variables:
+o	COACH_TS_THREADS (default 1)
+o	COACH_TS_ACCURACY (default 1.0)
+o	COACH_TS_MAX_ITERS (default 200)
+o	COACH_TS_TIMEOUT_S (default 90) → exceeded time yields 504 with {"meta":{"status":"timeout"}}.
+CI posture
+•	CI runs with COACH_ENABLED=false. No solver is required and coach paths are inert.
+

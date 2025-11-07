@@ -503,3 +503,42 @@ H1,2,flop,1,check,,,0,0,,PokerKit,PokerKit
 * **State shape:** The state object in responses reflects the live implementation.  Some fields such as `pot_total` and `last_action` are derived client‑side from `action_history` and may not be persisted in the authoritative schema.
 * **Single‑session model:** This server operates a single in‑memory session by default; `/hand/*` endpoints act on the active session/hand without requiring query parameters.
 * If you change response shapes or add/remove fields, regenerate examples with `docs/scripts/capture_examples.py` and update this document to match.
+
+### Coach
+GET /api/coach/advice
+
+Fetch solver advice for the current decision (used by the in-table overlay).
+
+Query params
+
+hand_id (string, required) — Current hand identifier (e.g., "H1").
+
+idx (integer, required) — Decision index within the hand (e.g., 0).
+
+Success (200)
+{
+  "recommended_bucket": "100%",
+  "strategy": { "check": 0.02, "50%": 0.18, "100%": 0.80 },
+  "ev_map": { "check": -0.05, "50%": 0.12, "100%": 0.15 },
+  "meta": {
+    "status": "ok",
+    "cached": false,
+    "latency_ms": 42.7,
+    "node_key": null
+  }
+}
+
+Error/status mapping
+| HTTP | `meta.status`   | Meaning                                                                     |
+| ---: | --------------- | --------------------------------------------------------------------------- |
+|  501 | `"disabled"`    | Coach disabled via env gate.                                                |
+|  501 | `"unsupported"` | Node not supported (e.g., preflop, non-HU, or builder can’t assemble node). |
+|  504 | `"timeout"`     | Solver didn’t finish within timeout.                                        |
+|  500 | `"error"`       | Unexpected server error.                                                    |
+
+Example
+curl -s "http://127.0.0.1:8000/api/coach/advice?hand_id=H1&idx=0"
+
+Notes
+No cache in this task; cached is always false and node_key is null (added in Task-18).
+Only HU postflop SRP/3BP are supported for now.
