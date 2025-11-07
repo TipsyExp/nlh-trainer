@@ -22,8 +22,8 @@ def test_advice_disabled(monkeypatch) -> None:
 
 
 def test_advice_enabled_stub(monkeypatch) -> None:
-    # With COACH_ENABLED=true and our current node_builder stub,
-    # the route returns 501 with meta.status="unsupported" (preflop / not wired).
+    # With COACH_ENABLED=true and current builder,
+    # the route returns 501 with meta.status in {"unsupported","timeout","error"} at preflop.
     monkeypatch.setenv("COACH_ENABLED", "true")
     client = TestClient(app)
     r = client.get("/api/coach/advice", params={"hand_id": "H1", "idx": 0})
@@ -33,7 +33,7 @@ def test_advice_enabled_stub(monkeypatch) -> None:
     assert body.get("meta", {}).get("status") in {"unsupported", "timeout", "error"}
 
 
-# The following will be enabled once GET /coach/advice is wired to node_builder + adapter + snapshot.
+# The following will be enabled once GET /coach/advice is fully wired + adapter reachable.
 @pytest.mark.skip(
     reason="Enable after wiring GET /coach/advice to node_builder + adapter"
 )
