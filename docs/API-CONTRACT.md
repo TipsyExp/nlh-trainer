@@ -507,7 +507,7 @@ H1,2,flop,1,check,,,0,0,,PokerKit,PokerKit
 ### Coach
 GET /api/coach/advice
 
-Fetch solver advice for the current decision (used by the in-table overlay).
+Fetch solver advice for the current decision (used by the in-table overlay). Results are cached in SQLite and keyed by a stable node_key.
 
 Query params
 
@@ -522,9 +522,9 @@ Success (200)
   "ev_map": { "check": -0.05, "50%": 0.12, "100%": 0.15 },
   "meta": {
     "status": "ok",
-    "cached": false,
-    "latency_ms": 42.7,
-    "node_key": null
+    "cached": true,
+    "latency_ms": 3.812,
+    "node_key": "b2e9d1b0a2a6e2f8f9fbb0e68f5a9b4c3e5a7c2b4c9d1a0f7d2e3c4b5a6d7e8f"
   }
 }
 
@@ -540,5 +540,13 @@ Example
 curl -s "http://127.0.0.1:8000/api/coach/advice?hand_id=H1&idx=0"
 
 Notes
-No cache in this task; cached is always false and node_key is null (added in Task-18).
-Only HU postflop SRP/3BP are supported for now.
+
+meta.cached: true when served from cache (TTL-aware), false when freshly solved.
+
+meta.node_key: 64-hex SHA-256 over a canonical JSON blob of the node (street, board, pot, stacks, spot, sorted bucket_labels, and SHA-256 of IP/OOP ranges). Identical states → identical node_key.
+
+Cache maintenance: entries expire after COACH_CACHE_TTL_DAYS, and the table is trimmed to COACH_CACHE_MAX_ROWS oldest entries.
+
+Successful responses are also snapshot-logged with the same node_key.
+
+POST /coach/test_solve remains uncached (dev endpoint).

@@ -164,3 +164,23 @@ o	COACH_TS_TIMEOUT_S (default 90) → exceeded time yields 504 with {"meta":{"st
 CI posture
 •	CI runs with COACH_ENABLED=false. No solver is required and coach paths are inert.
 
+11) Coach / Solver
+| Variable           | Type   | Default | Description                                                                                                    |
+| ------------------ | ------ | ------- | -------------------------------------------------------------------------------------------------------------- |
+| `COACH_ENABLED`    | bool   | `false` | Enables coach endpoints. When `false`, API returns `501 disabled`.                                             |
+| `TEXASSOLVER_PATH` | string | —       | Filesystem path to the solver binary used by `TexasSolverAdapter`. Required when coach is enabled and solving. |
+
+Implementation notes
+
+Cache storage: SQLite table solver_cache(node_key TEXT PRIMARY KEY, payload_json TEXT NOT NULL, created_at TEXT NOT NULL) is created automatically.
+
+node_key: SHA-256 over canonical node JSON. Includes SHA-256 of ip_range and oop_range to keep keys compact.
+
+Changing solver knobs (COACH_TS_THREADS, COACH_TS_ACCURACY, COACH_TS_MAX_ITERS) does not alter the node_key. If you need to refresh advice after such changes, lower COACH_CACHE_TTL_DAYS temporarily or clear the table.
+
+Optional solver knobs
+| Variable             | Type | Default | Effect                                                                          |
+| -------------------- | ---- | ------- | ------------------------------------------------------------------------------- |
+| `COACH_TS_THREADS`   | int  | `1`     | Passed through to the adapter; can be set by warm-cache script via `--threads`. |
+| `COACH_TS_ACCURACY`  | str  | `1.0`   | Adapter-specific target accuracy (if supported).                                |
+| `COACH_TS_MAX_ITERS` | str  | `200`   | Adapter-specific iteration cap (if supported).                                  |
