@@ -43,6 +43,37 @@ def _rows_to_dicts(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def _first_present(table: str, *candidates: str) -> Optional[str]:
+    cols = set(_columns(table))
+    for c in candidates:
+        if c in cols:
+            return c
+    return None
+
+
+def _actions_schema() -> Dict[str, Optional[str]]:
+    """
+    Detect the concrete column names used by the actions table and
+    return a mapping for logical fields -> concrete column name (or None).
+    """
+    table = "actions"
+    return {
+        "idx": _first_present(table, "idx"),
+        "created_at": _first_present(table, "created_at"),
+        "street": _first_present(table, "street"),
+        "actor": _first_present(table, "actor_seat", "actor"),
+        "action": _first_present(table, "type", "action"),
+        "amount": _first_present(table, "amount"),
+        "pot_after": _first_present(table, "pot_after"),
+        "stack_after": _first_present(table, "stack_after"),
+        "bucket": _first_present(table, "bucket"),
+        "snapped": _first_present(table, "snapped"),
+        "rng": _first_present(table, "rng_seed", "rng"),
+        "engine": _first_present(table, "engine"),
+        "evaluator": _first_present(table, "evaluator"),
+    }
+
+
 # -----------------------
 # Public: listing & summary
 # -----------------------
@@ -63,13 +94,12 @@ def list_recent_hands(
     if not _table_exists("actions"):
         return []
 
-    # Determine available columns for richer summary.
-    has_created = _has_col("actions", "created_at")
-    has_actor = _has_col("actions", "actor")
-    has_pot_after = _has_col("actions", "pot_after")
+    schema = _actions_schema()
+    has_created = schema["created_at"] is not None
+    has_actor = schema["actor"] is not None
+    has_pot_after = schema["pot_after"] is not None
 
     # Build aggregate query dynamically based on available columns.
-    # Always return hand_id + num_actions; others when possible.
     select_parts = ["hand_id", "COUNT(*) AS num_actions"]
     order_key = "num_actions"
 
@@ -79,7 +109,7 @@ def list_recent_hands(
         order_key = "finished_at"
 
     if has_actor:
-        select_parts.append("COUNT(DISTINCT actor) AS seats")
+        select_parts.append(f"COUNT(DISTINCT {schema['actor']}) AS seats")  # type: ignore[index]
 
     if has_pot_after:
         select_parts.append("MAX(pot_after) AS final_pot")
@@ -102,23 +132,23 @@ def list_recent_hands(
 
     items = _rows_to_dicts(rows)
 
-    # winners: best-effort — if we have action + actor, treat action in ('win','collect') as winners
-    winners_available = _has_col("actions", "action") and has_actor
-    for it in items:
-        hand_id = it["hand_id"]
-        winners: List[str] = []
-        if winners_available:
-            wrows = cur.execute(
-                """
-                SELECT DISTINCT actor
-                  FROM actions
-                 WHERE hand_id = ?
-                   AND action IN ('win','collect')
-                """,
-                (hand_id,),
-            ).fetchall()
-            winners = [str(r["actor"]) for r in wrows]  # type: ignore[index]
-        it["winners"] = winners
+    # winners: best-effort — look for rows whose action indicates a collect/win
+    winners: Dict[str, List[str]] = {}
+    action_col = schema["action"]
+    actor_col = schema["actor"]
+    if action_col and actor_col:
+        wrows = cur.execute(
+            f"""
+            SELECT hand_id, DISTINCT {actor_col} AS actor
+              FROM actions
+             WHERE {action_col} IN ('win','collect')
+            """.replace(
+                "DISTINCT", "DISTINCT"
+            ),  # keep DISTINCT in proper place
+        ).fetchall()
+        for r in wrows:
+            hid = str(r["hand_id"])  # type: ignore[index]
+            winners.setdefault(hid, []).append(str(r["actor"]))  # type: ignore[index]
 
     # has_advice: mark if any snapshot exists for the hand (if advice table present)
     advice_hands: set[str] = set()
@@ -126,8 +156,11 @@ def list_recent_hands(
         arows = cur.execute("SELECT DISTINCT hand_id FROM coach_advice").fetchall()
         advice_hands = {str(r["hand_id"]) for r in arows}  # type: ignore[index]
 
+    # attach winners/has_advice
     for it in items:
-        it["has_advice"] = it.get("hand_id") in advice_hands
+        hid = str(it.get("hand_id"))
+        it["winners"] = winners.get(hid, [])
+        it["has_advice"] = hid in advice_hands
 
     return items
 
@@ -147,16 +180,17 @@ def get_hand_summary(hand_id: str) -> Dict[str, Any]:
             "num_actions": 0,
         }
 
-    has_created = _has_col("actions", "created_at")
-    has_actor = _has_col("actions", "actor")
-    has_pot_after = _has_col("actions", "pot_after")
+    schema = _actions_schema()
+    has_created = schema["created_at"] is not None
+    has_actor = schema["actor"] is not None
+    has_pot_after = schema["pot_after"] is not None
 
     select_parts = ["COUNT(*) AS num_actions"]
     if has_created:
         select_parts.append("MIN(created_at) AS started_at")
         select_parts.append("MAX(created_at) AS finished_at")
     if has_actor:
-        select_parts.append("COUNT(DISTINCT actor) AS seats")
+        select_parts.append(f"COUNT(DISTINCT {schema['actor']}) AS seats")  # type: ignore[index]
     if has_pot_after:
         select_parts.append("MAX(pot_after) AS final_pot")
 
@@ -175,14 +209,17 @@ def get_hand_summary(hand_id: str) -> Dict[str, Any]:
 
     num_actions = int(row["num_actions"]) if row and row["num_actions"] is not None else 0  # type: ignore[index]
 
+    # winners best-effort
     winners: List[str] = []
-    if _has_col("actions", "action") and has_actor:
+    action_col = schema["action"]
+    actor_col = schema["actor"]
+    if action_col and actor_col:
         wrows = cur.execute(
-            """
-            SELECT DISTINCT actor
+            f"""
+            SELECT DISTINCT {actor_col} AS actor
               FROM actions
              WHERE hand_id = ?
-               AND action IN ('win','collect')
+               AND {action_col} IN ('win','collect')
             """,
             (hand_id,),
         ).fetchall()
@@ -203,7 +240,8 @@ def get_hand_summary(hand_id: str) -> Dict[str, Any]:
 # Public: hand details
 # -----------------------
 
-_ACTION_KEYS: Tuple[str, ...] = (
+# We normalize output keys for callers, regardless of DB column names.
+_NORMALIZED_ACTION_KEYS: Tuple[str, ...] = (
     "idx",
     "street",
     "actor",
@@ -222,20 +260,22 @@ _ACTION_KEYS: Tuple[str, ...] = (
 
 def get_hand_actions(hand_id: str) -> List[Dict[str, Any]]:
     """
-    Return ordered actions for a hand. Only emits known keys if present; missing keys become None.
+    Return ordered actions for a hand. Emits normalized keys even if the
+    underlying DB uses different column names (e.g., actor_seat/type/rng_seed).
+    Missing keys become None.
     """
     if not _table_exists("actions"):
         return []
 
-    # Prefer idx ordering; fallback to created_at if idx column absent.
-    has_idx = _has_col("actions", "idx")
-    has_created = _has_col("actions", "created_at")
+    schema = _actions_schema()
 
-    order_clause = "ORDER BY idx ASC"
+    # Prefer idx ordering; fallback to created_at if idx column absent.
+    has_idx = schema["idx"] is not None
+    has_created = schema["created_at"] is not None
+
+    order_clause = f"ORDER BY {schema['idx']} ASC" if has_idx else ""
     if not has_idx and has_created:
-        order_clause = "ORDER BY created_at ASC"
-    elif not has_idx and not has_created:
-        order_clause = ""  # last resort: no ordering
+        order_clause = f"ORDER BY {schema['created_at']} ASC"
 
     conn = _conn()
     cur = conn.cursor()
@@ -244,14 +284,36 @@ def get_hand_actions(hand_id: str) -> List[Dict[str, Any]]:
         (hand_id,),
     ).fetchall()
 
-    # Map rows to a stable shape (only known keys; None if missing)
+    # Map rows to a stable shape (normalized keys; None if missing)
     result: List[Dict[str, Any]] = []
     available_cols = set(_columns("actions"))
+
+    # Build a map from normalized -> concrete column name
+    col_map = {
+        "idx": schema["idx"],
+        "street": schema["street"],
+        "actor": schema["actor"],
+        "action": schema["action"],
+        "amount": schema["amount"],
+        "pot_after": schema["pot_after"],
+        "stack_after": schema["stack_after"],
+        "bucket": schema["bucket"],
+        "snapped": schema["snapped"],
+        "rng": schema["rng"],
+        "engine": schema["engine"],
+        "evaluator": schema["evaluator"],
+        "created_at": schema["created_at"],
+    }
+
     for r in rows:
         d = dict(r)
         item: Dict[str, Any] = {"hand_id": hand_id}
-        for k in _ACTION_KEYS:
-            item[k] = d[k] if k in available_cols else None
+        for norm_key in _NORMALIZED_ACTION_KEYS:
+            concrete = col_map.get(norm_key)
+            if concrete and concrete in available_cols:
+                item[norm_key] = d.get(concrete)
+            else:
+                item[norm_key] = None
         result.append(item)
 
     return result

@@ -1,3 +1,4 @@
+# backend/api/hand.py
 """Hand API for the NLH trainer.
 
 This module exposes endpoints to start a new hand, query the current
@@ -132,12 +133,15 @@ def _la_to_dict(la: Any) -> Optional[Dict[str, Any]]:
 def _to_public_state(human_seat: int) -> Dict[str, Any]:
     """
     Convert adapter.state() dataclasses to a JSON-friendly dict snapshot.
-    Hide opponents' hole cards (mask to 'XX').
+
+    Includes:
+      - pot_total (cumulative, never reset here),
+      - to_act (seat index) and allowed (to_call/min_raise/allowed_buckets),
+      - street, board (placeholder until adapter exposes real cards),
+      - player hole cards (mask non-human).
     """
     adapter = get_adapter()
-    s = (
-        adapter.state()
-    )  # dataclasses: table, players, street, deck_seed, last_action, pot_total
+    s = adapter.state()
     tbl = s.table
 
     # Players: mask everyone except human_seat
@@ -148,7 +152,18 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
         else:
             players.append({"seat": i, "hole_cards": ["XX", "XX"]})
 
-    resp = {
+    # Current actor / allowed
+    actor = adapter.next_actor()
+    to_act: Optional[int] = int(actor["seat"]) if actor else None
+    allowed: Optional[Dict[str, Any]] = None
+    if actor:
+        allowed = {
+            "to_call": int(actor.get("to_call", 0)),
+            "min_raise": int(actor.get("min_raise", 0)),
+            "allowed_buckets": list(actor.get("allowed_buckets", [])),
+        }
+
+    resp: Dict[str, Any] = {
         "table": {
             "seats": int(tbl.seats),
             "sb": int(tbl.sb),
@@ -159,9 +174,17 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
             "bb_seat": int(tbl.bb_seat),
         },
         "players": players,
-        "street": s.street,
+        "street": str(s.street),
+        "board": {  # placeholder until adapter exposes real community cards
+            "flop": [],
+            "turn": [],
+            "river": [],
+        },
         "deck_seed": s.deck_seed,
-        "pot_total": int(getattr(s, "pot_total", 0)),  # surface the pot
+        # Do NOT reset here; we surface adapter's cumulative total as-is
+        "pot_total": int(getattr(s, "pot_total", 0)),
+        "to_act": to_act,
+        "allowed": allowed,
         "last_action": _la_to_dict(getattr(s, "last_action", None)),
     }
     return resp
@@ -477,8 +500,10 @@ def start_hand() -> StartHandResponse:
     _persist_snapshot(hand_id)
 
     # Auto-advance bots immediately to first human decision (if any)
-    human_seat = get_session_state().human_seat
-    _auto_advance_bots(hand_id, human_seat)
+    ss = get_session_state()
+    human_seat = ss.human_seat
+    if getattr(ss, "bot_mode", "heuristic") != "none":
+        _auto_advance_bots(hand_id, human_seat)
 
     # Refresh snapshot so exports can see the post-bot state
     _persist_snapshot(hand_id)
@@ -504,7 +529,8 @@ def post_action(req: ActionRequest) -> ActionResponse:
     each action so exports work mid-hand.
     """
     adapter = get_adapter()
-    human_seat = get_session_state().human_seat
+    ss = get_session_state()
+    human_seat = ss.human_seat
 
     # Only the configured human seat may act
     if req.seat != human_seat:
@@ -550,10 +576,40 @@ def post_action(req: ActionRequest) -> ActionResponse:
         return ActionResponse(ok=True, bots_applied=[], state=human_pre_bot_state)
 
     # Auto-advance bots and return post-bot snapshot (e.g., HU SB-call -> BB-check -> flop).
-    bots = _auto_advance_bots(hand_id, human_seat)
+    bots: List[Dict[str, Any]] = []
+    if getattr(ss, "bot_mode", "heuristic") != "none":
+        bots = _auto_advance_bots(hand_id, human_seat)
 
     # Persist snapshot after bot auto-advance as well
     _persist_snapshot(hand_id)
 
     post_bot_state = _to_public_state(human_seat)
     return ActionResponse(ok=True, bots_applied=bots, state=post_bot_state)
+
+
+@router.post("/hand/auto", response_model=ActionResponse)
+def auto_advance() -> ActionResponse:
+    """
+    Dev helper: advance all bot actions until it's the human's turn (or hand ends).
+    Returns the updated state and a list of bot actions applied.
+    """
+    adapter = get_adapter()
+    human_seat = get_session_state().human_seat
+
+    # Determine current hand id
+    hand_id_any = getattr(adapter, "hand_id", None)
+    if not hand_id_any:
+        # If we have no recorded actions and no adapter hand_id, there's no hand.
+        if not _ACTION_IDX:
+            raise HTTPException(status_code=400, detail="no hand in progress")
+        hand_id = next(reversed(_ACTION_IDX.keys()))
+    else:
+        hand_id = _hand_id_str(hand_id_any)
+
+    # Advance bots
+    bots = _auto_advance_bots(hand_id, human_seat)
+
+    # Persist and return state
+    _persist_snapshot(hand_id)
+    state = _to_public_state(human_seat)
+    return ActionResponse(ok=True, bots_applied=bots, state=state)
