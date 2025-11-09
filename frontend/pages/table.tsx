@@ -119,7 +119,6 @@ export default function TablePage() {
       if (AUTO_HAND_ENABLED) {
         try {
           const auto = await Api.autoPlay();
-          // If dev auto endpoint is gated off at the backend (501) or returns not ok, stop using it.
           if (!auto?.ok) {
             // Continue polling without auto
           }
@@ -128,7 +127,6 @@ export default function TablePage() {
         }
       }
 
-      // Small backoff to avoid hammering the server
       await sleep(100);
     }
   }
@@ -140,10 +138,6 @@ export default function TablePage() {
     try {
       const res = await Api.postAction({ seat: humanSeat, action, amount });
       setState(res.state);
-
-      // Always follow up by polling until it's our turn or the hand is over,
-      // regardless of whether dev auto is enabled. This covers the post-raise
-      // path where the server returns a pre-bot snapshot.
       await pollUntilSettled(humanSeat);
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -183,6 +177,9 @@ export default function TablePage() {
       // noop
     }
   };
+
+  // 🚩 Choose the correct action verb for sized actions
+  const actionVerb = allowedCtx?.to_call === 0 ? "bet" : "raise";
 
   return (
     <main className="min-h-screen p-6 bg-gray-50">
@@ -310,7 +307,7 @@ export default function TablePage() {
                 </button>
               )}
 
-              {/* Quick open sizes for HU SB preflop open */}
+              {/* Quick open sizes (engine snaps; verb chosen by to_call === 0 ? bet : raise) */}
               {allowedCtx.allowed_buckets
                 .filter((b) => /^\d+(\.\d+)?x$/.test(b))
                 .map((label) => {
@@ -318,7 +315,7 @@ export default function TablePage() {
                   return (
                     <button
                       key={label}
-                      onClick={() => postAction("raise", amt)}
+                      onClick={() => postAction(actionVerb, amt)}
                       className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50"
                       disabled={loading}
                       title={`Total ${amt}`}
@@ -328,10 +325,10 @@ export default function TablePage() {
                   );
                 })}
 
-              {/* Jam */}
+              {/* Jam (same verb rule) */}
               {allowedCtx.allowed_buckets.includes("jam") && (
                 <button
-                  onClick={() => postAction("raise", jamAmount())}
+                  onClick={() => postAction(actionVerb, jamAmount())}
                   className="rounded-xl bg-red-600 text-white px-3 py-2 disabled:opacity-50"
                   disabled={loading}
                 >
@@ -340,8 +337,11 @@ export default function TablePage() {
               )}
             </div>
 
-            {/* Custom raise for other scenarios (postflop, facing raise, etc.) */}
-            <CustomRaise disabled={loading} onSubmit={(amt) => postAction("raise", amt)} />
+            {/* Custom sized action (verb chosen by to_call === 0 ? bet : raise) */}
+            <CustomRaise
+              disabled={loading}
+              onSubmit={(amt) => postAction(actionVerb, amt)}
+            />
           </div>
         )}
 

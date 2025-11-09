@@ -21,11 +21,15 @@
         "3.0x",
         "jam"
       ],
-      "min_raise": 100,
+      "min_raise": 200,
       "to_call": 0
     },
     "board": {
-      "flop": [],
+      "flop": [
+        "8s",
+        "8h",
+        "Qc"
+      ],
       "river": [],
       "turn": []
     },

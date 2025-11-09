@@ -150,20 +150,23 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
     """
     Convert adapter.state() dataclasses to a JSON-friendly dict snapshot.
 
-    Includes:
-      - pot_total (cumulative, never reset here),
-      - to_act (seat index) and allowed (to_call/min_raise/allowed_buckets),
-      - street, board (placeholder until adapter exposes real cards),
-      - player hole cards (mask non-human).
+    Rules:
+      - Reveal human_seat hole cards; mask others with ["XX","XX"].
+      - On showdown, reveal all hole cards.
+      - Board flows straight from engine snapshot.
+      - Include actor/allowed context derived from engine.next_actor().
     """
     adapter = get_adapter()
     s = adapter.state()
     tbl = s.table
 
-    # Players: mask everyone except human_seat
+    # Reveal policy
+    reveal_all = str(s.street) == "showdown"
+
+    # Players: reveal for human, mask others (unless showdown)
     players: List[Dict[str, Any]] = []
     for i, p in enumerate(s.players):
-        if i == human_seat:
+        if reveal_all or i == human_seat:
             players.append({"seat": i, "hole_cards": list(p.hole_cards)})
         else:
             players.append({"seat": i, "hole_cards": ["XX", "XX"]})
@@ -179,6 +182,9 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
             "allowed_buckets": list(actor.get("allowed_buckets", [])),
         }
 
+    # Board: pass-through from engine (fallback to empty shape preflop)
+    board = getattr(s, "board", None) or {"flop": [], "turn": [], "river": []}
+
     resp: Dict[str, Any] = {
         "table": {
             "seats": int(tbl.seats),
@@ -191,13 +197,8 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
         },
         "players": players,
         "street": str(s.street),
-        "board": {  # placeholder until adapter exposes real community cards
-            "flop": [],
-            "turn": [],
-            "river": [],
-        },
+        "board": board,
         "deck_seed": s.deck_seed,
-        # Do NOT reset here; we surface adapter's cumulative total as-is
         "pot_total": int(getattr(s, "pot_total", 0)),
         "to_act": to_act,
         "allowed": allowed,
