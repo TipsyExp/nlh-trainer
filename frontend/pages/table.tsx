@@ -1,40 +1,68 @@
 // frontend/pages/table.tsx
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Api } from "../lib/api";
+import { Api, type AllowedContext, type HandState, type Actor } from "../lib/api";
 import { CoachPanel } from "../components/CoachPanel";
-
-type Actor = { seat: number; to_call: number; allowed_buckets: string[] } | null;
 
 const COACH_TOGGLE_KEY = "coachEnabled";
 const HUMAN_SEAT_KEY = "humanSeat";
 
+// Gate dev-only /api/hand/auto. Default is false unless explicitly enabled.
+const AUTO_HAND_ENABLED = ["1", "true", "yes", "on"].includes(
+  String(process.env.NEXT_PUBLIC_ENABLE_HAND_AUTO || "").toLowerCase()
+);
+const DEV_TOOLS = ["1", "true", "yes", "on"].includes(
+  String(process.env.NEXT_PUBLIC_DEV_TOOLS || "").toLowerCase()
+);
+
+const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
+
 export default function TablePage() {
   const [loading, setLoading] = useState(false);
-  const [state, setState] = useState<any>(null);
-  const [actor, setActor] = useState<Actor>(null);
+  const [state, setState] = useState<HandState | null>(null);
+  const [actor, setActor] = useState<Actor | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  // Coach UI toggle (persist to localStorage)
   const [coachEnabled, setCoachEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     const raw = localStorage.getItem(COACH_TOGGLE_KEY);
     return raw === "1";
   });
-
   useEffect(() => {
     if (typeof window !== "undefined") {
       localStorage.setItem(COACH_TOGGLE_KEY, coachEnabled ? "1" : "0");
     }
   }, [coachEnabled]);
 
-  // Track current hand id (from startHand response or from state if backend includes it)
   const [handId, setHandId] = useState<string | null>(null);
 
-  // Human seat remembered from Settings page
   const humanSeat =
     typeof window !== "undefined" ? parseInt(localStorage.getItem(HUMAN_SEAT_KEY) || "0", 10) : 0;
 
   const bb = useMemo(() => state?.table?.bb ?? 100, [state]);
+
+  const pot = useMemo(
+    () => (state?.pot_total ?? (state as any)?.pot_after ?? (state as any)?.pot ?? 0),
+    [state]
+  );
+
+  // Prefer state.allowed/to_act if present; fallback to legacy actor
+  const allowedCtx: AllowedContext | null = useMemo(() => {
+    if (!state) return null;
+    if (state.allowed && typeof state.allowed.to_call === "number") return state.allowed;
+    if (actor) {
+      return {
+        to_call: actor.to_call,
+        min_raise: actor.min_raise ?? Math.max(100, bb),
+        allowed_buckets: actor.allowed_buckets || [],
+      };
+    }
+    return null;
+  }, [state, actor, bb]);
+
+  const toActSeat = state?.to_act ?? actor?.seat ?? null;
+  const canAct = toActSeat === humanSeat;
+  const waitingOnBots =
+    !!state && state.street !== "showdown" && !canAct && toActSeat !== null && toActSeat !== undefined;
 
   const refresh = useCallback(async () => {
     setErr(null);
@@ -43,13 +71,7 @@ export default function TablePage() {
       const r = await Api.getState();
       setState(r.state);
       setActor(r.actor ?? null);
-
-      // Try to lift hand id from state if present
-      const sid =
-        (r as any)?.hand_id ??
-        r?.state?.hand_id ??
-        r?.state?.handId ??
-        null;
+      const sid = (r as any)?.hand_id ?? r?.state?.hand_id ?? r?.state?.handId ?? null;
       if (sid) setHandId(String(sid));
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -66,7 +88,7 @@ export default function TablePage() {
     setErr(null);
     setLoading(true);
     try {
-      const res = await Api.startHand(); // { hand_id: string }
+      const res = await Api.startHand();
       if (res?.hand_id) setHandId(String(res.hand_id));
       await refresh();
     } catch (e: any) {
@@ -76,25 +98,53 @@ export default function TablePage() {
     }
   };
 
+  async function pollUntilSettled(humanSeat: number) {
+    // Poll GET /api/hand/state until it's our turn or the hand is over.
+    // In dev we *also* try /api/hand/auto to actively advance bots each cycle.
+    let safety = 64;
+    while (safety-- > 0) {
+      const snap = await Api.getState();
+      setState(snap.state);
+      setActor(snap.actor ?? null);
+
+      const sid = (snap as any)?.hand_id ?? snap?.state?.hand_id ?? snap?.state?.handId ?? null;
+      if (sid) setHandId(String(sid));
+
+      const nextSeat = snap?.state?.to_act ?? snap?.actor?.seat ?? null;
+      const finished = snap?.state?.street === "showdown";
+      const heroTurn = nextSeat === humanSeat;
+
+      if (finished || heroTurn) break;
+
+      if (AUTO_HAND_ENABLED) {
+        try {
+          const auto = await Api.autoPlay();
+          // If dev auto endpoint is gated off at the backend (501) or returns not ok, stop using it.
+          if (!auto?.ok) {
+            // Continue polling without auto
+          }
+        } catch {
+          // Swallow and continue polling without auto
+        }
+      }
+
+      // Small backoff to avoid hammering the server
+      await sleep(100);
+    }
+  }
+
   async function postAction(action: string, amount?: number) {
-    if (!actor) return;
+    if (!allowedCtx) return;
     setErr(null);
     setLoading(true);
     try {
       const res = await Api.postAction({ seat: humanSeat, action, amount });
       setState(res.state);
 
-      const next = await Api.getState();
-      setState(next.state);
-      setActor(next.actor ?? null);
-
-      // Keep hand id fresh if backend includes it
-      const sid =
-        (next as any)?.hand_id ??
-        next?.state?.hand_id ??
-        next?.state?.handId ??
-        null;
-      if (sid) setHandId(String(sid));
+      // Always follow up by polling until it's our turn or the hand is over,
+      // regardless of whether dev auto is enabled. This covers the post-raise
+      // path where the server returns a pre-bot snapshot.
+      await pollUntilSettled(humanSeat);
     } catch (e: any) {
       setErr(e?.message || String(e));
     } finally {
@@ -102,29 +152,37 @@ export default function TablePage() {
     }
   }
 
-  // Preflop open helpers (for HU SB open labels 2.2x/2.5x/3.0x)
+  // Preflop open helpers
   function amountForOpenLabel(label: string): number | undefined {
     const m = label.match(/^(\d+(?:\.\d+)?)x$/);
     if (!m) return undefined;
     const mult = parseFloat(m[1]);
     return Math.round(mult * bb);
   }
-
-  // Jam uses a sentinel large number; engine will cap/snap appropriately.
   function jamAmount(): number {
     return 1_000_000_000;
   }
 
-  // Decision index for coaching:
-  // Prefer a backend-provided index; otherwise if there's an actor, use 0 as a safe fallback.
+  // Decision idx (best-effort)
   const decisionIdx =
-    typeof state?.decision_idx === "number"
-      ? state.decision_idx
-      : actor
+    typeof (state as any)?.decision_idx === "number"
+      ? (state as any).decision_idx
+      : canAct
       ? 0
       : null;
 
-  const canAct = actor && actor.seat === humanSeat;
+  const coachShouldShow =
+    coachEnabled && canAct && state && state.street !== "preflop" && decisionIdx !== null;
+
+  // Dev util: copy raw state
+  const copyState = async () => {
+    if (!state) return;
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(state, null, 2));
+    } catch {
+      // noop
+    }
+  };
 
   return (
     <main className="min-h-screen p-6 bg-gray-50">
@@ -132,6 +190,11 @@ export default function TablePage() {
         <header className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">NLH Trainer — Table</h1>
           <div className="flex items-center gap-3">
+            {waitingOnBots && (
+              <span className="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-800">
+                Bots thinking…
+              </span>
+            )}
             <label className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
@@ -140,7 +203,6 @@ export default function TablePage() {
               />
               <span>Coach</span>
             </label>
-
             <button
               onClick={onStartHand}
               className="rounded-xl bg-black text-white px-4 py-2 disabled:opacity-50"
@@ -155,6 +217,16 @@ export default function TablePage() {
             >
               Refresh
             </button>
+            {DEV_TOOLS && (
+              <button
+                onClick={copyState}
+                className="rounded-xl border px-3 py-2 text-xs disabled:opacity-50"
+                disabled={!state}
+                title="Copy /api/hand/state JSON"
+              >
+                Copy state
+              </button>
+            )}
           </div>
         </header>
 
@@ -167,14 +239,12 @@ export default function TablePage() {
               <h2 className="font-semibold">Table</h2>
               <div className="text-sm text-gray-700">
                 <div>Seats: {state.table.seats}</div>
-                <div>
-                  Blinds: {state.table.sb}/{state.table.bb}
-                </div>
+                <div>Blinds: {state.table.sb}/{state.table.bb}</div>
                 <div>Button: {state.table.button}</div>
                 <div>SB Seat: {state.table.sb_seat}</div>
                 <div>BB Seat: {state.table.bb_seat}</div>
                 <div>Street: {state.street}</div>
-                {"pot_total" in state && <div>Pot: {state.pot_total}</div>}
+                <div>Pot: {pot}</div>
                 <div className="text-gray-500 text-xs">Seed: {state.deck_seed}</div>
                 {handId && <div className="text-gray-500 text-xs">Hand: {handId}</div>}
                 {typeof decisionIdx === "number" && (
@@ -207,19 +277,19 @@ export default function TablePage() {
         )}
 
         {/* Action Panel */}
-        {canAct && actor && state && (
+        {canAct && allowedCtx && state && (
           <div className="rounded-2xl bg-white shadow p-4 space-y-4">
             <h2 className="font-semibold">Your Action</h2>
             <div className="text-sm text-gray-700">
-              <div>To call: {actor.to_call}</div>
+              <div>To call: {allowedCtx.to_call}</div>
               <div className="text-xs text-gray-500">
-                Allowed: {actor.allowed_buckets.join(", ")}
+                Allowed: {allowedCtx.allowed_buckets.join(", ")}
               </div>
             </div>
 
             <div className="flex flex-wrap gap-2">
               {/* If to_call == 0, "check" is legal */}
-              {actor.to_call === 0 && (
+              {allowedCtx.to_call === 0 && (
                 <button
                   onClick={() => postAction("check")}
                   className="rounded-xl border px-3 py-2"
@@ -230,18 +300,18 @@ export default function TablePage() {
               )}
 
               {/* If to_call > 0, "call" is legal */}
-              {actor.to_call > 0 && actor.allowed_buckets.includes("call") && (
+              {allowedCtx.to_call > 0 && allowedCtx.allowed_buckets.includes("call") && (
                 <button
                   onClick={() => postAction("call")}
                   className="rounded-xl border px-3 py-2"
                   disabled={loading}
                 >
-                  Call {actor.to_call}
+                  Call {allowedCtx.to_call}
                 </button>
               )}
 
               {/* Quick open sizes for HU SB preflop open */}
-              {actor.allowed_buckets
+              {allowedCtx.allowed_buckets
                 .filter((b) => /^\d+(\.\d+)?x$/.test(b))
                 .map((label) => {
                   const amt = amountForOpenLabel(label);
@@ -259,7 +329,7 @@ export default function TablePage() {
                 })}
 
               {/* Jam */}
-              {actor.allowed_buckets.includes("jam") && (
+              {allowedCtx.allowed_buckets.includes("jam") && (
                 <button
                   onClick={() => postAction("raise", jamAmount())}
                   className="rounded-xl bg-red-600 text-white px-3 py-2 disabled:opacity-50"
@@ -275,8 +345,8 @@ export default function TablePage() {
           </div>
         )}
 
-        {/* Coach Panel */}
-        <CoachPanel enabled={coachEnabled} handId={handId} idx={decisionIdx} />
+        {/* Coach Panel (postflop, human turn only) */}
+        {coachShouldShow && <CoachPanel enabled={true} handId={handId} idx={decisionIdx} />}
 
         {/* Last action panel */}
         {state?.last_action && (
@@ -318,7 +388,11 @@ function CustomRaise({
         value={val}
         onChange={(e) => setVal(e.target.value)}
       />
-      <button type="submit" className="rounded-xl border px-3 py-2 disabled:opacity-50" disabled={disabled}>
+      <button
+        type="submit"
+        className="rounded-xl border px-3 py-2 disabled:opacity-50"
+        disabled={disabled}
+      >
         Raise (custom)
       </button>
     </form>

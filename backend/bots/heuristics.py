@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import random
+import re
 from typing import Any, List, Optional, Mapping
 
 from .policy import BotPolicy, BotAction, validate_bot_action
+
+
+_NUMX = re.compile(r"^(\d+(?:\.\d+)?)x$")
 
 
 def _clamp_int(v: Any, default: int = 0) -> int:
@@ -15,107 +19,145 @@ def _clamp_int(v: Any, default: int = 0) -> int:
         return default
 
 
-def _pick_open_size(bb: int) -> int:
-    """Choose a small open size; engine will snap to the nearest allowed bucket."""
-    # Favor 2.2x for a conservative default.
-    return max(bb, int(round(2.2 * bb)))
+def _safe_validate(
+    move: BotAction, *, to_call: int, allowed_buckets: List[str]
+) -> None:
+    # Be forgiving — if validation raises, swallow it and let the adapter snap/ignore.
+    try:
+        validate_bot_action(move, to_call=to_call, allowed_buckets=allowed_buckets)
+    except Exception:
+        pass
 
 
-def _pick_min_raise(min_raise: int, to_call: int, bb: int) -> int:
-    """Pick a minimal raise target when facing a bet."""
-    # min_raise provided by adapter is already a *target total* (call + raise).
-    return max(min_raise, to_call + bb)
+def _random_choice(
+    rng: random.Random, items: List[Any], weights: Optional[List[float]] = None
+):
+    if not items:
+        return None
+    if weights is None:
+        return rng.choice(items)
+    total = sum(weights)
+    if total <= 0:
+        return rng.choice(items)
+    # simple weighted choice
+    x = rng.random() * total
+    acc = 0.0
+    for item, w in zip(items, weights):
+        acc += w
+        if x <= acc:
+            return item
+    return items[-1]
 
 
-class SimpleHuBot(BotPolicy):
+class RandomHuBot(BotPolicy):
     """
-    Very simple HU heuristic:
+    Truly minimal random HU bot:
 
-    - If not facing a bet (to_call == 0): mostly check; sometimes small stab.
-    - If facing a bet (to_call > 0): mostly call small/medium sizes; rarely raise small.
-    - Never uses 'fold' or 'jam' because adapter doesn't implement them.
-      (Adapter supports: 'check', 'call', 'bet', 'raise'.)
+    - If to_call == 0:
+        * 50% check
+        * 50% bet: pick a random open bucket (2.2x/2.5x/3.0x) if present,
+          otherwise bet ~2.2x BB (engine will snap).
+    - If to_call > 0:
+        * Random among fold / call / raise (weights configurable).
+        * For raise: use min_raise, with a small chance to 'jam' if allowed.
 
-    The engine clamps/snap amounts to its allowed buckets.
+    Validation errors are swallowed so the adapter can snap/ignore safely.
     """
 
     def __init__(
         self,
         *,
-        stab_prob: float = 0.25,  # chance to stab when unchecked
-        raise_prob: float = 0.08,  # chance to raise instead of call when facing a bet
-        small_call_bb_mult: float = 2.0,  # call if to_call <= 2*bb considered "small"
+        p_check: float = 0.5,
+        p_call: float = 0.45,
+        p_fold: float = 0.25,
+        p_raise: float = 0.30,
+        p_jam_when_raise: float = 0.10,
         seed: Optional[int] = None,
     ) -> None:
-        self._rng = random.Random(seed)
-        self.stab_prob = float(max(0.0, min(1.0, stab_prob)))
-        self.raise_prob = float(max(0.0, min(1.0, raise_prob)))
-        self.small_call_bb_mult = float(max(0.5, small_call_bb_mult))
+        self.rng = random.Random(seed)
+        # Normalize weights (defensively)
+        s = max(1e-9, p_call + p_fold + p_raise)
+        self.p_check = float(max(0.0, min(1.0, p_check)))
+        self.p_call = float(p_call / s)
+        self.p_fold = float(p_fold / s)
+        self.p_raise = float(p_raise / s)
+        self.p_jam_when_raise = float(max(0.0, min(1.0, p_jam_when_raise)))
 
-    def decide(self, ctx: Mapping[str, Any], rng: Any) -> BotAction:
-        # Prefer the deterministic RNG provided for this decision; fall back to self._rng.
-        prng: random.Random
-        if isinstance(rng, random.Random):
-            prng = rng
-        else:
-            prng = self._rng
+    def act(self, state: Mapping[str, Any]) -> BotAction:
+        table = state.get("table") or {}
+        allowed = state.get("allowed") or {}
 
-        street = str(ctx.get("street", "preflop")).lower()
-        bb = _clamp_int(ctx.get("bb"), 100)
-        to_call = _clamp_int(ctx.get("to_call"), 0)
-        min_raise = _clamp_int(ctx.get("min_raise"), to_call + bb)
-        allowed_buckets: List[str] = list(ctx.get("allowed_buckets") or [])
+        bb = _clamp_int(table.get("bb"), 100)
+        to_call = _clamp_int(allowed.get("to_call"), 0)
+        min_raise = _clamp_int(allowed.get("min_raise"), 0)
+        allowed_buckets: List[str] = list(allowed.get("allowed_buckets") or [])
 
-        # ---------- Not facing a bet ----------
+        # --- No bet to face: choose between check / bet ---
         if to_call == 0:
-            # Try a small probing bet sometimes (esp. earlier streets).
-            stab_p = self.stab_prob
-            if street == "turn":
-                stab_p *= 0.8
-            elif street == "river":
-                stab_p *= 0.65
-
-            if prng.random() < stab_p:
-                amt = _pick_open_size(bb)
-                move: BotAction = {"action": "bet", "amount": int(amt)}
-                validate_bot_action(
-                    move, to_call=to_call, allowed_buckets=allowed_buckets
-                )
+            if self.rng.random() < self.p_check:
+                move: BotAction = {"action": "check"}  # type: ignore[typeddict-item]
+                _safe_validate(move, to_call=to_call, allowed_buckets=allowed_buckets)
                 return move
 
-            move = {"action": "check"}  # type: ignore[typeddict-item]
-            validate_bot_action(move, to_call=to_call, allowed_buckets=allowed_buckets)
+            # Try to pick one of the provided open sizes if present
+            open_labels = [b for b in allowed_buckets if _NUMX.match(b)]
+            if open_labels:
+                chosen = self.rng.choice(open_labels)
+                m = _NUMX.match(chosen)
+                mult = float(m.group(1)) if m else 2.2
+                amount = max(bb, int(round(mult * bb)))
+            else:
+                amount = max(bb, int(round(2.2 * bb)))
+
+            move = {"action": "bet", "amount": int(amount)}
+            _safe_validate(move, to_call=to_call, allowed_buckets=allowed_buckets)
             return move
 
-        # ---------- Facing a bet ----------
-        small_call_thresh = int(round(self.small_call_bb_mult * bb))
+        # --- Facing a bet: random fold / call / raise ---
+        # Build the menu based on what's legal
+        choices: List[str] = []
+        weights: List[float] = []
 
-        # Prefer calling small/medium bets.
-        if to_call <= small_call_thresh:
-            # Occasionally take a small raise.
-            if prng.random() < self.raise_prob:
-                amt = _pick_min_raise(min_raise, to_call, bb)
-                move = {"action": "raise", "amount": int(amt)}
-                validate_bot_action(
-                    move, to_call=to_call, allowed_buckets=allowed_buckets
-                )
-                return move
+        # 'call' only if allowed shows it (the adapter exposes it explicitly)
+        if "call" in allowed_buckets:
+            choices.append("call")
+            weights.append(self.p_call)
 
+        # 'fold' is always a legal option when facing a bet
+        choices.append("fold")
+        weights.append(self.p_fold)
+
+        # 'raise' is possible whenever we face a bet; adapter will enforce min-raise/snap
+        choices.append("raise")
+        weights.append(self.p_raise)
+
+        action = _random_choice(self.rng, choices, weights)
+
+        if action == "call":
             move = {"action": "call"}  # type: ignore[typeddict-item]
-            validate_bot_action(move, to_call=to_call, allowed_buckets=allowed_buckets)
+            _safe_validate(move, to_call=to_call, allowed_buckets=allowed_buckets)
             return move
 
-        # For larger bets, mostly call (we don't have 'fold' implemented in adapter).
-        # Rarely raise small to keep pressure.
-        if prng.random() < max(0.02, self.raise_prob * 0.6):
-            amt = _pick_min_raise(min_raise, to_call, bb)
-            move = {"action": "raise", "amount": int(amt)}
-            validate_bot_action(move, to_call=to_call, allowed_buckets=allowed_buckets)
+        if action == "raise":
+            # small chance to jam if offered
+            if "jam" in allowed_buckets and self.rng.random() < self.p_jam_when_raise:
+                move = {"action": "raise", "amount": 10**12}
+                _safe_validate(move, to_call=to_call, allowed_buckets=allowed_buckets)
+                return move
+
+            # otherwise choose min_raise (engine will snap/accept)
+            amount = min_raise if min_raise > 0 else to_call + max(1, bb)
+            move = {"action": "raise", "amount": int(amount)}
+            _safe_validate(move, to_call=to_call, allowed_buckets=allowed_buckets)
             return move
 
-        move = {"action": "call"}  # type: ignore[typeddict-item]
-        validate_bot_action(move, to_call=to_call, allowed_buckets=allowed_buckets)
+        # default: fold
+        move = {"action": "fold"}  # type: ignore[typeddict-item]
+        _safe_validate(move, to_call=to_call, allowed_buckets=allowed_buckets)
         return move
 
 
-__all__ = ["SimpleHuBot"]
+# Keep old import sites working: use the random bot as the default heuristic.
+SimpleHuBot = RandomHuBot
+
+__all__ = ["RandomHuBot", "SimpleHuBot"]

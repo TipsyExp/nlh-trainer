@@ -28,10 +28,12 @@ export function CoachPanel({
   enabled,
   handId,
   idx,
+  street, // optional; if present we only fetch on flop/turn/river
 }: {
   enabled: boolean;
   handId?: string | null;
   idx?: number | null;
+  street?: string | null;
 }) {
   const [loading, setLoading] = useState(false);
   const [advice, setAdvice] = useState<AdviceResponse | null>(null);
@@ -50,7 +52,14 @@ export function CoachPanel({
 
   const [events, setEvents] = useState<DebugEvent[]>([]);
 
-  const canFetch = enabled && !!handId && typeof idx === "number";
+  const isPostflop = useMemo(() => {
+    if (!street) return true; // backwards-compat: if parent doesn't pass street, don't gate
+    const s = String(street).toLowerCase();
+    return s === "flop" || s === "turn" || s === "river";
+    // "showdown" also wouldn't fetch since idx wouldn't be meaningful
+  }, [street]);
+
+  const canFetch = enabled && !!handId && typeof idx === "number" && isPostflop;
 
   useEffect(() => {
     let abort = false;
@@ -70,11 +79,18 @@ export function CoachPanel({
       if (abort) return;
 
       if (debugOn) {
-        setEvents((prev) => [
-          { ts: new Date().toISOString(), url: raw.url, status: raw.status, ok: raw.ok, body: raw.body },
-          ...prev,
-        ].slice(0, 50));
-        // Also log to console for quick copy/paste
+        setEvents((prev) =>
+          [
+            {
+              ts: new Date().toISOString(),
+              url: raw.url,
+              status: raw.status,
+              ok: raw.ok,
+              body: raw.body,
+            },
+            ...prev,
+          ].slice(0, 50)
+        );
         // eslint-disable-next-line no-console
         console.debug("[CoachAdvice]", raw);
       }
@@ -112,7 +128,9 @@ export function CoachPanel({
   }, [advice]);
 
   const Badge = ({ text, color }: { text: string; color: string }) => (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${color}`}>
+    <span
+      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${color}`}
+    >
       {text}
     </span>
   );
@@ -157,7 +175,11 @@ export function CoachPanel({
         <div className="text-sm text-gray-600">No hand in progress.</div>
       )}
 
-      {enabled && handId && typeof idx === "number" && (
+      {enabled && handId && typeof idx === "number" && !isPostflop && (
+        <div className="text-sm text-gray-600">Advice n/a preflop.</div>
+      )}
+
+      {enabled && handId && typeof idx === "number" && isPostflop && (
         <>
           {loading && (
             <div className="text-sm text-gray-500">Fetching advice…</div>
@@ -175,7 +197,9 @@ export function CoachPanel({
             <div className="space-y-3">
               <div className="text-sm">
                 <span className="text-gray-500 mr-1">Recommended:</span>
-                <span className="font-medium">{advice.recommended_bucket}</span>
+                <span className="font-medium">
+                  {advice.recommended_bucket}
+                </span>
                 {typeof advice.meta.latency_ms === "number" && (
                   <span className="text-xs text-gray-400 ml-2">
                     ({advice.meta.latency_ms} ms)
@@ -191,7 +215,9 @@ export function CoachPanel({
                     <div className="flex-1 bg-gray-100 rounded-full h-2 overflow-hidden">
                       <div
                         className="bg-black h-2"
-                        style={{ width: `${Math.min(100, Math.max(0, p * 100))}%` }}
+                        style={{
+                          width: `${Math.min(100, Math.max(0, p * 100))}%`,
+                        }}
                       />
                     </div>
                     <div className="w-12 text-right text-xs">
@@ -239,7 +265,9 @@ export function CoachPanel({
                       className="text-gray-700 underline"
                       onClick={() => {
                         const payload = JSON.stringify(lastEvent, null, 2);
-                        navigator.clipboard?.writeText(payload).catch(() => {});
+                        navigator.clipboard
+                          ?.writeText(payload)
+                          .catch(() => {});
                       }}
                     >
                       Copy last
