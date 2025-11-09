@@ -57,6 +57,8 @@ class _GameSnap:
     deck_seed: Optional[str]
     pot_total: int = 0
     last_action: Optional[_LastAction] = None
+    # Always provide board with flop/turn/river arrays (possibly empty)
+    board: Dict[str, List[str]] = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -87,13 +89,17 @@ class PokerKitAdapter:
         # Actor & betting state
         self._next_to_act: Optional[int] = None
         self._to_call_next: int = 0
-        self._last_raise_size: int = 0
+        self._last_raise_size: int = (
+            0  # size of the last raise (delta to previous price)
+        )
         self._raises_this_round: int = 0
         # Committed amounts and pricing (running totals)
         self._committed: List[int] = []
         self._current_price: int = 0
         # Cards/state
         self._players_holes: List[List[str]] = []
+        self._deck: List[str] = []  # remaining deck (top is end for .pop())
+        self._board: List[str] = []  # running community cards (0..4)
         self._pot_total: int = 0
         # Metadata for last action
         self._last_action: Optional[_LastAction] = None
@@ -116,11 +122,38 @@ class PokerKitAdapter:
         rng.shuffle(deck)
         return deck
 
+    def _deal_board_to_street(self) -> None:
+        """Deterministically extend the board to match the current street."""
+        # We don't emulate burns; just deal straight from self._deck.
+        if self._street == "flop":
+            if len(self._board) < 3 and len(self._deck) >= 3:
+                self._board.extend(
+                    [self._deck.pop(), self._deck.pop(), self._deck.pop()]
+                )
+        elif self._street == "turn":
+            if len(self._board) < 4 and self._deck:
+                self._board.append(self._deck.pop())
+        elif self._street == "river":
+            if len(self._board) < 5 and self._deck:
+                self._board.append(self._deck.pop())
+
     def _opponent_of(self, seat: int) -> int:
         # HU only helper. For multiway, replace with rotation logic.
         if self.seats != 2:
             raise RuntimeError("Only HU rotation implemented in stub adapter")
         return self.bb_seat if seat == self.sb_seat else self.sb_seat  # type: ignore[return-value]
+
+    def _is_true_sb_open_pf(self, actor_seat: Optional[int]) -> bool:
+        """True HU SB open = first preflop decision at blind price."""
+        return (
+            self.seats == 2
+            and self._street == "preflop"
+            and actor_seat is not None
+            and actor_seat == self.sb_seat
+            and self._current_price == self.bb  # no price increase yet
+            and self._raises_this_round == 0
+            and self._last_action is None
+        )
 
     def _allowed_buckets_data(
         self, to_call: int, actor_seat: Optional[int]
@@ -128,7 +161,7 @@ class PokerKitAdapter:
         """Compute allowed bet/raise buckets for the current actor."""
         buckets: List[Dict[str, Any]] = []
 
-        # Base action labels for clarity (helps simple/random bots):
+        # Base action labels (helps simple/random bots):
         if to_call > 0:
             # Facing a bet: fold/call available
             buckets.append({"label": "fold", "target": 0})
@@ -137,23 +170,21 @@ class PokerKitAdapter:
             # No bet to call: check available
             buckets.append({"label": "check", "target": 0})
 
-        # Opening (or HU SB open preflop) sizing options
-        hu_sb_open = (
-            self.seats == 2
-            and self._street == "preflop"
-            and actor_seat is not None
-            and actor_seat == self.sb_seat
-        )
-        if to_call == 0 or hu_sb_open:
+        # True SB open detection
+        sb_open_pf = self._is_true_sb_open_pf(actor_seat)
+
+        if to_call == 0 or sb_open_pf:
+            # Opening/stab sizes (open raise or postflop bet)
             for mult in (2.2, 2.5, 3.0):
                 target = int(round(mult * self.bb))
                 buckets.append(
                     {"label": f"{mult:.1f}x", "target": max(target, self.bb)}
                 )
         else:
-            base = max(self._last_raise_size, self.bb)
+            # Facing a bet/raise -> raise sizes (suffix 'R'), TOTAL commitment
+            base = max(self._last_raise_size or 0, self.bb)
             for mult in (2.5, 3.0):
-                target = to_call + int(round(mult * base))
+                target = int(self._current_price + round(mult * base))
                 buckets.append({"label": f"{mult:.1f}xR", "target": target})
 
         # Always include jam (all-in sentinel)
@@ -207,10 +238,14 @@ class PokerKitAdapter:
             return
         self._to_call_next = max(0, self._current_price - self._committed[seat])
 
-    def _compute_min_raise(self, to_call: int) -> int:
-        if to_call <= 0:
-            return max(self.bb, self._last_raise_size or self.bb)
-        return to_call + max(self.bb, self._last_raise_size or self.bb)
+    def _compute_min_raise_total(self, seat: int, to_call: int) -> int:
+        """
+        Minimum TOTAL COMMITMENT required for the current actor to make a valid raise.
+        - If to_call > 0: current_price + max(bb, last_raise_size)
+        - If to_call == 0: current_price + max(bb, last_raise_size) (min open)
+        """
+        base_size = max(self.bb, self._last_raise_size or self.bb)
+        return int(self._current_price + base_size)
 
     def _guard_pot_monotonic(self, new_total: int) -> None:
         """Ensure pot_total is non-decreasing within a single hand."""
@@ -251,6 +286,10 @@ class PokerKitAdapter:
         # On a new betting round, the current price is whatever everyone has committed so far,
         # which keeps to_call at 0 for the first actor of the new street.
         self._current_price = max(self._committed) if self._committed else 0
+
+        # Deal board for the new street
+        if self._street in ("flop", "turn", "river"):
+            self._deal_board_to_street()
 
         # First to act postflop in HU is always the seat left of the button (bb_seat).
         if self._street in ("flop", "turn", "river"):
@@ -307,6 +346,8 @@ class PokerKitAdapter:
         self._committed = [0] * seats
         self._current_price = 0
         self._players_holes = []
+        self._deck = []
+        self._board = []
         self._pot_total = 0
         self._last_action = None
         # Reset pot guard baseline
@@ -324,7 +365,7 @@ class PokerKitAdapter:
         self.bb_seat = (self.button + 1) % self.seats
         # Reset street and betting
         self._street = "preflop"
-        self._last_raise_size = self.bb
+        self._last_raise_size = self.bb  # baseline for min open computation
         self._raises_this_round = 0
         # Post blinds into commitments and pot
         self._committed = [0] * self.seats
@@ -343,12 +384,13 @@ class PokerKitAdapter:
         self._deck_seed = (
             f"{self.base_seed}:{self.hand_id}" if self.base_seed is not None else None
         )
-        # Deal hole cards deterministically
+        # Deal hole cards deterministically and retain deck
         rng = self._seeded_rng(self._deck_seed or f"default:{self.hand_id}")
-        deck = self._new_shuffled_deck(rng)
+        self._deck = self._new_shuffled_deck(rng)
+        self._board = []
         self._players_holes = []
         for _seat in range(self.seats):
-            self._players_holes.append([deck.pop(), deck.pop()])
+            self._players_holes.append([self._deck.pop(), self._deck.pop()])
         # Clear last action
         self._last_action = None
         return f"H{self.hand_id}"
@@ -363,7 +405,7 @@ class PokerKitAdapter:
         return {
             "seat": seat,
             "to_call": to_call,
-            "min_raise": int(self._compute_min_raise(to_call)),
+            "min_raise": int(self._compute_min_raise_total(seat, to_call)),
             "allowed_buckets": [b["label"] for b in buckets],
         }
 
@@ -403,10 +445,12 @@ class PokerKitAdapter:
                     and last.seat == self.sb_seat
                 )
                 if last_was_sb_call:
+                    # Move to flop and deal board
                     self._street = "flop"
                     self._last_raise_size = 0
                     self._raises_this_round = 0
                     self._current_price = max(self._committed) if self._committed else 0
+                    self._deal_board_to_street()
                     if self.bb_seat is not None:
                         self._next_to_act = int(self.bb_seat)
                         self._to_call_next = max(
@@ -472,29 +516,35 @@ class PokerKitAdapter:
                 raise ValueError(
                     "bet/raise requires integer 'amount' (total commitment)"
                 )
+
+            # Detect true SB open (normalize verb to 'bet' even though to_call>0 due to blinds)
+            is_sb_open_pf = self._is_true_sb_open_pf(seat)
+
             snap = self._snap_to_bucket(
                 requested_total=amount, to_call=to_call, actor_seat=seat
             )
             committed_total = int(snap["target"])
 
-            # Min-raise enforcement
-            if to_call > 0:
-                min_required = to_call + max(self.bb, self._last_raise_size or self.bb)
-                if committed_total < min_required:
-                    raise ValueError(
-                        f"min-raise not met: need ≥ {min_required}, got {committed_total}"
-                    )
-            else:
-                if committed_total < self.bb:
-                    raise ValueError(f"open must be ≥ {self.bb}")
+            # --- Enforce min-raise total FIRST (tests expect 'min-raise' wording) ---
+            min_total_required = int(
+                self._current_price + max(self.bb, self._last_raise_size or self.bb)
+            )
+            if committed_total < min_total_required:
+                raise ValueError(
+                    f"min-raise not met: need ≥ {min_total_required}, got {committed_total}"
+                )
 
-            # Update raise state
-            if to_call == 0:
-                self._last_raise_size = max(committed_total, self.bb)
-                self._raises_this_round = 1
-            else:
-                self._last_raise_size = max(committed_total - to_call, self.bb)
-                self._raises_this_round = min(self._raises_this_round + 1, 99)
+            # Compute delta vs current table price (true raise size)
+            delta = committed_total - int(self._current_price)
+            # (No extra <=0 guard needed here; min-raise implies delta > 0)
+
+            # Update raise state using the true delta
+            self._last_raise_size = max(int(delta), self.bb)
+            self._raises_this_round = (
+                1
+                if to_call == 0 and self._raises_this_round == 0
+                else min(self._raises_this_round + 1, 99)
+            )
 
             # Update commitment and price
             self._committed[seat] = committed_total
@@ -505,10 +555,15 @@ class PokerKitAdapter:
             nxt = self._opponent_of(seat)
             self._rotate_to(nxt)
 
+            # Normalize verb for last_action:
+            # - "bet" for postflop to_call==0 OR true HU SB open preflop
+            # - "raise" otherwise
+            verb = "bet" if (to_call == 0 or is_sb_open_pf) else "raise"
+
             # Record last action
             self._last_action = _LastAction(
                 seat=seat,
-                type=action_l,
+                type=verb,
                 requested=amount,
                 committed=committed_total,
                 snapped=bool(snap["snapped"]),
@@ -530,6 +585,12 @@ class PokerKitAdapter:
             bb_seat=int(self.bb_seat) if self.bb_seat is not None else -1,
         )
         players = [_PlayerSnap(hole_cards=hc[:]) for hc in self._players_holes]
+        # Snapshot board by street (always present)
+        board = {
+            "flop": self._board[:3] if len(self._board) >= 3 else [],
+            "turn": self._board[:4] if len(self._board) >= 4 else [],
+            "river": self._board[:5] if len(self._board) >= 5 else [],
+        }
         return _GameSnap(
             table=tbl,
             players=players,
@@ -537,6 +598,7 @@ class PokerKitAdapter:
             deck_seed=self._deck_seed,
             pot_total=int(self._pot_total),
             last_action=self._last_action,
+            board=board,
         )
 
 

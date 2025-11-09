@@ -2,3 +2,6 @@ hand_id,idx,street,actor_seat,action,amount,bucket,to_call_after,pot_after,snapp
 H1,0,preflop,0,call,,,0,200,,PokerKit,PokerKit
 H1,1,flop,1,check,,,0,200,,PokerKit,PokerKit
 H1,2,flop,1,check,,,0,200,,PokerKit,PokerKit
+H1,3,preflop,0,call,,,0,200,,PokerKit,PokerKit
+H1,4,flop,1,check,,,0,200,,PokerKit,PokerKit
+H1,5,flop,1,check,,,0,200,,PokerKit,PokerKit
