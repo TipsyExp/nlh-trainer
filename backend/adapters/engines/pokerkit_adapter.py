@@ -97,6 +97,11 @@ class PokerKitAdapter:
         self._pot_total: int = 0
         # Metadata for last action
         self._last_action: Optional[_LastAction] = None
+        # Pot monotonicity guard (per hand)
+        self._pot_guard_prev: int = 0
+        self._pot_guard_hand_epoch: int = (
+            0  # mirrors hand_id at time of last guard update
+        )
 
     # --- Internal helpers ----------------------------------------------------
 
@@ -122,9 +127,15 @@ class PokerKitAdapter:
     ) -> List[Dict[str, Any]]:
         """Compute allowed bet/raise buckets for the current actor."""
         buckets: List[Dict[str, Any]] = []
-        # Call available when facing a bet
+
+        # Base action labels for clarity (helps simple/random bots):
         if to_call > 0:
+            # Facing a bet: fold/call available
+            buckets.append({"label": "fold", "target": 0})
             buckets.append({"label": "call", "target": to_call})
+        else:
+            # No bet to call: check available
+            buckets.append({"label": "check", "target": 0})
 
         # Opening (or HU SB open preflop) sizing options
         hu_sb_open = (
@@ -145,21 +156,25 @@ class PokerKitAdapter:
                 target = to_call + int(round(mult * base))
                 buckets.append({"label": f"{mult:.1f}xR", "target": target})
 
-        # Always include jam
+        # Always include jam (all-in sentinel)
         buckets.append({"label": "jam", "target": 10**12})
+
         buckets.sort(key=lambda b: b["target"])
         return buckets
 
     def _snap_to_bucket(
         self, requested_total: int, to_call: int, actor_seat: Optional[int] = None
     ) -> Dict[str, Any]:
-        buckets = self._allowed_buckets_data(to_call, actor_seat)
-        jam_bucket = next((b for b in buckets if b["label"] == "jam"), None)
-        nonjam = [b for b in buckets if b["label"] != "jam"]
+        # Compute all buckets, but exclude non-bet actions ('check'/'fold') from snapping candidates
+        buckets_all = self._allowed_buckets_data(to_call, actor_seat)
+        candidates = [b for b in buckets_all if b["label"] not in ("check", "fold")]
+
+        jam_bucket = next((b for b in candidates if b["label"] == "jam"), None)
+        nonjam = [b for b in candidates if b["label"] != "jam"]
         nonjam_targets = [b["target"] for b in nonjam]
         max_non_jam = max(nonjam_targets) if nonjam_targets else 0
 
-        # Force jam if wildly large
+        # Force jam if wildly large request
         jam_floor = max(self.bb * 100, max_non_jam * 20)
         if requested_total >= jam_floor:
             best = jam_bucket or (
@@ -168,8 +183,9 @@ class PokerKitAdapter:
                 else {"label": "jam", "target": int(to_call)}
             )
         else:
+            search_space = candidates if candidates else buckets_all
             best = min(
-                buckets,
+                search_space,
                 key=lambda b: (
                     abs(int(b["target"]) - int(requested_total)),
                     int(b["target"]),
@@ -180,7 +196,7 @@ class PokerKitAdapter:
             "target": int(best["target"]),
             "snapped": int(requested_total) != int(best["target"]),
             "bucket_label": best["label"],
-            "allowed_buckets": [b["label"] for b in buckets],
+            "allowed_buckets": [b["label"] for b in buckets_all],
         }
 
     def _rotate_to(self, seat: Optional[int]) -> None:
@@ -196,9 +212,25 @@ class PokerKitAdapter:
             return max(self.bb, self._last_raise_size or self.bb)
         return to_call + max(self.bb, self._last_raise_size or self.bb)
 
+    def _guard_pot_monotonic(self, new_total: int) -> None:
+        """Ensure pot_total is non-decreasing within a single hand."""
+        # If hand epoch changed (new hand), reset guard baseline
+        if self._pot_guard_hand_epoch != self.hand_id:
+            self._pot_guard_hand_epoch = self.hand_id
+            self._pot_guard_prev = new_total
+            return
+        if new_total < self._pot_guard_prev:
+            raise ValueError(
+                f"pot_total decreased: {self._pot_guard_prev} -> {new_total}"
+            )
+        self._pot_guard_prev = new_total
+
     def _recalc_pot_total(self) -> None:
         """Running pot as the sum of all players' committed chips."""
-        self._pot_total = int(sum(self._committed))
+        new_total = int(sum(self._committed))
+        self._pot_total = new_total
+        # Guard within-hand monotonicity
+        self._guard_pot_monotonic(new_total)
 
     def _advance_street(self) -> None:
         """HU: preflop -> flop -> turn -> river -> showdown; set first actor."""
@@ -277,6 +309,9 @@ class PokerKitAdapter:
         self._players_holes = []
         self._pot_total = 0
         self._last_action = None
+        # Reset pot guard baseline
+        self._pot_guard_prev = 0
+        self._pot_guard_hand_epoch = 0
 
     def start_hand(self) -> str:
         if self.seats <= 0:
@@ -298,7 +333,10 @@ class PokerKitAdapter:
         self._committed[self.sb_seat] = self.sb
         self._committed[self.bb_seat] = self.bb
         self._current_price = self.bb
-        self._recalc_pot_total()  # pot = sb + bb
+        # Reset pot guard to current hand epoch before first pot calc
+        self._pot_guard_hand_epoch = self.hand_id
+        self._pot_guard_prev = 0
+        self._recalc_pot_total()  # pot = sb + bb; guarded per-hand (0 -> blinds is OK)
         # Determine first actor: HU preflop -> SB acts first; multiway -> seat after BB
         self._rotate_to(self.sb_seat if self.seats == 2 else (self.bb_seat + 1) % self.seats)  # type: ignore[arg-type]
         # Build deterministic seed for deck
@@ -316,8 +354,9 @@ class PokerKitAdapter:
         return f"H{self.hand_id}"
 
     def next_actor(self) -> Optional[Dict[str, Any]]:
+        # Return an empty mapping when no actor is due, so callers can safely do .get(...)
         if self._next_to_act is None:
-            return None
+            return {}
         seat = int(self._next_to_act)
         to_call = int(self._to_call_next)
         buckets = self._allowed_buckets_data(to_call, actor_seat=self._next_to_act)
@@ -331,6 +370,9 @@ class PokerKitAdapter:
     def apply_action(
         self, seat: int, action: str, amount: Optional[int] = None
     ) -> None:
+        # Reject actions after showdown
+        if self._street == "showdown":
+            return
         # Ignore out-of-turn actions
         if seat != self._next_to_act:
             return
@@ -354,9 +396,6 @@ class PokerKitAdapter:
 
             # Heads-up preflop pattern: SB called, BB checks -> deal flop, BB acts first.
             if self.seats == 2 and self._street == "preflop" and seat == self.bb_seat:
-                # Use observable state to confirm pattern rather than a flag:
-                # - last action was SB "call"
-                # - no outstanding to_call for BB (already validated above)
                 last = self._last_action
                 last_was_sb_call = (
                     isinstance(last, _LastAction)
@@ -364,14 +403,10 @@ class PokerKitAdapter:
                     and last.seat == self.sb_seat
                 )
                 if last_was_sb_call:
-                    # Transition to flop
                     self._street = "flop"
-                    # Reset raise tracking for the new street
                     self._last_raise_size = 0
                     self._raises_this_round = 0
-                    # Everyone is matched at current price; carry it forward
                     self._current_price = max(self._committed) if self._committed else 0
-                    # In HU postflop, the BB (left of button) acts first
                     if self.bb_seat is not None:
                         self._next_to_act = int(self.bb_seat)
                         self._to_call_next = max(
@@ -385,7 +420,18 @@ class PokerKitAdapter:
                     self._last_action = _LastAction(seat=seat, type="check")
                     return
 
-            # Generic check: rotate to the opponent seat (HU) or next seat (multiway)
+            # --- Postflop/general: two consecutive checks close the round ---
+            prev = self._last_action
+            if prev and prev.type == "check" and prev.seat != seat:
+                # Record this check and advance the street
+                self._last_action = _LastAction(seat=seat, type="check")
+                # Everyone is matched; keep price as the max committed
+                self._current_price = max(self._committed) if self._committed else 0
+                self._recalc_pot_total()
+                self._advance_street()
+                return
+
+            # Otherwise, rotate to the opponent
             nxt = self.bb_seat if seat == self.sb_seat else self.sb_seat
             self._next_to_act = int(nxt) if nxt is not None else None
             if self._next_to_act is not None:
@@ -396,7 +442,6 @@ class PokerKitAdapter:
             else:
                 self._to_call_next = 0
 
-            # Record last action
             self._last_action = _LastAction(seat=seat, type="check")
             return
 

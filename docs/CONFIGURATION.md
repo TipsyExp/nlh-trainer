@@ -184,3 +184,72 @@ Optional solver knobs
 | `COACH_TS_THREADS`   | int  | `1`     | Passed through to the adapter; can be set by warm-cache script via `--threads`. |
 | `COACH_TS_ACCURACY`  | str  | `1.0`   | Adapter-specific target accuracy (if supported).                                |
 | `COACH_TS_MAX_ITERS` | str  | `200`   | Adapter-specific iteration cap (if supported).                                  |
+
+12) Configuration
+
+Set env vars in your shell or copy `.env.example` → `.env` (backend) and `frontend/.env.example` → `frontend/.env.local`.
+
+## Backend
+
+- `COACH_ENABLED` (default `false`)
+  - `false`: `/api/coach/advice` returns `501` with a disabled payload.
+  - UI maps this to “Coach off/disabled”.
+
+- `BOT_MODE` = `none` | `heuristic` | `rlcard` (default `heuristic`)
+  - `none`: no autoplay; you must act for all seats.
+  - `heuristic`: built-in policy (CALLCHECK or TAG via `BOT_PROFILE`).
+  - `rlcard`: enables the RLCard bridge (placeholder implemented). If the bridge is slow or returns invalid actions, backend safely degrades to check/call.
+
+- `BOT_PROFILE` = `CALLCHECK` | `TAG` (default `CALLCHECK`)
+  - Profile for the heuristic bot.
+
+- `BOT_TIME_BUDGET_MS` (default `150`)
+  - Per-decision timeout. On timeout/error, backend applies a safe fallback (check/call).
+
+- `HAND_AUTO_ENABLED` = `true|false` (default `false`)
+  - Gates dev endpoint `POST /api/hand/auto`. Leave `false` in prod.
+
+- `RLCARD_MODEL_PATH` (optional)
+  - Path to model/assets for RLCard mode.
+
+## Frontend
+
+- `NEXT_PUBLIC_API_BASE` (default `http://127.0.0.1:8000`)
+  - Backend origin.
+
+- `NEXT_PUBLIC_ENABLE_HAND_AUTO` = `true|false` (default `false`)
+  - When `true`, UI will call `POST /api/hand/auto` during bot sequences (dev only).
+  - Regardless of this flag, UI **polls** `/api/hand/state` until it’s your turn or showdown.
+
+- `NEXT_PUBLIC_DEV_TOOLS` = `true|false` (default `false`)
+  - Shows additional dev UI (e.g., “Copy state” button).
+
+## Typical Setups
+
+**Local dev (with auto-step & dev tools):**
+```env
+# backend/.env
+COACH_ENABLED=false
+BOT_MODE=heuristic
+BOT_PROFILE=TAG
+BOT_TIME_BUDGET_MS=150
+HAND_AUTO_ENABLED=true
+
+# frontend/.env.local
+NEXT_PUBLIC_API_BASE=http://127.0.0.1:8000
+NEXT_PUBLIC_ENABLE_HAND_AUTO=true
+NEXT_PUBLIC_DEV_TOOLS=true
+
+13) Production
+
+# backend/.env
+COACH_ENABLED=false
+BOT_MODE=heuristic
+BOT_PROFILE=CALLCHECK
+BOT_TIME_BUDGET_MS=150
+HAND_AUTO_ENABLED=false
+
+# frontend/.env
+NEXT_PUBLIC_API_BASE=https://your.api.host
+NEXT_PUBLIC_ENABLE_HAND_AUTO=false
+NEXT_PUBLIC_DEV_TOOLS=false

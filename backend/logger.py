@@ -1,3 +1,4 @@
+# backend/logger.py
 """
 Simple singleton logger accessor for the NLH trainer.
 

@@ -1,3 +1,4 @@
+# backend/database.py
 """
 SQLite persistence layer for the NLH training simulator.
 
@@ -92,6 +93,7 @@ class SQLiteLogger:
                 rng_seed TEXT,
                 snapped INTEGER,
                 meta TEXT,
+                node_key TEXT,
                 engine TEXT,
                 evaluator TEXT,
                 created_at TEXT NOT NULL,
@@ -134,6 +136,7 @@ class SQLiteLogger:
                 "rng_seed": "TEXT",
                 "snapped": "INTEGER",
                 "meta": "TEXT",
+                "node_key": "TEXT",
                 "engine": "TEXT",
                 "evaluator": "TEXT",
                 "created_at": "TEXT",
@@ -305,6 +308,7 @@ class SQLiteLogger:
                 meta=meta_str,
                 engine=engine,
                 evaluator=evaluator,
+                # node_key left None here; compute separately if/when you add it to GameState
             )
 
     # ------------------------------------------------------------------
@@ -329,6 +333,7 @@ class SQLiteLogger:
         meta: Optional[str] = None,
         engine: Optional[str] = None,
         evaluator: Optional[str] = None,
+        node_key: Optional[str] = None,
     ) -> None:
         """Record a single action for a hand.
 
@@ -354,9 +359,9 @@ class SQLiteLogger:
             INSERT INTO actions (
                 hand_id, idx, street, actor_seat, type, amount, bucket,
                 to_call_after, pot_after, time_ms, rng_seed, snapped, meta,
-                engine, evaluator, created_at
+                node_key, engine, evaluator, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 hand_id,
@@ -372,6 +377,7 @@ class SQLiteLogger:
                 rng_seed,
                 snapped_val,
                 meta,
+                node_key,
                 engine or DEFAULT_ENGINE,
                 evaluator or DEFAULT_EVALUATOR,
                 datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
@@ -408,7 +414,7 @@ class SQLiteLogger:
             """
             SELECT idx, street, actor_seat, type, amount, bucket,
                    to_call_after, pot_after, time_ms, rng_seed, snapped, meta,
-                   engine, evaluator, created_at
+                   node_key, engine, evaluator, created_at
             FROM actions
             WHERE hand_id = ?
             ORDER BY idx
@@ -433,7 +439,7 @@ class SQLiteLogger:
             """
             SELECT a.hand_id, a.idx, a.street, a.actor_seat, a.type, a.amount, a.bucket,
                    a.to_call_after, a.pot_after, a.time_ms, a.rng_seed, a.snapped, a.meta,
-                   a.engine, a.evaluator, a.created_at
+                   a.node_key, a.engine, a.evaluator, a.created_at
             FROM actions a
             JOIN hands h ON h.hand_id = a.hand_id
             WHERE h.session_id = ?

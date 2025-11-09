@@ -12,8 +12,10 @@ the ``hands`` table after every action so that exports work mid-hand.
 from __future__ import annotations
 
 import os
+import logging
+import concurrent.futures
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -36,6 +38,20 @@ from backend.models import (
 
 # NOTE: no prefix here; app/main.py includes this router with prefix="/api".
 router = APIRouter(tags=["hand"])
+
+log = logging.getLogger(__name__)
+
+# ---------- Tunables / Env ----------
+
+MAX_BOT_STEPS = int(os.environ.get("BOT_MAX_STEPS", "100"))
+BOT_TIME_BUDGET_MS = int(os.environ.get("BOT_TIME_BUDGET_MS", "150"))
+# Backend gate for /hand/auto (default OFF in prod)
+HAND_AUTO_ENABLED = os.environ.get("HAND_AUTO_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 # ---------- Per-hand indexing ----------
 
@@ -304,10 +320,109 @@ def _log_action(hand_id: str, seat: int, action: str, amount: Optional[int]) -> 
     _ACTION_IDX[hand_id] = idx + 1
 
 
+# ---------- Bot decision helpers (timeout + validation + fallback) ----------
+
+
+def _safe_fallback(actor: Dict[str, Any]) -> Tuple[str, Optional[int]]:
+    """Return a conservative legal fallback given actor context."""
+    to_call = int(actor.get("to_call", 0) or 0)
+    if to_call > 0:
+        return "call", None
+    return "check", None
+
+
+def _decide_with_timeout(
+    policy: BaseBotPolicy, ctx: Dict[str, Any], rng, timeout_ms: int
+) -> Optional[Dict[str, Any]]:
+    """Run policy.decide with a time budget; return None on timeout/error."""
+
+    def _run():
+        return policy.decide(ctx, rng)
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_run)
+            return fut.result(timeout=timeout_ms / 1000.0)
+    except concurrent.futures.TimeoutError:
+        log.warning("Bot decision timed out after %sms; using fallback", timeout_ms)
+        return None
+    except Exception as e:
+        log.exception("Bot decision errored: %s; using fallback", e)
+        return None
+
+
+def _validate_decision(
+    decision: Dict[str, Any], actor: Dict[str, Any]
+) -> Optional[Tuple[str, Optional[int]]]:
+    """Lightweight legality checks before handing to engine (engine still authoritative)."""
+    if not decision:
+        return None
+    action = str(decision.get("action", "")).lower().strip()
+    amount = decision.get("amount")
+    to_call = int(actor.get("to_call", 0) or 0)
+
+    if action not in {"fold", "check", "call", "bet", "raise"}:
+        return None
+    if action == "fold" and to_call == 0:
+        return None  # illegal to fold when free to check
+    if action == "check" and to_call > 0:
+        return None  # illegal to check when facing a bet
+    if action in {"bet", "raise"} and amount is None:
+        return None  # amount required
+
+    # Bucket/amount exact legality is enforced by engine snap; we only prevent obvious illegals.
+    return action, amount
+
+
+def _apply_bot_action_with_fallback(
+    hand_id: str,
+    actor: Dict[str, Any],
+    policy: BaseBotPolicy,
+    timeout_ms: int,
+) -> Tuple[str, Optional[int]]:
+    """Decide and apply a bot action with timeout and safe fallback on error."""
+    # Deterministic RNG for this exact decision
+    ss = get_session_state()
+    next_idx = _get_next_db_idx(hand_id)
+    rng = bot_rng(
+        [
+            ss.base_seed or "",
+            ss.logger_session_id,
+            hand_id,
+            next_idx,
+            int(actor["seat"]),
+            "bot",
+        ]
+    )
+
+    ctx = _build_actor_ctx_for_policy(actor)
+    decision = _decide_with_timeout(policy, ctx, rng, timeout_ms)
+    validated = _validate_decision(decision or {}, actor)
+    if not validated:
+        action, amount = _safe_fallback(actor)
+        return action, amount
+    action, amount = validated
+
+    adapter = get_adapter()
+    try:
+        adapter.apply_action(actor["seat"], action, amount)
+        return action, amount
+    except Exception as e:
+        # If the engine rejects (e.g., snap/legality mismatch), degrade to safe fallback.
+        log.warning(
+            "Engine rejected bot action %s/%s: %s; using fallback", action, amount, e
+        )
+        # Try fallback exactly once
+        fb_action, fb_amount = _safe_fallback(actor)
+        adapter.apply_action(actor["seat"], fb_action, fb_amount)
+        return fb_action, fb_amount
+
+
 def _auto_advance_bots(hand_id: str, human_seat: int) -> List[Dict[str, Any]]:
     """
     Loop while it's a bot's turn. Returns a list of bot actions taken.
     Each bot action is applied to the engine and recorded via the logger.
+    Emits an error if the loop guard is exceeded.
     """
     adapter = get_adapter()
     hand_id = _hand_id_str(hand_id)
@@ -315,41 +430,36 @@ def _auto_advance_bots(hand_id: str, human_seat: int) -> List[Dict[str, Any]]:
     actions_taken: List[Dict[str, Any]] = []
     policy = _select_bot_policy()
 
-    # safety to avoid infinite loops
-    for _ in range(100):
+    hit_cap = True  # assume worst; set False when we break normally
+    for step_idx in range(MAX_BOT_STEPS):
         actor = adapter.next_actor()
-        if not actor:
-            break
-        if int(actor["seat"]) == human_seat:
+        if not actor or int(actor["seat"]) == human_seat:
+            hit_cap = False
             break
 
-        # Build deterministic RNG for this exact decision
-        ss = get_session_state()
-        next_idx = _get_next_db_idx(hand_id)
-        rng = bot_rng(
-            [
-                ss.base_seed or "",
-                ss.logger_session_id,
-                hand_id,
-                next_idx,
-                int(actor["seat"]),
-                "bot",
-            ]
+        # Decide+apply with timeout and fallback.
+        action, amount = _apply_bot_action_with_fallback(
+            hand_id=hand_id,
+            actor=actor,
+            policy=policy,
+            timeout_ms=BOT_TIME_BUDGET_MS,
         )
 
-        # Build policy context and get decision
-        ctx = _build_actor_ctx_for_policy(actor)
-        decision = policy.decide(ctx, rng)
-        action = str(decision.get("action", "check")).lower().strip()
-        amount = decision.get("amount")
-
-        # Apply
-        adapter.apply_action(actor["seat"], action, amount)
         # Log the bot action (post-apply)
-        _log_action(hand_id, actor["seat"], action, amount)
+        _log_action(hand_id, int(actor["seat"]), action, amount)
         actions_taken.append(
-            {"seat": actor["seat"], "action": action, "amount": amount}
+            {"seat": int(actor["seat"]), "action": action, "amount": amount}
         )
+
+    if hit_cap:
+        # Guard fired; surface loudly and make diagnoseable
+        msg = (
+            f"auto-advance bot loop cap exceeded "
+            f"(max={MAX_BOT_STEPS}, hand_id={hand_id})"
+        )
+        log.error(msg)
+        raise RuntimeError(msg)
+
     return actions_taken
 
 
@@ -503,12 +613,15 @@ def start_hand() -> StartHandResponse:
     ss = get_session_state()
     human_seat = ss.human_seat
     if getattr(ss, "bot_mode", "heuristic") != "none":
-        _auto_advance_bots(hand_id, human_seat)
+        try:
+            _auto_advance_bots(hand_id, human_seat)
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
     # Refresh snapshot so exports can see the post-bot state
     _persist_snapshot(hand_id)
 
-    return StartHandResponse(hand_id=hand_id)
+    return StartHandResponse(hand_id=_hand_id_str(hand_id))
 
 
 @router.get("/hand/state", response_model=StateResponse)
@@ -578,7 +691,10 @@ def post_action(req: ActionRequest) -> ActionResponse:
     # Auto-advance bots and return post-bot snapshot (e.g., HU SB-call -> BB-check -> flop).
     bots: List[Dict[str, Any]] = []
     if getattr(ss, "bot_mode", "heuristic") != "none":
-        bots = _auto_advance_bots(hand_id, human_seat)
+        try:
+            bots = _auto_advance_bots(hand_id, human_seat)
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
     # Persist snapshot after bot auto-advance as well
     _persist_snapshot(hand_id)
@@ -593,6 +709,10 @@ def auto_advance() -> ActionResponse:
     Dev helper: advance all bot actions until it's the human's turn (or hand ends).
     Returns the updated state and a list of bot actions applied.
     """
+    if not HAND_AUTO_ENABLED:
+        # Consistent with coach gating, return a clear 501 that the UI can label as "disabled"
+        raise HTTPException(status_code=501, detail="hand auto endpoint disabled")
+
     adapter = get_adapter()
     human_seat = get_session_state().human_seat
 
@@ -607,7 +727,10 @@ def auto_advance() -> ActionResponse:
         hand_id = _hand_id_str(hand_id_any)
 
     # Advance bots
-    bots = _auto_advance_bots(hand_id, human_seat)
+    try:
+        bots = _auto_advance_bots(hand_id, human_seat)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     # Persist and return state
     _persist_snapshot(hand_id)
