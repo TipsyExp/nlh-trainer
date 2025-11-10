@@ -1,4 +1,3 @@
-# backend/main.py
 """FastAPI application entry point for the NLH trainer backend.
 
 Constructs a FastAPI app, configures CORS for local development, and
@@ -23,12 +22,13 @@ Dev helpers:
 from __future__ import annotations
 
 import os
+import uuid
 from typing import IO, Optional, Union
 from os import PathLike
 
-# --- ALL IMPORTS AT THE TOP (fixes ruff E402) ---
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Optional env loader (no-op if python-dotenv isn't installed)
 try:
@@ -59,7 +59,7 @@ from backend.api.coach import router as coach_router  # coach scaffold (501 by d
 from backend.api.review import router as review_router
 from backend.api.debug import router as debug_router  # conditionally included below
 
-# --- Executable statements AFTER all imports ---
+
 # Load environment variables (development convenience; harmless if empty)
 load_dotenv()
 
@@ -98,6 +98,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Request ID middleware
+
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """Attach a unique request ID to each incoming HTTP request.
+
+    The request ID is passed down into the engine adapter for correlation of
+    emitted debug events.  Clients may also provide an X-Request-ID header to
+    override the auto-generated ID.  The ID is cleared after the request
+    finishes.  The response will include the X-Request-ID header.
+    """
+
+    async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+        # Use provided header or generate a new UUID4.
+        req_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        adapter = get_adapter()
+        if hasattr(adapter, "attach_request_id"):
+            adapter.attach_request_id(req_id)
+        try:
+            response = await call_next(request)
+        finally:
+            # Clear request ID for subsequent requests
+            if hasattr(adapter, "attach_request_id"):
+                adapter.attach_request_id(None)
+        # Propagate the request ID back in the response headers
+        response.headers["X-Request-ID"] = req_id
+        return response
+
+
+# Register the middleware with the app.  It must come after CORS for the
+# middleware to see the request headers.
+app.add_middleware(RequestIDMiddleware)
 
 
 # -------- Startup hook (ensure DB schema exists early) --------
@@ -154,7 +188,6 @@ if ALLOW_DEV_AUTO:
         hand_id_any = getattr(adapter, "hand_id", None)
         if not hand_id_any:
             raise HTTPException(status_code=400, detail="no hand in progress")
-
         hand_id = hand_api._hand_id_str(hand_id_any)  # dev-only, private helper
         ss = hand_api.get_session_state()
         bots_applied = hand_api._auto_advance_bots(hand_id, ss.human_seat)

@@ -1,5 +1,4 @@
-﻿# backend/adapters/engines/pokerkit_adapter.py
-"""
+﻿"""
 Minimal PokerKit-like engine adapter.
 
 This module provides a very lightweight No-Limit Hold'em engine that
@@ -8,6 +7,13 @@ feature set sufficient for M0/M1 testing: posting blinds, deterministic
 deck shuffling based on a seed, heads-up preflop order rules, basic
 bet sizing buckets, minimum raise enforcement, off-tree size snapping,
 and HU street transitions.  It is intended as a stub for early milestones.
+
+This version has been instrumented for development-time debugging.  When
+ENGINE_DEBUG_HTTP is enabled, structured events are emitted for key
+actions and state transitions.  Each event includes a wall-clock
+timestamp, a sequence counter, request correlation ID (if set via
+middleware), a cheap state hash, deltas vs the previous event, and
+boolean invariants to assist with troubleshooting.
 """
 
 from __future__ import annotations
@@ -15,9 +21,10 @@ from __future__ import annotations
 import hashlib
 import os
 import random
+import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast, Deque
 
 
 # ---------------------------------------------------------------------------
@@ -75,10 +82,10 @@ DEBUG_EVENTS_ENABLED = os.getenv("ENGINE_DEBUG_HTTP", "0").lower() in (
 
 
 class PokerKitAdapter:
+    """A minimal poker engine for testing with debug instrumentation."""
+
     # --- Class-level annotations for mypy ---
     _preflop_sb_called: bool
-
-    """A minimal poker engine for testing."""
 
     # --- Table lifecycle -----------------------------------------------------
 
@@ -119,10 +126,29 @@ class PokerKitAdapter:
             0  # mirrors hand_id at time of last guard update
         )
         # --- Debug ring buffer (dev only) ---
-        self._debug_events = deque(maxlen=300)  # type: ignore[var-annotated]
+        # The debug ring holds recent structured events.  Size can be tuned via
+        # ENGINE_DEBUG_RING_MAX env var.  We keep an integer sequence counter
+        # for ordering.
+        max_events = int(os.getenv("ENGINE_DEBUG_RING_MAX", "300"))
+        self._debug_events: Deque[Dict[str, Any]] = deque(maxlen=max_events)
         self._debug_seq = 0
+        # Track previous state for delta computation between events.  A simple
+        # mapping of key state fields is stored after each emit.
+        self._prev_event_state: Optional[Dict[str, Any]] = None
+        # The current request ID is attached via middleware.  When None, no
+        # correlation information is recorded on events.
+        self._current_req_id: Optional[str] = None
 
     # --- Internal helpers ----------------------------------------------------
+
+    def attach_request_id(self, req_id: Optional[str]) -> None:
+        """Attach a request correlation ID for subsequent events.
+
+        FastAPI middleware should call this at the beginning of each request to
+        correlate emitted events with a unique request identifier.  Passing
+        None clears the current correlation ID.
+        """
+        self._current_req_id = req_id
 
     def _seeded_rng(self, seed_text: str) -> random.Random:
         h = hashlib.sha256(seed_text.encode("utf-8")).digest()
@@ -332,27 +358,147 @@ class PokerKitAdapter:
         """Append a structured debug event to the in-memory ring buffer (dev-only)."""
         if not DEBUG_EVENTS_ENABLED:
             return
+
+        # Increment sequence and capture monotonic timestamp
         self._debug_seq += 1
+        ts_ms = int(time.time() * 1000)
+
+        # Actor before event is whichever seat was next to act at emit time
+        actor_before = int(self._next_to_act) if self._next_to_act is not None else None
+
+        # Build current state for hashing and delta
+        current_state = {
+            "street": self._street,
+            "price": int(self._current_price),
+            "pot": int(self._pot_total),
+            "to_act": actor_before,
+            "committed": self._committed[:],
+        }
+
+        # Compute a cheap hash over key state components
+        state_hash_input = (
+            self._street,
+            int(self._current_price),
+            int(self._pot_total),
+            actor_before,
+            tuple(self._committed),
+        )
+        state_hash = hashlib.sha256(str(state_hash_input).encode("utf-8")).hexdigest()[
+            :8
+        ]
+
+        # Use a local snapshot of the previous state for delta + invariants
+        prev_state = self._prev_event_state
+
+        # Compute delta vs previous state
+        delta: Dict[str, Any] = {}
+        if prev_state is not None:
+            for key in ("street", "price", "pot", "to_act"):
+                old = prev_state.get(key)
+                new = current_state[key]
+                if old != new:
+                    delta[key] = {"from": old, "to": new}
+            if prev_state.get("committed") != current_state["committed"]:
+                delta["committed"] = {
+                    "from": prev_state.get("committed"),
+                    "to": current_state["committed"],
+                }
+
+        # Derive actor_after safely (avoid mypy complaints)
+        if "next_actor" in data:
+            next_val = data.get("next_actor")
+            actor_after: Optional[int] = next_val if isinstance(next_val, int) else None
+        else:
+            actor_after = (
+                int(self._next_to_act) if self._next_to_act is not None else None
+            )
+
+        # Invariants (use prev_state!)
+        pot_non_decreasing = True
+        to_call_consistent = True
+        actor_valid = True
+        last_action_consistent = True
+        try:
+            # Pot monotonicity: ensure running pot hasn't dropped within the hand
+            if prev_state is not None:
+                prev_pot = prev_state.get("pot")
+                if isinstance(prev_pot, int):
+                    cur_pot_val = current_state.get("pot")
+                    if isinstance(cur_pot_val, (int, float, str)):
+                        pot_non_decreasing = int(cur_pot_val) >= prev_pot
+
+            # to_call consistency: verify adapter's public next_to_act calculation matches internal
+            if self._next_to_act is not None:
+                expected_to_call = max(
+                    0,
+                    int(self._current_price) - int(self._committed[self._next_to_act]),
+                )
+                to_call_attr = cast(int, getattr(self, "_to_call_next", 0))
+                to_call_consistent = expected_to_call == to_call_attr
+
+            # Actor validity: seat index is within table bounds or None for showdown
+            if self._next_to_act is not None:
+                actor_valid = 0 <= int(self._next_to_act) < int(self.seats)
+
+            # Last action semantics: basic consistency check between last_action and to_call
+            la = self._last_action
+            if la is not None:
+                lat = getattr(la, "type", None)
+                if lat == "check" and cast(int, getattr(self, "_to_call_next", 0)) != 0:
+                    last_action_consistent = False
+                if lat == "call" and cast(int, getattr(self, "_to_call_next", 0)) != 0:
+                    last_action_consistent = False
+        except Exception:
+            # Never crash the emitter; invariants are advisory
+            pass
+
+        # Build final event record
         evt = {
+            "ts_ms": ts_ms,
             "seq": self._debug_seq,
-            "hand": int(self.hand_id),
+            "hand_id": int(self.hand_id),
             "street": self._street,
             "kind": kind,
             "pot": int(self._pot_total),
             "price": int(self._current_price),
-            "to_act": int(self._next_to_act) if self._next_to_act is not None else None,
+            "to_act": actor_before,
             **data,
+            # Added metadata
+            "actor_before": actor_before,
+            "actor_after": actor_after,
+            "state_hash": state_hash,
+            "delta": delta,
+            "req_id": self._current_req_id,
+            "invariants": {
+                "pot_non_decreasing": pot_non_decreasing,
+                "to_call_consistent": to_call_consistent,
+                "actor_valid": actor_valid,
+                "last_action_consistent": last_action_consistent,
+            },
         }
         self._debug_events.append(evt)
 
+        # Update prev for the NEXT event (do this AFTER using prev_state above)
+        self._prev_event_state = current_state
+
+    # Now update prev for the NEXT event
     def _get_events_since(
         self, since: int = 0, limit: int = 200
     ) -> List[Dict[str, Any]]:
         """Return events with seq > since (dev-only)."""
         if not DEBUG_EVENTS_ENABLED:
             return []
-        items = list(self._debug_events)
-        out = [e for e in items if int(e.get("seq", 0)) > int(since)]
+        items: List[Dict[str, Any]] = list(self._debug_events)
+        out: List[Dict[str, Any]] = []
+        for e in items:
+            seq_val = e.get("seq", 0)
+            if isinstance(seq_val, (int, float, str)):
+                seq_num = int(seq_val)
+            else:
+                # Skip if malformed
+                continue
+            if seq_num > since:
+                out.append(e)
         if limit > 0:
             out = out[-int(limit) :]
         return out
@@ -398,6 +544,8 @@ class PokerKitAdapter:
         # Reset pot guard baseline
         self._pot_guard_prev = 0
         self._pot_guard_hand_epoch = 0
+        # Also clear previous state for delta
+        self._prev_event_state = None
 
     def start_hand(self) -> str:
         if self.seats <= 0:
@@ -438,7 +586,8 @@ class PokerKitAdapter:
             self._players_holes.append([self._deck.pop(), self._deck.pop()])
         # Clear last action
         self._last_action = None
-
+        # Also clear previous state for delta
+        self._prev_event_state = None
         # Debug event
         self._emit_event(
             "start_hand",
@@ -448,7 +597,6 @@ class PokerKitAdapter:
             blinds={"sb": self.sb, "bb": self.bb},
             next_actor=self._next_to_act,
         )
-
         return f"H{self.hand_id}"
 
     def next_actor(self) -> Optional[Dict[str, Any]]:
@@ -474,28 +622,31 @@ class PokerKitAdapter:
         # Ignore out-of-turn actions
         if seat != self._next_to_act:
             return
-
+        # Track latency start for this action
+        start_time = time.perf_counter()
         action_l = (action or "").lower().strip()
         to_call = int(self._to_call_next)
-
         # ----- Fold -----
         if action_l == "fold":
             # Opponent wins the pot immediately; end hand
             self._last_action = _LastAction(seat=seat, type="fold")
             self._rotate_to(None)
             self._street = "showdown"
-            # Debug event
+            # Compute latency and emit debug event
+            latency_ms = int((time.perf_counter() - start_time) * 1000)
             self._emit_event(
-                "action", seat=seat, action="fold", next_actor=self._next_to_act
+                "action",
+                seat=seat,
+                action="fold",
+                next_actor=self._next_to_act,
+                latency_ms=latency_ms,
             )
             # pot_total already reflects committed
             return
-
         # ----- Check -----
         if action_l == "check":
             if to_call != 0:
                 raise ValueError("illegal check facing to_call")
-
             # Heads-up preflop pattern: SB called, BB checks -> deal flop, BB acts first.
             if self.seats == 2 and self._street == "preflop" and seat == self.bb_seat:
                 last = self._last_action
@@ -522,15 +673,16 @@ class PokerKitAdapter:
                         self._next_to_act = None
                         self._to_call_next = 0
                     self._last_action = _LastAction(seat=seat, type="check")
+                    latency_ms = int((time.perf_counter() - start_time) * 1000)
                     # Debug event
                     self._emit_event(
                         "action",
                         seat=seat,
                         action="check",
                         next_actor=self._next_to_act,
+                        latency_ms=latency_ms,
                     )
                     return
-
             # --- Postflop/general: two consecutive checks close the round ---
             prev = self._last_action
             if prev and prev.type == "check" and prev.seat != seat:
@@ -540,12 +692,16 @@ class PokerKitAdapter:
                 self._current_price = max(self._committed) if self._committed else 0
                 self._recalc_pot_total()
                 self._advance_street()
+                latency_ms = int((time.perf_counter() - start_time) * 1000)
                 # Debug event
                 self._emit_event(
-                    "action", seat=seat, action="check", next_actor=self._next_to_act
+                    "action",
+                    seat=seat,
+                    action="check",
+                    next_actor=self._next_to_act,
+                    latency_ms=latency_ms,
                 )
                 return
-
             # Otherwise, rotate to the opponent
             nxt = self.bb_seat if seat == self.sb_seat else self.sb_seat
             self._next_to_act = int(nxt) if nxt is not None else None
@@ -556,29 +712,31 @@ class PokerKitAdapter:
                 )
             else:
                 self._to_call_next = 0
-
             self._last_action = _LastAction(seat=seat, type="check")
+            latency_ms = int((time.perf_counter() - start_time) * 1000)
             # Debug event
             self._emit_event(
-                "action", seat=seat, action="check", next_actor=self._next_to_act
+                "action",
+                seat=seat,
+                action="check",
+                next_actor=self._next_to_act,
+                latency_ms=latency_ms,
             )
             return
-
         # ----- Call -----
         if action_l == "call":
             if to_call <= 0:
                 # Treat as check redundancy safeguard
                 self.apply_action(seat, "check")
                 return
-
             # Match current price
             self._committed[seat] = self._current_price
             self._recalc_pot_total()
             self._last_action = _LastAction(seat=seat, type="call", committed=to_call)
-
             # HU preflop special-case: SB call does NOT close the round; BB still acts.
             if self.seats == 2 and self._street == "preflop" and seat == self.sb_seat:
                 self._rotate_to(self.bb_seat)
+                latency_ms = int((time.perf_counter() - start_time) * 1000)
                 # Debug event
                 self._emit_event(
                     "action",
@@ -586,11 +744,12 @@ class PokerKitAdapter:
                     action="call",
                     to_call=to_call,
                     next_actor=self._next_to_act,
+                    latency_ms=latency_ms,
                 )
                 return
-
             # Otherwise, a call closes the betting round in HU.
             self._close_round_after_call()
+            latency_ms = int((time.perf_counter() - start_time) * 1000)
             # Debug event
             self._emit_event(
                 "action",
@@ -598,24 +757,21 @@ class PokerKitAdapter:
                 action="call",
                 to_call=to_call,
                 next_actor=self._next_to_act,
+                latency_ms=latency_ms,
             )
             return
-
         # ----- Bet/Raise -----
         if action_l in ("bet", "raise"):
             if amount is None or not isinstance(amount, int):
                 raise ValueError(
                     "bet/raise requires integer 'amount' (total commitment)"
                 )
-
             # Detect true SB open (normalize verb to 'bet' even though to_call>0 due to blinds)
             is_sb_open_pf = self._is_true_sb_open_pf(seat)
-
             snap = self._snap_to_bucket(
                 requested_total=amount, to_call=to_call, actor_seat=seat
             )
             committed_total = int(snap["target"])
-
             # --- Enforce min-raise total FIRST (tests expect 'min-raise' wording) ---
             min_total_required = int(
                 self._current_price + max(self.bb, self._last_raise_size or self.bb)
@@ -624,33 +780,27 @@ class PokerKitAdapter:
                 raise ValueError(
                     f"min-raise not met: need ≥ {min_total_required}, got {committed_total}"
                 )
-
             # Compute delta vs current table price (true raise size)
-            delta = committed_total - int(self._current_price)
+            delta_amt = committed_total - int(self._current_price)
             # (No extra <=0 guard needed here; min-raise implies delta > 0)
-
             # Update raise state using the true delta
-            self._last_raise_size = max(int(delta), self.bb)
+            self._last_raise_size = max(int(delta_amt), self.bb)
             self._raises_this_round = (
                 1
                 if to_call == 0 and self._raises_this_round == 0
                 else min(self._raises_this_round + 1, 99)
             )
-
             # Update commitment and price
             self._committed[seat] = committed_total
             self._current_price = committed_total
             self._recalc_pot_total()
-
             # Rotate to opponent
             nxt = self._opponent_of(seat)
             self._rotate_to(nxt)
-
             # Normalize verb for last_action:
             # - "bet" for postflop to_call==0 OR true HU SB open preflop
             # - "raise" otherwise
             verb = "bet" if (to_call == 0 or is_sb_open_pf) else "raise"
-
             # Record last action
             self._last_action = _LastAction(
                 seat=seat,
@@ -661,7 +811,7 @@ class PokerKitAdapter:
                 bucket_label=snap["bucket_label"],
                 allowed_buckets=snap["allowed_buckets"],
             )
-
+            latency_ms = int((time.perf_counter() - start_time) * 1000)
             # Debug event
             self._emit_event(
                 "action",
@@ -672,9 +822,9 @@ class PokerKitAdapter:
                 snapped=bool(snap["snapped"]),
                 bucket=snap["bucket_label"],
                 next_actor=self._next_to_act,
+                latency_ms=latency_ms,
             )
             return
-
         raise ValueError(f"unknown action: {action}")
 
     def state(self) -> _GameSnap:
