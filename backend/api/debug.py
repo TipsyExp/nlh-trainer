@@ -68,7 +68,8 @@ def engine_snapshot() -> Dict[str, Any]:
         pass
 
     return {
-        "debug_enabled": os.getenv("ENGINE_DEBUG_HTTP", "0").lower() in ("1", "true", "yes", "on"),
+        "debug_enabled": os.getenv("ENGINE_DEBUG_HTTP", "0").lower()
+        in ("1", "true", "yes", "on"),
         "table": {
             "seats": a.seats,
             "sb": a.sb,
