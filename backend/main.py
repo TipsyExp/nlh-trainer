@@ -16,6 +16,8 @@ Coach API:
 Dev helpers:
 - If ALLOW_DEV_AUTO=true (or 1/yes), we expose POST /api/hand/auto which
   advances all bot actions up to the next human decision or end-of-hand.
+- If ENGINE_DEBUG_HTTP=true (or 1/yes/on), we include /api/debug endpoints for
+  engine event logs / inspection (see backend/api/debug.py).
 """
 
 from __future__ import annotations
@@ -55,6 +57,7 @@ from backend.api.hand import router as hand_router
 from backend.api.export import router as export_router
 from backend.api.coach import router as coach_router  # coach scaffold (501 by default)
 from backend.api.review import router as review_router
+from backend.api.debug import router as debug_router  # conditionally included below
 
 # --- Executable statements AFTER all imports ---
 # Load environment variables (development convenience; harmless if empty)
@@ -65,6 +68,13 @@ ALLOW_DEV_AUTO = os.environ.get("ALLOW_DEV_AUTO", "false").strip().lower() in (
     "1",
     "true",
     "yes",
+    "on",
+)
+DEBUG_HTTP_ENABLED = os.environ.get("ENGINE_DEBUG_HTTP", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
 )
 # BOT_MODE is read by /api/session creation; we just ensure .env is loaded.
 # Keeping a note for visibility:
@@ -105,6 +115,7 @@ def root() -> dict:
         "message": "NLH Trainer backend is up",
         "bot_mode_default": DEFAULT_BOT_MODE,
         "allow_dev_auto": ALLOW_DEV_AUTO,
+        "engine_debug_http": DEBUG_HTTP_ENABLED,
     }
 
 
@@ -120,6 +131,10 @@ app.include_router(hand_router, prefix="/api")
 app.include_router(export_router, prefix="/api")
 app.include_router(coach_router, prefix="/api")
 app.include_router(review_router, prefix="/api")
+
+# Optional: debug endpoints for engine event logs (dev-only)
+if DEBUG_HTTP_ENABLED:
+    app.include_router(debug_router, prefix="/api")
 
 
 # -------- Optional dev-only helper: /api/hand/auto --------

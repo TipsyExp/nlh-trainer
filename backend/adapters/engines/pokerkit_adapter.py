@@ -13,7 +13,9 @@ and HU street transitions.  It is intended as a stub for early milestones.
 from __future__ import annotations
 
 import hashlib
+import os
 import random
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -63,6 +65,14 @@ class _GameSnap:
 
 # ---------------------------------------------------------------------------
 
+# Dev-only debug toggle and ring buffer size
+DEBUG_EVENTS_ENABLED = os.getenv("ENGINE_DEBUG_HTTP", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 
 class PokerKitAdapter:
     # --- Class-level annotations for mypy ---
@@ -108,6 +118,9 @@ class PokerKitAdapter:
         self._pot_guard_hand_epoch: int = (
             0  # mirrors hand_id at time of last guard update
         )
+        # --- Debug ring buffer (dev only) ---
+        self._debug_events = deque(maxlen=300)  # type: ignore[var-annotated]
+        self._debug_seq = 0
 
     # --- Internal helpers ----------------------------------------------------
 
@@ -298,12 +311,13 @@ class PokerKitAdapter:
             # showdown: no more actions
             self._rotate_to(None)
 
-    def _maybe_close_round_after_check(self, seat: int) -> None:
-        """If we see check–check with no bet, close the round."""
-        prev = self._last_action
-        if prev and prev.type == "check" and prev.seat != seat:
-            # Two consecutive checks close the round
-            self._advance_street()
+        # Debug event
+        self._emit_event(
+            "advance_street",
+            to=self._street,
+            board=self._board[:],
+            next_actor=self._next_to_act,
+        )
 
     def _close_round_after_call(self) -> None:
         """Call facing a bet/raise closes the round in HU."""
@@ -311,6 +325,37 @@ class PokerKitAdapter:
         self._current_price = max(self._committed)
         self._recalc_pot_total()
         self._advance_street()
+
+    # --- Debug helpers (dev-only) -------------------------------------------
+
+    def _emit_event(self, kind: str, **data: Any) -> None:
+        """Append a structured debug event to the in-memory ring buffer (dev-only)."""
+        if not DEBUG_EVENTS_ENABLED:
+            return
+        self._debug_seq += 1
+        evt = {
+            "seq": self._debug_seq,
+            "hand": int(self.hand_id),
+            "street": self._street,
+            "kind": kind,
+            "pot": int(self._pot_total),
+            "price": int(self._current_price),
+            "to_act": int(self._next_to_act) if self._next_to_act is not None else None,
+            **data,
+        }
+        self._debug_events.append(evt)
+
+    def _get_events_since(
+        self, since: int = 0, limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        """Return events with seq > since (dev-only)."""
+        if not DEBUG_EVENTS_ENABLED:
+            return []
+        items = list(self._debug_events)
+        out = [e for e in items if int(e.get("seq", 0)) > int(since)]
+        if limit > 0:
+            out = out[-int(limit) :]
+        return out
 
     # --- Public API ---------------------------------------------------------
 
@@ -393,6 +438,17 @@ class PokerKitAdapter:
             self._players_holes.append([self._deck.pop(), self._deck.pop()])
         # Clear last action
         self._last_action = None
+
+        # Debug event
+        self._emit_event(
+            "start_hand",
+            button=self.button,
+            sb_seat=self.sb_seat,
+            bb_seat=self.bb_seat,
+            blinds={"sb": self.sb, "bb": self.bb},
+            next_actor=self._next_to_act,
+        )
+
         return f"H{self.hand_id}"
 
     def next_actor(self) -> Optional[Dict[str, Any]]:
@@ -428,6 +484,10 @@ class PokerKitAdapter:
             self._last_action = _LastAction(seat=seat, type="fold")
             self._rotate_to(None)
             self._street = "showdown"
+            # Debug event
+            self._emit_event(
+                "action", seat=seat, action="fold", next_actor=self._next_to_act
+            )
             # pot_total already reflects committed
             return
 
@@ -462,6 +522,13 @@ class PokerKitAdapter:
                         self._next_to_act = None
                         self._to_call_next = 0
                     self._last_action = _LastAction(seat=seat, type="check")
+                    # Debug event
+                    self._emit_event(
+                        "action",
+                        seat=seat,
+                        action="check",
+                        next_actor=self._next_to_act,
+                    )
                     return
 
             # --- Postflop/general: two consecutive checks close the round ---
@@ -473,6 +540,10 @@ class PokerKitAdapter:
                 self._current_price = max(self._committed) if self._committed else 0
                 self._recalc_pot_total()
                 self._advance_street()
+                # Debug event
+                self._emit_event(
+                    "action", seat=seat, action="check", next_actor=self._next_to_act
+                )
                 return
 
             # Otherwise, rotate to the opponent
@@ -487,6 +558,10 @@ class PokerKitAdapter:
                 self._to_call_next = 0
 
             self._last_action = _LastAction(seat=seat, type="check")
+            # Debug event
+            self._emit_event(
+                "action", seat=seat, action="check", next_actor=self._next_to_act
+            )
             return
 
         # ----- Call -----
@@ -504,10 +579,26 @@ class PokerKitAdapter:
             # HU preflop special-case: SB call does NOT close the round; BB still acts.
             if self.seats == 2 and self._street == "preflop" and seat == self.sb_seat:
                 self._rotate_to(self.bb_seat)
+                # Debug event
+                self._emit_event(
+                    "action",
+                    seat=seat,
+                    action="call",
+                    to_call=to_call,
+                    next_actor=self._next_to_act,
+                )
                 return
 
             # Otherwise, a call closes the betting round in HU.
             self._close_round_after_call()
+            # Debug event
+            self._emit_event(
+                "action",
+                seat=seat,
+                action="call",
+                to_call=to_call,
+                next_actor=self._next_to_act,
+            )
             return
 
         # ----- Bet/Raise -----
@@ -569,6 +660,18 @@ class PokerKitAdapter:
                 snapped=bool(snap["snapped"]),
                 bucket_label=snap["bucket_label"],
                 allowed_buckets=snap["allowed_buckets"],
+            )
+
+            # Debug event
+            self._emit_event(
+                "action",
+                seat=seat,
+                action=verb,
+                requested=amount,
+                committed=committed_total,
+                snapped=bool(snap["snapped"]),
+                bucket=snap["bucket_label"],
+                next_actor=self._next_to_act,
             )
             return
 
