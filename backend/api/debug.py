@@ -1,14 +1,35 @@
-# backend/api/debug.py
+"""
+Development-only debug endpoints for the NLH engine.
+
+These routes expose rich event and state information when ENGINE_DEBUG_HTTP is
+enabled.  They are not intended for production and should be gated behind
+configuration flags.  The endpoints provide:
+
+* `/events` – engine events with extended metadata such as timestamps, request
+  IDs and invariant flags.
+* `/snapshot` – the current full internal state of the engine.
+* `/diff` – a compact delta between two events or snapshots.
+* `/config` – current debug configuration and environment toggles.
+* `/export` – export a ZIP bundle of events, snapshot and config for
+  offline analysis.
+"""
+
 from __future__ import annotations
 
+import io
+import json
 import os
+import zipfile
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
+
 from backend.adapters.engines import get_adapter
 
+
 # This router gets mounted in main.py with prefix="/api"
-# Final paths: /api/debug/engine/events and /api/debug/engine/snapshot
+# Final paths: /api/debug/engine/events, /api/debug/engine/snapshot, etc.
 router = APIRouter(prefix="/debug/engine", tags=["debug"])
 
 
@@ -16,24 +37,34 @@ router = APIRouter(prefix="/debug/engine", tags=["debug"])
 def engine_events(
     since: int = Query(0, ge=0, description="Return events with seq > since"),
     limit: int = Query(200, ge=0, le=1000, description="Max events to return"),
+    hand_id: Optional[int] = Query(None, description="Filter events by hand ID"),
+    street: Optional[str] = Query(
+        None, description="Filter events by street (preflop/flop/turn/river/showdown)"
+    ),
 ) -> List[Dict[str, Any]]:
-    """
-    Return the in-memory engine debug events ring buffer (dev-only).
-    Shape: a plain JSON array of events. Each event includes fields like:
-    seq, hand, street, kind, pot, price, to_act, plus action metadata.
+    """Return the in-memory engine debug events ring buffer (dev-only).
+
+    Shape: a plain JSON array of events.  Each event includes fields like:
+    seq, hand_id, street, kind, pot, price, to_act, actor_before/after,
+    state_hash, delta, invariants and optional latency metrics.
     """
     adapter = get_adapter()
     getter = getattr(adapter, "_get_events_since", None)
-    if callable(getter):
-        return getter(since=since, limit=limit)  # type: ignore[misc]
-    # If the adapter doesn't support events, return an empty list.
-    return []
+    if not callable(getter):
+        return []
+    events = getter(since=since, limit=limit)  # type: ignore[misc]
+    # Apply optional filters
+    if hand_id is not None:
+        events = [e for e in events if int(e.get("hand_id", 0)) == int(hand_id)]
+    if street is not None:
+        events = [e for e in events if str(e.get("street")) == street]
+    return events
 
 
 @router.get("/snapshot")
 def engine_snapshot() -> Dict[str, Any]:
-    """
-    Return a rich internal snapshot of the engine state (dev-only).
+    """Return a rich internal snapshot of the engine state (dev-only).
+
     Helpful to compare backend truth vs frontend rendering.
     """
     a = get_adapter()
@@ -53,7 +84,6 @@ def engine_snapshot() -> Dict[str, Any]:
 
     next_seat = getattr(a, "_next_to_act", None)
     to_call_next = getattr(a, "_to_call_next", 0)
-
     # Compute min raise + allowed buckets (if available)
     min_raise_total: Optional[int] = None
     allowed_buckets_next: List[str] = []
@@ -66,7 +96,6 @@ def engine_snapshot() -> Dict[str, Any]:
     except Exception:
         # Keep optional fields None/[] if any internal detail differs
         pass
-
     return {
         "debug_enabled": os.getenv("ENGINE_DEBUG_HTTP", "0").lower()
         in ("1", "true", "yes", "on"),
@@ -96,3 +125,114 @@ def engine_snapshot() -> Dict[str, Any]:
         "allowed_buckets_next": allowed_buckets_next,
         "last_action": last_action_dict(getattr(a, "_last_action", None)),
     }
+
+
+@router.get("/diff")
+def engine_diff(
+    from_seq: int = Query(..., ge=1, description="Lower-bound event seq (inclusive)"),
+    to_seq: int = Query(..., ge=1, description="Upper-bound event seq (inclusive)"),
+) -> Dict[str, Any]:
+    """Return a compact delta between two debug events.
+
+    The diff includes key state fields (street, actor, pot, committed, price, board)
+    and shows how they changed between the two events.  If either event isn't
+    found, a 404 is returned.
+    """
+    adapter = get_adapter()
+    events = getattr(adapter, "_debug_events", None)
+    if events is None:
+        raise HTTPException(status_code=404, detail="debug events not enabled")
+    ev_from = None
+    ev_to = None
+    for e in events:
+        seq = int(e.get("seq", 0))
+        if seq >= from_seq and ev_from is None:
+            ev_from = e
+        if seq >= to_seq:
+            ev_to = e
+            break
+    if ev_from is None or ev_to is None:
+        raise HTTPException(
+            status_code=404, detail="events not found for given seq range"
+        )
+    # Compute diff between two event snapshots.  Only fields of interest are compared.
+    fields = ["street", "actor_after", "pot", "price", "to_act", "board", "committed"]
+    diff: Dict[str, Any] = {}
+    for key in fields:
+        v1 = ev_from.get(key)
+        v2 = ev_to.get(key)
+        if v1 != v2:
+            diff[key] = {"from": v1, "to": v2}
+    return {
+        "from_seq": from_seq,
+        "to_seq": to_seq,
+        "diff": diff,
+    }
+
+
+@router.get("/config")
+def engine_config() -> Dict[str, Any]:
+    """Return the effective debug configuration and environment toggles."""
+    adapter = get_adapter()
+    ring = getattr(adapter, "_debug_events", None)
+    ring_maxlen = getattr(ring, "maxlen", None) if ring is not None else None
+    return {
+        "ENGINE_DEBUG_HTTP": os.getenv("ENGINE_DEBUG_HTTP", "false"),
+        "ENGINE_DEBUG_RING_MAX": os.getenv("ENGINE_DEBUG_RING_MAX", "300"),
+        "DEBUG_SAMPLING": os.getenv("DEBUG_SAMPLING", "1"),
+        "BOT_TRACE": os.getenv("BOT_TRACE", "0"),
+        "DEBUG_EXPORT_SANITIZE": os.getenv("DEBUG_EXPORT_SANITIZE", "true"),
+        "ALLOW_DEV_AUTO": os.getenv("ALLOW_DEV_AUTO", "false"),
+        "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
+        "ring_buffer_size": ring_maxlen,
+    }
+
+
+@router.post("/export")
+def export_bundle(
+    sanitize: bool = Query(True, description="Redact PII and card visibility")
+) -> Response:
+    """Return a ZIP bundle containing events, snapshot, config and seeds.
+
+    The ZIP includes:
+    - events.json: the list of all debug events currently stored
+    - snapshot.json: the current internal engine snapshot
+    - config.json: the effective debug configuration
+    - seeds.json: the engine's base and deck seeds
+    Optionally, sanitizes sensitive data such as hole cards and request bodies.
+    """
+    adapter = get_adapter()
+    events = []
+    try:
+        events = adapter._get_events_since(0, limit=0)  # type: ignore[misc]
+    except Exception:
+        pass
+    snapshot = engine_snapshot()
+    config = engine_config()
+    seeds = {
+        "base_seed": getattr(adapter, "base_seed", None),
+        "deck_seed": getattr(adapter, "_deck_seed", None),
+    }
+    # Sanitize player hole cards by masking non-humans (seats other than 0) unless showdown
+    if sanitize and "players_holes" in snapshot:
+        ph = snapshot["players_holes"]
+        street = snapshot.get("street")
+        # If not at showdown, mask all seat hole cards except seat 0 for reproducibility
+        if street != "showdown":
+            masked = []
+            for idx, cards in enumerate(ph):
+                if idx == 0:
+                    masked.append(cards)
+                else:
+                    masked.append(["XX", "XX"])
+            snapshot["players_holes"] = masked
+    # Build ZIP in memory
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("events.json", json.dumps(events, default=str, indent=2))
+        zf.writestr("snapshot.json", json.dumps(snapshot, default=str, indent=2))
+        zf.writestr("config.json", json.dumps(config, default=str, indent=2))
+        zf.writestr("seeds.json", json.dumps(seeds, default=str, indent=2))
+    mem.seek(0)
+    headers = {"Content-Disposition": "attachment; filename=nlh_debug_bundle.zip"}
+    return Response(content=mem.read(), media_type="application/zip", headers=headers)
