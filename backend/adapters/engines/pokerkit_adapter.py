@@ -308,6 +308,7 @@ class PokerKitAdapter:
 
     def _advance_street(self) -> None:
         """HU: preflop -> flop -> turn -> river -> showdown; set first actor."""
+        prev_actor = self._next_to_act
         if self._street == "preflop":
             self._street = "flop"
         elif self._street == "flop":
@@ -322,6 +323,9 @@ class PokerKitAdapter:
         # Reset raise tracking
         self._last_raise_size = 0
         self._raises_this_round = 0
+        # New street must start with a clean round state:
+        # do not carry over a 'check' (or any action) from the prior street.
+        self._last_action = None
         # On a new betting round, the current price is whatever everyone has committed so far,
         # which keeps to_call at 0 for the first actor of the new street.
         self._current_price = max(self._committed) if self._committed else 0
@@ -343,6 +347,7 @@ class PokerKitAdapter:
             to=self._street,
             board=self._board[:],
             next_actor=self._next_to_act,
+            _actor_before=prev_actor,
         )
 
     def _close_round_after_call(self) -> None:
@@ -363,15 +368,30 @@ class PokerKitAdapter:
         self._debug_seq += 1
         ts_ms = int(time.time() * 1000)
 
-        # Actor before event is whichever seat was next to act at emit time
-        actor_before = int(self._next_to_act) if self._next_to_act is not None else None
+        # Allow callers to pass pre-mutation actor; fallback to current for non-action emits
+        actor_before_override = data.pop("_actor_before", None)
+        # Determine actor_after from explicit next_actor or current state
+        if "next_actor" in data and isinstance(data["next_actor"], int):
+            actor_after: Optional[int] = int(data["next_actor"])
+        else:
+            actor_after = (
+                int(self._next_to_act) if self._next_to_act is not None else None
+            )
+        # Prefer override for actor_before
+        if actor_before_override is not None:
+            actor_before: Optional[int] = int(actor_before_override)
+        else:
+            actor_before = (
+                int(self._next_to_act) if self._next_to_act is not None else None
+            )
 
         # Build current state for hashing and delta
         current_state = {
             "street": self._street,
             "price": int(self._current_price),
             "pot": int(self._pot_total),
-            "to_act": actor_before,
+            # POST-action actor for correct deltas
+            "to_act": actor_after,
             "committed": self._committed[:],
         }
 
@@ -380,7 +400,7 @@ class PokerKitAdapter:
             self._street,
             int(self._current_price),
             int(self._pot_total),
-            actor_before,
+            actor_after,  # hash should reflect post-mutation actor
             tuple(self._committed),
         )
         state_hash = hashlib.sha256(str(state_hash_input).encode("utf-8")).hexdigest()[
@@ -404,20 +424,12 @@ class PokerKitAdapter:
                     "to": current_state["committed"],
                 }
 
-        # Derive actor_after safely (avoid mypy complaints)
-        if "next_actor" in data:
-            next_val = data.get("next_actor")
-            actor_after: Optional[int] = next_val if isinstance(next_val, int) else None
-        else:
-            actor_after = (
-                int(self._next_to_act) if self._next_to_act is not None else None
-            )
-
         # Invariants (use prev_state!)
         pot_non_decreasing = True
         to_call_consistent = True
         actor_valid = True
         last_action_consistent = True
+        no_check_carryover = True
         try:
             # Pot monotonicity: ensure running pot hasn't dropped within the hand
             if prev_state is not None:
@@ -448,6 +460,18 @@ class PokerKitAdapter:
                     last_action_consistent = False
                 if lat == "call" and cast(int, getattr(self, "_to_call_next", 0)) != 0:
                     last_action_consistent = False
+
+            # New invariant: when street changes, we must NOT carry a 'check'
+            # from the prior street as last_action. (Prevents single-check skip.)
+            if prev_state is not None:
+                prev_street = prev_state.get("street")
+                if isinstance(prev_street, str) and prev_street != self._street:
+                    la2 = self._last_action
+                    if (
+                        isinstance(la2, _LastAction)
+                        and getattr(la2, "type", None) == "check"
+                    ):
+                        no_check_carryover = False
         except Exception:
             # Never crash the emitter; invariants are advisory
             pass
@@ -474,6 +498,7 @@ class PokerKitAdapter:
                 "to_call_consistent": to_call_consistent,
                 "actor_valid": actor_valid,
                 "last_action_consistent": last_action_consistent,
+                "no_check_carryover": no_check_carryover,
             },
         }
         self._debug_events.append(evt)
@@ -626,6 +651,7 @@ class PokerKitAdapter:
         start_time = time.perf_counter()
         action_l = (action or "").lower().strip()
         to_call = int(self._to_call_next)
+        actor_before = self._next_to_act
         # ----- Fold -----
         if action_l == "fold":
             # Opponent wins the pot immediately; end hand
@@ -640,6 +666,7 @@ class PokerKitAdapter:
                 action="fold",
                 next_actor=self._next_to_act,
                 latency_ms=latency_ms,
+                _actor_before=actor_before,
             )
             # pot_total already reflects committed
             return
@@ -672,7 +699,8 @@ class PokerKitAdapter:
                     else:
                         self._next_to_act = None
                         self._to_call_next = 0
-                    self._last_action = _LastAction(seat=seat, type="check")
+                    # Do NOT carry a 'check' into the new street; start clean.
+                    self._last_action = None
                     latency_ms = int((time.perf_counter() - start_time) * 1000)
                     # Debug event
                     self._emit_event(
@@ -681,6 +709,7 @@ class PokerKitAdapter:
                         action="check",
                         next_actor=self._next_to_act,
                         latency_ms=latency_ms,
+                        _actor_before=actor_before,
                     )
                     return
             # --- Postflop/general: two consecutive checks close the round ---
@@ -700,6 +729,7 @@ class PokerKitAdapter:
                     action="check",
                     next_actor=self._next_to_act,
                     latency_ms=latency_ms,
+                    _actor_before=actor_before,
                 )
                 return
             # Otherwise, rotate to the opponent
@@ -721,6 +751,7 @@ class PokerKitAdapter:
                 action="check",
                 next_actor=self._next_to_act,
                 latency_ms=latency_ms,
+                _actor_before=actor_before,
             )
             return
         # ----- Call -----
@@ -733,11 +764,16 @@ class PokerKitAdapter:
             self._committed[seat] = self._current_price
             self._recalc_pot_total()
             self._last_action = _LastAction(seat=seat, type="call", committed=to_call)
-            # HU preflop special-case: SB call does NOT close the round; BB still acts.
-            if self.seats == 2 and self._street == "preflop" and seat == self.sb_seat:
+            # HU preflop special-case: only when SB is just calling the blind (no raises yet)
+            if (
+                self.seats == 2
+                and self._street == "preflop"
+                and seat == self.sb_seat
+                and self._raises_this_round == 0
+                and self._current_price == self.bb  # still at blind price
+            ):
                 self._rotate_to(self.bb_seat)
                 latency_ms = int((time.perf_counter() - start_time) * 1000)
-                # Debug event
                 self._emit_event(
                     "action",
                     seat=seat,
@@ -745,8 +781,10 @@ class PokerKitAdapter:
                     to_call=to_call,
                     next_actor=self._next_to_act,
                     latency_ms=latency_ms,
+                    _actor_before=actor_before,
                 )
                 return
+
             # Otherwise, a call closes the betting round in HU.
             self._close_round_after_call()
             latency_ms = int((time.perf_counter() - start_time) * 1000)
@@ -758,6 +796,7 @@ class PokerKitAdapter:
                 to_call=to_call,
                 next_actor=self._next_to_act,
                 latency_ms=latency_ms,
+                _actor_before=actor_before,
             )
             return
         # ----- Bet/Raise -----
@@ -823,6 +862,7 @@ class PokerKitAdapter:
                 bucket=snap["bucket_label"],
                 next_actor=self._next_to_act,
                 latency_ms=latency_ms,
+                _actor_before=actor_before,
             )
             return
         raise ValueError(f"unknown action: {action}")

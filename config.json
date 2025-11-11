@@ -1,0 +1,10 @@
+﻿{
+    "ENGINE_DEBUG_HTTP":  "1",
+    "ENGINE_DEBUG_RING_MAX":  "300",
+    "DEBUG_SAMPLING":  "1",
+    "BOT_TRACE":  "0",
+    "DEBUG_EXPORT_SANITIZE":  "true",
+    "ALLOW_DEV_AUTO":  "1",
+    "LOG_LEVEL":  "INFO",
+    "ring_buffer_size":  300
+}

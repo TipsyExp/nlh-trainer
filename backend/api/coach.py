@@ -9,6 +9,12 @@ from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from backend.adapters.engines import get_adapter
+from backend.api.session import get_session_state
+from backend.api.hand import (
+    _auto_advance_bots,
+    _to_public_state,
+)
 from backend.adapters.solver.texassolver_adapter import (
     TexasSolverAdapter,
     SolveRequest,
@@ -23,6 +29,14 @@ router = APIRouter(tags=["coach"])
 def _coach_enabled() -> bool:
     val = os.environ.get("COACH_ENABLED", "false").strip().lower()
     return val in {"1", "true", "yes", "on"}
+
+
+def _current_hand_id_str() -> str:
+    """Return current adapter hand id in 'H#' form; raise if none."""
+    h = getattr(get_adapter(), "hand_id", None)
+    if not h:
+        raise RuntimeError("no hand in progress")
+    return f"H{h}" if isinstance(h, int) else str(h)
 
 
 # -------------------------
@@ -172,3 +186,48 @@ def post_test_solve(req: SolveRequestModel = Body(...)) -> JSONResponse:
 
     except Exception:
         return JSONResponse({"meta": {"status": "error"}}, status_code=500)
+
+
+# ------------------------------------------
+# POST /api/coach/ensure_progress (production)
+# ------------------------------------------
+@router.post("/coach/ensure_progress")
+def post_ensure_progress() -> JSONResponse:
+    """
+    Production-safe bot trigger: if it's a bot's turn, advance bots until it's
+    the human's turn (or hand ends). Returns the updated state plus the list of
+    bot actions taken. If it's already the human's turn, no-ops and returns
+    the current state with an empty list.
+    """
+    adapter = get_adapter()
+    ss = get_session_state()
+    human_seat = ss.human_seat
+
+    # Resolve current hand id (error if none)
+    try:
+        hand_id = _current_hand_id_str()
+    except RuntimeError:
+        return JSONResponse(
+            {
+                "ok": False,
+                "bots_applied": [],
+                "state": {},
+                "meta": {"status": "no_hand"},
+            },
+            status_code=400,
+        )
+
+    # If it's a bot to act, advance; otherwise just return state
+    actor = adapter.next_actor()
+    bots: List[Dict[str, Any]] = []
+    if actor and int(actor.get("seat", -1)) != int(human_seat):
+        try:
+            bots = _auto_advance_bots(hand_id, human_seat)
+        except RuntimeError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    # Return current snapshot (post-bot if any advanced)
+    state = _to_public_state(human_seat)
+    return JSONResponse(
+        {"ok": True, "bots_applied": bots, "state": state}, status_code=200
+    )

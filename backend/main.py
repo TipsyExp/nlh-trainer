@@ -25,10 +25,12 @@ import os
 import uuid
 from typing import IO, Optional, Union
 from os import PathLike
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.background import BackgroundTask, BackgroundTasks
 
 # Optional env loader (no-op if python-dotenv isn't installed)
 try:
@@ -80,11 +82,21 @@ DEBUG_HTTP_ENABLED = os.environ.get("ENGINE_DEBUG_HTTP", "false").strip().lower(
 # Keeping a note for visibility:
 DEFAULT_BOT_MODE = os.environ.get("BOT_MODE", "heuristic").strip().lower()
 
+
+# -------- Lifespan (replaces deprecated @on_event startup) --------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Touch the logger to ensure schema migrations/creation have run.
+    get_logger()
+    yield
+
+
 # Create app
 app = FastAPI(
     title="NLH Trainer API",
     version="0.1.0",
     description="Backend API for the NLH training simulator.",
+    lifespan=lifespan,
 )
 
 # CORS for local frontend dev
@@ -107,38 +119,53 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
     """Attach a unique request ID to each incoming HTTP request.
 
     The request ID is passed down into the engine adapter for correlation of
-    emitted debug events.  Clients may also provide an X-Request-ID header to
-    override the auto-generated ID.  The ID is cleared after the request
-    finishes.  The response will include the X-Request-ID header.
+    emitted debug events. Clients may also provide an X-Request-ID header to
+    override the auto-generated ID. The ID is cleared *after* the response is
+    sent, via a BackgroundTask, so events emitted during response streaming
+    remain correlated. The response will echo the X-Request-ID header.
     """
 
     async def dispatch(self, request: Request, call_next):  # type: ignore[override]
-        # Use provided header or generate a new UUID4.
         req_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+
+        # Stash on request (useful for handlers/background tasks)
+        setattr(request.state, "request_id", req_id)
+
+        # Attach to engine adapter for event correlation
         adapter = get_adapter()
         if hasattr(adapter, "attach_request_id"):
             adapter.attach_request_id(req_id)
+
         try:
             response = await call_next(request)
-        finally:
-            # Clear request ID for subsequent requests
+        except Exception:
+            # Ensure cleanup on error paths too
             if hasattr(adapter, "attach_request_id"):
                 adapter.attach_request_id(None)
-        # Propagate the request ID back in the response headers
+            raise
+
+        # Echo request ID header
         response.headers["X-Request-ID"] = req_id
+
+        # Clear the adapter's request ID *after* response completes.
+        clear_task = BackgroundTask(adapter.attach_request_id, None)
+        existing_bg = getattr(response, "background", None)
+        if existing_bg is None:
+            response.background = clear_task
+        elif isinstance(existing_bg, BackgroundTask):
+            response.background = BackgroundTasks([existing_bg, clear_task])
+        elif isinstance(existing_bg, BackgroundTasks):
+            existing_bg.add_task(adapter.attach_request_id, None)
+        else:
+            # Fallback: if some other type, just replace to be safe.
+            response.background = clear_task
+
         return response
 
 
-# Register the middleware with the app.  It must come after CORS for the
+# Register the middleware with the app. It must come after CORS for the
 # middleware to see the request headers.
 app.add_middleware(RequestIDMiddleware)
-
-
-# -------- Startup hook (ensure DB schema exists early) --------
-@app.on_event("startup")
-def _init_db() -> None:
-    # Touch the logger to ensure schema migrations/creation have run.
-    get_logger()
 
 
 # -------- Health / Root --------
@@ -173,8 +200,6 @@ if DEBUG_HTTP_ENABLED:
 
 # -------- Optional dev-only helper: /api/hand/auto --------
 if ALLOW_DEV_AUTO:
-    # Import *privately* used helpers from the hand API (dev-only).
-    # This avoids duplicating action-loop/logging logic here.
     from backend.api import hand as hand_api  # type: ignore
 
     @app.post("/api/hand/auto", tags=["hand"])

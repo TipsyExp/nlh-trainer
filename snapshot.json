@@ -1,0 +1,63 @@
+﻿{
+    "debug_enabled":  true,
+    "table":  {
+                  "seats":  2,
+                  "sb":  50,
+                  "bb":  100,
+                  "ante":  0,
+                  "button":  0,
+                  "sb_seat":  0,
+                  "bb_seat":  1
+              },
+    "hand_id":  3,
+    "street":  "preflop",
+    "base_seed":  "T08",
+    "deck_seed":  "T08:3",
+    "board_all":  [
+
+                  ],
+    "players_holes":  [
+                          [
+                              "7d",
+                              "Qd"
+                          ],
+                          [
+                              "9s",
+                              "5s"
+                          ]
+                      ],
+    "committed":  [
+                      220,
+                      100
+                  ],
+    "current_price":  220,
+    "last_raise_size":  120,
+    "raises_this_round":  1,
+    "pot_total":  320,
+    "next_to_act":  1,
+    "to_call_next":  120,
+    "min_raise_total":  340,
+    "allowed_buckets_next":  [
+                                 "fold",
+                                 "call",
+                                 "2.5xR",
+                                 "3.0xR",
+                                 "jam"
+                             ],
+    "last_action":  {
+                        "seat":  0,
+                        "type":  "bet",
+                        "requested":  220,
+                        "committed":  220,
+                        "snapped":  false,
+                        "bucket_label":  "2.2x",
+                        "allowed_buckets":  [
+                                                "fold",
+                                                "call",
+                                                "2.2x",
+                                                "2.5x",
+                                                "3.0x",
+                                                "jam"
+                                            ]
+                    }
+}
