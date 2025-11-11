@@ -1,16 +1,5 @@
 {
-  "bots_applied": [
-    {
-      "action": "check",
-      "amount": null,
-      "seat": 1
-    },
-    {
-      "action": "check",
-      "amount": null,
-      "seat": 1
-    }
-  ],
+  "bots_applied": [],
   "ok": true,
   "state": {
     "allowed": {
@@ -25,11 +14,7 @@
       "to_call": 0
     },
     "board": {
-      "flop": [
-        "8s",
-        "8h",
-        "Qc"
-      ],
+      "flop": [],
       "river": [],
       "turn": []
     },
@@ -37,11 +22,11 @@
     "last_action": {
       "allowed_buckets": null,
       "bucket_label": null,
-      "committed": null,
+      "committed": 50,
       "requested": null,
-      "seat": 1,
+      "seat": 0,
       "snapped": null,
-      "type": "check"
+      "type": "call"
     },
     "players": [
       {
@@ -60,7 +45,7 @@
       }
     ],
     "pot_total": 200,
-    "street": "flop",
+    "street": "preflop",
     "table": {
       "ante": 0,
       "bb": 100,
@@ -70,6 +55,6 @@
       "sb_seat": 0,
       "seats": 2
     },
-    "to_act": 0
+    "to_act": 1
   }
 }

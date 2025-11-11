@@ -14,32 +14,6 @@
           "snapped": null,
           "street": "preflop",
           "to_call_after": 0
-        },
-        {
-          "action": "check",
-          "actor_seat": 1,
-          "amount": null,
-          "bucket": null,
-          "engine": "PokerKit",
-          "evaluator": "PokerKit",
-          "idx": 1,
-          "pot_after": 200,
-          "snapped": null,
-          "street": "flop",
-          "to_call_after": 0
-        },
-        {
-          "action": "check",
-          "actor_seat": 1,
-          "amount": null,
-          "bucket": null,
-          "engine": "PokerKit",
-          "evaluator": "PokerKit",
-          "idx": 2,
-          "pot_after": 200,
-          "snapped": null,
-          "street": "flop",
-          "to_call_after": 0
         }
       ],
       "hand_id": "H1",
@@ -55,28 +29,6 @@
             "street": "preflop",
             "to_call_after": 0,
             "type": "call"
-          },
-          {
-            "actor_seat": 1,
-            "amount": null,
-            "bucket": null,
-            "idx": 1,
-            "pot_after": 200,
-            "snapped": null,
-            "street": "flop",
-            "to_call_after": 0,
-            "type": "check"
-          },
-          {
-            "actor_seat": 1,
-            "amount": null,
-            "bucket": null,
-            "idx": 2,
-            "pot_after": 200,
-            "snapped": null,
-            "street": "flop",
-            "to_call_after": 0,
-            "type": "check"
           }
         ],
         "bb_seat": 1,
@@ -100,7 +52,7 @@
           }
         ],
         "sb_seat": 0,
-        "street": "flop",
+        "street": "preflop",
         "table": {
           "ante": 0,
           "bb": 100,
