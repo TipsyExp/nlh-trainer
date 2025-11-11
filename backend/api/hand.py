@@ -52,7 +52,13 @@ HAND_AUTO_ENABLED = os.environ.get("HAND_AUTO_ENABLED", "false").strip().lower()
     "yes",
     "on",
 }
-
+# Dev-only: trigger bot step automatically after human action if it's a bot to act
+ALLOW_DEV_AUTO = os.environ.get("ALLOW_DEV_AUTO", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 # ---------- Per-hand indexing ----------
 
 # Maintain a mapping from hand_id to the next action index. This allows
@@ -681,27 +687,25 @@ def post_action(req: ActionRequest) -> ActionResponse:
     # Persist snapshot immediately after human action
     _persist_snapshot(hand_id)
 
-    # Snapshot to return in bet/raise case (pre-bot view for snapping visibility)
-    human_pre_bot_state = _to_public_state(human_seat)
-
-    # For bet/raise: return pre-bot snapshot so snapping details are visible.
-    action_l = (req.action or "").lower().strip()
-    if action_l in ("bet", "raise"):
-        return ActionResponse(ok=True, bots_applied=[], state=human_pre_bot_state)
-
-    # Auto-advance bots and return post-bot snapshot (e.g., HU SB-call -> BB-check -> flop).
+    # Dev auto-play: if enabled and it's a bot to act, run bot step(s) now.
     bots: List[Dict[str, Any]] = []
-    if getattr(ss, "bot_mode", "heuristic") != "none":
+    actor_now = adapter.next_actor()
+    should_auto = (
+        ALLOW_DEV_AUTO
+        and getattr(ss, "bot_mode", "heuristic") != "none"
+        and actor_now
+        and int(actor_now.get("seat", -1)) != int(human_seat)
+    )
+    if should_auto:
         try:
             bots = _auto_advance_bots(hand_id, human_seat)
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
+        # Persist snapshot after bot auto-advance as well
+        _persist_snapshot(hand_id)
 
-    # Persist snapshot after bot auto-advance as well
-    _persist_snapshot(hand_id)
-
-    post_bot_state = _to_public_state(human_seat)
-    return ActionResponse(ok=True, bots_applied=bots, state=post_bot_state)
+    state_out = _to_public_state(human_seat)
+    return ActionResponse(ok=True, bots_applied=bots, state=state_out)
 
 
 @router.post("/hand/auto", response_model=ActionResponse)
