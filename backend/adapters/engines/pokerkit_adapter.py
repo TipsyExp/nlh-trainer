@@ -818,7 +818,11 @@ class PokerKitAdapter:
             # If there's nothing to call, some clients send a pure "bet size" (e.g., 220)
             # instead of a TOTAL commitment. If the provided amount doesn't exceed the
             # current total, treat it as a size and convert to TOTAL.
-            if to_call == 0 and amount is not None and amount <= int(self._current_price):
+            if (
+                to_call == 0
+                and amount is not None
+                and amount <= int(self._current_price)
+            ):
                 amount = int(self._current_price) + int(amount)
             snap = self._snap_to_bucket(
                 requested_total=amount, to_call=to_call, actor_seat=seat
