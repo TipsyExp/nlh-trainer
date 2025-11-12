@@ -1,4 +1,5 @@
 // frontend/components/CoachPanel.tsx
+
 import { useEffect, useMemo, useState } from "react";
 import { Api } from "../lib/api";
 
@@ -24,6 +25,15 @@ type DebugEvent = {
   body: any;
 };
 
+/**
+ * CoachPanel fetches and displays postflop advice for the current decision.
+ *
+ * When enabled, it calls the backend for advice at a given handId and
+ * decision index. The panel gracefully handles scenarios where advice is
+ * unavailable, unsupported, timed out, or explicitly disabled by the
+ * backend (HTTP 501). In the disabled case the panel shows a
+ * "Disabled" badge rather than treating the response as an error.
+ */
 export function CoachPanel({
   enabled,
   handId,
@@ -52,6 +62,11 @@ export function CoachPanel({
 
   const [events, setEvents] = useState<DebugEvent[]>([]);
 
+  // Track whether the coach endpoint is explicitly disabled (HTTP 501). When
+  // this is true the UI shows a Disabled badge. The flag is reset when
+  // subsequent requests succeed or when advice is fetched successfully.
+  const [isDisabled, setIsDisabled] = useState<boolean>(false);
+
   const isPostflop = useMemo(() => {
     if (!street) return true; // backwards-compat: if parent doesn't pass street, don't gate
     const s = String(street).toLowerCase();
@@ -68,6 +83,7 @@ export function CoachPanel({
       if (!canFetch) {
         setAdvice(null);
         setError(null);
+        setIsDisabled(false);
         return;
       }
       setLoading(true);
@@ -75,7 +91,6 @@ export function CoachPanel({
 
       // Prefer raw variant so we can show status/body in debug
       const raw = await Api.getCoachAdviceRaw(String(handId), Number(idx));
-
       if (abort) return;
 
       if (debugOn) {
@@ -96,9 +111,18 @@ export function CoachPanel({
       }
 
       try {
-        if (raw.ok && raw.body?.meta?.status === "ok") {
+        // If the backend reports the coach advice endpoint as disabled (HTTP 501),
+        // treat this as a disabled state rather than an error. Do not set advice
+        // or error; instead set the disabled flag so the UI shows the
+        // appropriate badge.
+        if (raw.disabled) {
+          setAdvice(null);
+          setError(null);
+          setIsDisabled(true);
+        } else if (raw.ok && raw.body?.meta?.status === "ok") {
           setAdvice(raw.body as AdviceResponse);
           setError(null);
+          setIsDisabled(false);
         } else {
           const msg =
             raw.body?.meta?.status ||
@@ -106,6 +130,7 @@ export function CoachPanel({
             (typeof raw.body === "string" ? raw.body : "unavailable");
           setAdvice(null);
           setError(String(msg));
+          setIsDisabled(false);
         }
       } finally {
         setLoading(false);
@@ -119,8 +144,26 @@ export function CoachPanel({
     // re-fetch when any of these change
   }, [canFetch, enabled, handId, idx, debugOn]);
 
-  const status =
-    advice?.meta?.status ?? (error ? "error" : enabled ? "ok" : "disabled");
+  // Derive the current status for the coach. If the endpoint is disabled,
+  // override whatever meta status might be present. Otherwise fall back
+  // to the advice meta status, error state, or enabled flag.
+  const status = isDisabled
+    ? "disabled"
+    : advice?.meta?.status ?? (error ? "error" : enabled ? "ok" : "disabled");
+
+  // --- PRE-FLOP BADGE OVERRIDE (minor polish) ---
+  // If we're preflop *and* the feature is enabled, show a neutral
+  // "n/a preflop" badge instead of "On".
+  type BadgeStatus =
+    | "ok"
+    | "disabled"
+    | "unsupported"
+    | "timeout"
+    | "error"
+    | "na_preflop";
+  const badgeStatus: BadgeStatus =
+    enabled && !isPostflop ? "na_preflop" : (status as BadgeStatus);
+  // ----------------------------------------------
 
   const sortedStrategy = useMemo(() => {
     const s = advice?.strategy || {};
@@ -136,13 +179,15 @@ export function CoachPanel({
   );
 
   const badgeEl =
-    status === "ok" ? (
+    badgeStatus === "ok" ? (
       <Badge text="On" color="bg-green-100 text-green-800" />
-    ) : status === "disabled" ? (
+    ) : badgeStatus === "na_preflop" ? (
+      <Badge text="n/a preflop" color="bg-gray-100 text-gray-700" />
+    ) : badgeStatus === "disabled" ? (
       <Badge text="Disabled" color="bg-gray-100 text-gray-700" />
-    ) : status === "unsupported" ? (
+    ) : badgeStatus === "unsupported" ? (
       <Badge text="Unsupported" color="bg-yellow-100 text-yellow-800" />
-    ) : status === "timeout" ? (
+    ) : badgeStatus === "timeout" ? (
       <Badge text="Timeout" color="bg-orange-100 text-orange-800" />
     ) : (
       <Badge text="Unavailable" color="bg-red-100 text-red-800" />
@@ -265,9 +310,7 @@ export function CoachPanel({
                       className="text-gray-700 underline"
                       onClick={() => {
                         const payload = JSON.stringify(lastEvent, null, 2);
-                        navigator.clipboard
-                          ?.writeText(payload)
-                          .catch(() => {});
+                        navigator.clipboard?.writeText(payload).catch(() => {});
                       }}
                     >
                       Copy last
@@ -301,3 +344,5 @@ export function CoachPanel({
     </div>
   );
 }
+
+export default CoachPanel;
