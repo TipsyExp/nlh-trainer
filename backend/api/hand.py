@@ -7,11 +7,22 @@ incorporates per-decision logging via the shared SQLite logger. Each
 action taken by the human or bots is recorded in the ``actions`` table
 with an incrementing index. A snapshot ``GameState`` is upserted into
 the ``hands`` table after every action so that exports work mid-hand.
+
+This patched version consolidates configuration by importing all
+runtime flags from ``backend.config``. In particular:
+
+* ``HAND_AUTO_ENABLED`` controls both exposure of the ``POST /api/hand/auto``
+  endpoint and whether bots automatically advance after a human action.
+* ``BOT_MAX_STEPS`` and ``BOT_TIME_BUDGET_MS`` define autoplay limits and
+  decision timeouts respectively.
+* ``BOT_PROFILE`` selects the bot policy (CALLCHECK or TAG).
+
+The previous ``ALLOW_DEV_AUTO`` flag has been removed – any auto‑advance
+behaviour is now governed solely by ``HAND_AUTO_ENABLED``.
 """
 
 from __future__ import annotations
 
-import os
 import logging
 import concurrent.futures
 from datetime import datetime, timezone
@@ -36,29 +47,20 @@ from backend.models import (
     ActionType,
 )
 
+# Pull configuration from a single source of truth.  These imports expose
+# parsed environment variables as constants.  See backend/config.py for details.
+from backend.config import (
+    HAND_AUTO_ENABLED,
+    BOT_MAX_STEPS,
+    BOT_TIME_BUDGET_MS,
+    BOT_PROFILE,
+)
+
 # NOTE: no prefix here; app/main.py includes this router with prefix="/api".
 router = APIRouter(tags=["hand"])
 
 log = logging.getLogger(__name__)
 
-# ---------- Tunables / Env ----------
-
-MAX_BOT_STEPS = int(os.environ.get("BOT_MAX_STEPS", "100"))
-BOT_TIME_BUDGET_MS = int(os.environ.get("BOT_TIME_BUDGET_MS", "150"))
-# Backend gate for /hand/auto (default OFF in prod)
-HAND_AUTO_ENABLED = os.environ.get("HAND_AUTO_ENABLED", "false").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
-# Dev-only: trigger bot step automatically after human action if it's a bot to act
-ALLOW_DEV_AUTO = os.environ.get("ALLOW_DEV_AUTO", "false").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
 # ---------- Per-hand indexing ----------
 
 # Maintain a mapping from hand_id to the next action index. This allows
@@ -84,8 +86,8 @@ def _get_next_db_idx(hand_id: str) -> int:
 
 
 def _select_bot_policy() -> BaseBotPolicy:
-    """Select a bot policy based on environment. Default remains CALL/CHECK."""
-    name = os.environ.get("BOT_PROFILE", "CALLCHECK").strip().upper()
+    """Select a bot policy based on configuration. Default remains CALL/CHECK."""
+    name = BOT_PROFILE.strip().upper()
     if name == "TAG":
         return TagBot()
     # default
@@ -438,7 +440,7 @@ def _auto_advance_bots(hand_id: str, human_seat: int) -> List[Dict[str, Any]]:
     policy = _select_bot_policy()
 
     hit_cap = True  # assume worst; set False when we break normally
-    for step_idx in range(MAX_BOT_STEPS):
+    for step_idx in range(BOT_MAX_STEPS):
         actor = adapter.next_actor()
         if not actor or int(actor["seat"]) == human_seat:
             hit_cap = False
@@ -462,7 +464,7 @@ def _auto_advance_bots(hand_id: str, human_seat: int) -> List[Dict[str, Any]]:
         # Guard fired; surface loudly and make diagnoseable
         msg = (
             f"auto-advance bot loop cap exceeded "
-            f"(max={MAX_BOT_STEPS}, hand_id={hand_id})"
+            f"(max={BOT_MAX_STEPS}, hand_id={hand_id})"
         )
         log.error(msg)
         raise RuntimeError(msg)
@@ -609,8 +611,9 @@ def start_hand() -> StartHandResponse:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"start_hand failed: {e}") from e
 
-    # Reset index for this hand
-    _ACTION_IDX[hand_id] = 0
+    # Reset index for this hand (normalize key to string to avoid int vs str collisions)
+    hid = _hand_id_str(hand_id)
+    _ACTION_IDX[hid] = 0
     # Also ensure DB-derived next idx starts at 0 by not relying on previous hand rows
 
     # Ensure a parent hand row exists *before* any actions are logged
@@ -621,7 +624,7 @@ def start_hand() -> StartHandResponse:
     human_seat = ss.human_seat
     if getattr(ss, "bot_mode", "heuristic") != "none":
         try:
-            _auto_advance_bots(hand_id, human_seat)
+            _auto_advance_bots(hid, human_seat)
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -687,11 +690,14 @@ def post_action(req: ActionRequest) -> ActionResponse:
     # Persist snapshot immediately after human action
     _persist_snapshot(hand_id)
 
-    # Dev auto-play: if enabled and it's a bot to act, run bot step(s) now.
+    # Build the PRE-BOT snapshot to return (so last_action reflects the human's move)
+    state_pre = _to_public_state(human_seat)
+
+    # Auto-play: only auto-advance bots when HAND_AUTO_ENABLED is true and a bot is next.
     bots: List[Dict[str, Any]] = []
     actor_now = adapter.next_actor()
     should_auto = (
-        ALLOW_DEV_AUTO
+        HAND_AUTO_ENABLED
         and getattr(ss, "bot_mode", "heuristic") != "none"
         and actor_now
         and int(actor_now.get("seat", -1)) != int(human_seat)
@@ -701,11 +707,11 @@ def post_action(req: ActionRequest) -> ActionResponse:
             bots = _auto_advance_bots(hand_id, human_seat)
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
-        # Persist snapshot after bot auto-advance as well
+        # Persist snapshot after bot auto-advance as well (so exports/next GET see bot state)
         _persist_snapshot(hand_id)
 
-    state_out = _to_public_state(human_seat)
-    return ActionResponse(ok=True, bots_applied=bots, state=state_out)
+    # Return the pre-bot snapshot (human's action), plus any bots_applied for UI awareness.
+    return ActionResponse(ok=True, bots_applied=bots, state=state_pre)
 
 
 @router.post("/hand/auto", response_model=ActionResponse)
