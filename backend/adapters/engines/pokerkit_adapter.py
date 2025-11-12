@@ -213,12 +213,20 @@ class PokerKitAdapter:
         sb_open_pf = self._is_true_sb_open_pf(actor_seat)
 
         if to_call == 0 or sb_open_pf:
-            # Opening/stab sizes (open raise or postflop bet)
+            # Opening/stab sizes:
+            # - Preflop true SB open uses ABSOLUTE totals (e.g., 220, 250, 300).
+            # - Postflop (or any new betting round with to_call == 0) uses TOTAL commitments
+            #   relative to the current_price (e.g., current_price + 220).
             for mult in (2.2, 2.5, 3.0):
-                target = int(round(mult * self.bb))
-                buckets.append(
-                    {"label": f"{mult:.1f}x", "target": max(target, self.bb)}
-                )
+                size = int(round(mult * self.bb))
+                if sb_open_pf:
+                    # Absolute total for the open (preflop SB)
+                    target = max(size, self.bb)
+                else:
+                    # Postflop/opening stab: total commitment = current_price + size
+                    target = int(self._current_price + size)
+                buckets.append({"label": f"{mult:.1f}x", "target": target})
+
         else:
             # Facing a bet/raise -> raise sizes (suffix 'R'), TOTAL commitment
             base = max(self._last_raise_size or 0, self.bb)
@@ -807,6 +815,11 @@ class PokerKitAdapter:
                 )
             # Detect true SB open (normalize verb to 'bet' even though to_call>0 due to blinds)
             is_sb_open_pf = self._is_true_sb_open_pf(seat)
+            # If there's nothing to call, some clients send a pure "bet size" (e.g., 220)
+            # instead of a TOTAL commitment. If the provided amount doesn't exceed the
+            # current total, treat it as a size and convert to TOTAL.
+            if to_call == 0 and amount is not None and amount <= int(self._current_price):
+                amount = int(self._current_price) + int(amount)
             snap = self._snap_to_bucket(
                 requested_total=amount, to_call=to_call, actor_seat=seat
             )
