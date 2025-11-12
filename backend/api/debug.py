@@ -1,9 +1,10 @@
+# backend/api/debug.py
 """
 Development-only debug endpoints for the NLH engine.
 
 These routes expose rich event and state information when ENGINE_DEBUG_HTTP is
-enabled.  They are not intended for production and should be gated behind
-configuration flags.  The endpoints provide:
+enabled. They are not intended for production and should be gated behind
+configuration flags. The endpoints provide:
 
 * `/events` – engine events with extended metadata such as timestamps, request
   IDs and invariant flags.
@@ -27,6 +28,11 @@ from fastapi.responses import Response
 
 from backend.adapters.engines import get_adapter
 
+# Import configuration flags.  ENGINE_DEBUG_HTTP determines whether these endpoints
+# are included by backend/main.py.  HAND_AUTO_ENABLED is exposed in /config for
+# visibility.
+from backend.config import ENGINE_DEBUG_HTTP, HAND_AUTO_ENABLED
+from backend.api.session import get_session_state
 
 # This router gets mounted in main.py with prefix="/api"
 # Final paths: /api/debug/engine/events, /api/debug/engine/snapshot, etc.
@@ -57,7 +63,10 @@ def engine_events(
     if hand_id is not None:
         events = [e for e in events if int(e.get("hand_id", 0)) == int(hand_id)]
     if street is not None:
-        events = [e for e in events if str(e.get("street")) == street]
+        # Normalize both sides to lower case for robust matching (e.g., "Flop" vs "flop").
+        events = [
+            e for e in events if str(e.get("street", "")).lower() == street.lower()
+        ]
     return events
 
 
@@ -97,8 +106,8 @@ def engine_snapshot() -> Dict[str, Any]:
         # Keep optional fields None/[] if any internal detail differs
         pass
     return {
-        "debug_enabled": os.getenv("ENGINE_DEBUG_HTTP", "0").lower()
-        in ("1", "true", "yes", "on"),
+        # Mirror the effective debug flag from configuration instead of re-parsing the environment.
+        "debug_enabled": ENGINE_DEBUG_HTTP,
         "table": {
             "seats": a.seats,
             "sb": a.sb,
@@ -156,13 +165,23 @@ def engine_diff(
             status_code=404, detail="events not found for given seq range"
         )
     # Compute diff between two event snapshots.  Only fields of interest are compared.
-    fields = ["street", "actor_after", "pot", "price", "to_act", "board", "committed"]
+    # Only compare keys that exist in both events to avoid polluting the diff with None values.
+    candidate_keys = {
+        "street",
+        "actor_after",
+        "pot",
+        "price",
+        "to_act",
+        "board",
+        "committed",
+    }
     diff: Dict[str, Any] = {}
-    for key in fields:
-        v1 = ev_from.get(key)
-        v2 = ev_to.get(key)
-        if v1 != v2:
-            diff[key] = {"from": v1, "to": v2}
+    for key in candidate_keys:
+        if key in ev_from and key in ev_to:
+            v1 = ev_from.get(key)
+            v2 = ev_to.get(key)
+            if v1 != v2:
+                diff[key] = {"from": v1, "to": v2}
     return {
         "from_seq": from_seq,
         "to_seq": to_seq,
@@ -177,12 +196,13 @@ def engine_config() -> Dict[str, Any]:
     ring = getattr(adapter, "_debug_events", None)
     ring_maxlen = getattr(ring, "maxlen", None) if ring is not None else None
     return {
-        "ENGINE_DEBUG_HTTP": os.getenv("ENGINE_DEBUG_HTTP", "false"),
+        # Surface the key debug and auto-play flags as seen by the running process.
+        "ENGINE_DEBUG_HTTP": str(ENGINE_DEBUG_HTTP).lower(),
+        "HAND_AUTO_ENABLED": str(HAND_AUTO_ENABLED).lower(),
         "ENGINE_DEBUG_RING_MAX": os.getenv("ENGINE_DEBUG_RING_MAX", "300"),
         "DEBUG_SAMPLING": os.getenv("DEBUG_SAMPLING", "1"),
         "BOT_TRACE": os.getenv("BOT_TRACE", "0"),
         "DEBUG_EXPORT_SANITIZE": os.getenv("DEBUG_EXPORT_SANITIZE", "true"),
-        "ALLOW_DEV_AUTO": os.getenv("ALLOW_DEV_AUTO", "false"),
         "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
         "ring_buffer_size": ring_maxlen,
     }
@@ -202,9 +222,13 @@ def export_bundle(
     Optionally, sanitizes sensitive data such as hole cards and request bodies.
     """
     adapter = get_adapter()
-    events = []
+    events: List[Dict[str, Any]] = []
     try:
-        events = adapter._get_events_since(0, limit=0)  # type: ignore[misc]
+        # Determine how many events to fetch.  A limit of 0 yields no events on many adapters.
+        ring = getattr(adapter, "_debug_events", None)
+        # If the ring exists, use its length; otherwise fall back to a generous default (1000).
+        limit = len(ring) if ring is not None else 1000
+        events = adapter._get_events_since(0, limit=limit)  # type: ignore[misc]
     except Exception:
         pass
     snapshot = engine_snapshot()
@@ -213,15 +237,20 @@ def export_bundle(
         "base_seed": getattr(adapter, "base_seed", None),
         "deck_seed": getattr(adapter, "_deck_seed", None),
     }
-    # Sanitize player hole cards by masking non-humans (seats other than 0) unless showdown
+    # Sanitize player hole cards by masking non-humans (all seats except the human) unless showdown
     if sanitize and "players_holes" in snapshot:
         ph = snapshot["players_holes"]
         street = snapshot.get("street")
-        # If not at showdown, mask all seat hole cards except seat 0 for reproducibility
+        # Determine the human seat from the session so we don't expose the hero's cards
+        try:
+            human_seat = get_session_state().human_seat
+        except Exception:
+            human_seat = 0
+        # If not at showdown, mask all seat hole cards except the human seat for reproducibility
         if street != "showdown":
-            masked = []
+            masked: List[List[str]] = []
             for idx, cards in enumerate(ph):
-                if idx == 0:
+                if idx == human_seat:
                     masked.append(cards)
                 else:
                     masked.append(["XX", "XX"])

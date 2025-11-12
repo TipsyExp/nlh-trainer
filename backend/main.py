@@ -1,57 +1,37 @@
+# backend/main.py
 """FastAPI application entry point for the NLH trainer backend.
 
 Constructs a FastAPI app, configures CORS for local development, and
 registers routers for session management, hand interaction, and data
 export. Root and health endpoints provide simple liveness probes.
 
-Note: Optional bot profile selection is env-gated (BOT_PROFILE).
-`backend/api/hand.py` reads BOT_PROFILE directly, and this file loads
-.env on startup for convenience.
+Notes:
 
-Coach API:
-- Router is always registered under /api, but the endpoint itself returns 501
-  unless COACH_ENABLED=true (see backend/api/coach.py).
-
-Dev helpers:
-- If ALLOW_DEV_AUTO=true (or 1/yes), we expose POST /api/hand/auto which
-  advances all bot actions up to the next human decision or end-of-hand.
-- If ENGINE_DEBUG_HTTP=true (or 1/yes/on), we include /api/debug endpoints for
-  engine event logs / inspection (see backend/api/debug.py).
+* Runtime flags are parsed once in ``backend.config`` and imported here.
+  ``HAND_AUTO_ENABLED`` controls both exposure of the dev ``POST /api/hand/auto``
+  endpoint and auto-stepping of bots after a human action. ``ENGINE_DEBUG_HTTP``
+  gates the debug endpoints under ``/api/debug``. ``DEFAULT_BOT_MODE`` reflects
+  the default bot mode as declared in the environment.
+* This file no longer re-parses ``ALLOW_DEV_AUTO`` or ``ENGINE_DEBUG_HTTP``.
+  The old dev helper route has been removed in favour of relying on the
+  ``/api/hand/auto`` route defined in ``backend/api/hand.py`` when auto play is enabled.
 """
 
 from __future__ import annotations
 
-import os
 import uuid
-from typing import IO, Optional, Union
-from os import PathLike
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.background import BackgroundTask, BackgroundTasks
+from starlette.middleware.base import BaseHTTPMiddleware
 
-# Optional env loader (no-op if python-dotenv isn't installed)
-try:
-    from dotenv import load_dotenv as _load_dotenv  # type: ignore[no-redef]
-except ImportError:
-    # Match the real signature exactly so mypy is satisfied
-    def load_dotenv(
-        dotenv_path: Optional[Union[str, PathLike[str]]] = None,
-        stream: Optional[IO[str]] = None,
-        verbose: bool = False,
-        override: bool = False,
-        interpolate: bool = True,
-        encoding: Optional[str] = None,
-    ) -> bool:
-        return False
-
-else:
-    # Use the real function when available
-    load_dotenv = _load_dotenv
-
-# First-party imports (also kept above any executable statements)
+from backend.config import (
+    HAND_AUTO_ENABLED,
+    ENGINE_DEBUG_HTTP,
+    BOT_MODE as DEFAULT_BOT_MODE,
+)
 from backend.logger import get_logger  # ensure DB init on startup
 from backend.adapters.engines import get_adapter
 from backend.api.session import router as session_router
@@ -60,27 +40,6 @@ from backend.api.export import router as export_router
 from backend.api.coach import router as coach_router  # coach scaffold (501 by default)
 from backend.api.review import router as review_router
 from backend.api.debug import router as debug_router  # conditionally included below
-
-
-# Load environment variables (development convenience; harmless if empty)
-load_dotenv()
-
-# Read optional flags
-ALLOW_DEV_AUTO = os.environ.get("ALLOW_DEV_AUTO", "false").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-DEBUG_HTTP_ENABLED = os.environ.get("ENGINE_DEBUG_HTTP", "false").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-# BOT_MODE is read by /api/session creation; we just ensure .env is loaded.
-# Keeping a note for visibility:
-DEFAULT_BOT_MODE = os.environ.get("BOT_MODE", "heuristic").strip().lower()
 
 
 # -------- Lifespan (replaces deprecated @on_event startup) --------
@@ -175,8 +134,10 @@ def root() -> dict:
         "ok": True,
         "message": "NLH Trainer backend is up",
         "bot_mode_default": DEFAULT_BOT_MODE,
-        "allow_dev_auto": ALLOW_DEV_AUTO,
-        "engine_debug_http": DEBUG_HTTP_ENABLED,
+        # Expose runtime flags for diagnostics.  The hand auto flag controls both
+        # exposure of POST /api/hand/auto and auto-play after human actions.
+        "hand_auto_enabled": HAND_AUTO_ENABLED,
+        "engine_debug_http": ENGINE_DEBUG_HTTP,
     }
 
 
@@ -194,29 +155,8 @@ app.include_router(coach_router, prefix="/api")
 app.include_router(review_router, prefix="/api")
 
 # Optional: debug endpoints for engine event logs (dev-only)
-if DEBUG_HTTP_ENABLED:
+if ENGINE_DEBUG_HTTP:
     app.include_router(debug_router, prefix="/api")
 
-
-# -------- Optional dev-only helper: /api/hand/auto --------
-if ALLOW_DEV_AUTO:
-    from backend.api import hand as hand_api  # type: ignore
-
-    @app.post("/api/hand/auto", tags=["hand"])
-    def hand_auto() -> dict:
-        """
-        Advance bot actions until it's the human's turn or the hand ends.
-        Returns final state (same shape as GET /api/hand/state.state) and a
-        list of bot actions that were applied in this call.
-        """
-        adapter = get_adapter()
-        hand_id_any = getattr(adapter, "hand_id", None)
-        if not hand_id_any:
-            raise HTTPException(status_code=400, detail="no hand in progress")
-        hand_id = hand_api._hand_id_str(hand_id_any)  # dev-only, private helper
-        ss = hand_api.get_session_state()
-        bots_applied = hand_api._auto_advance_bots(hand_id, ss.human_seat)
-        # Persist a snapshot after advancing
-        hand_api._persist_snapshot(hand_id)
-        state = hand_api._to_public_state(ss.human_seat)
-        return {"ok": True, "bots_applied": bots_applied, "state": state}
+# The POST /api/hand/auto route is always provided by backend/api/hand.py.  It
+# returns a 501 when HAND_AUTO_ENABLED is false.  No additional dev helper is registered here.
