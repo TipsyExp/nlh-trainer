@@ -1,23 +1,45 @@
-// frontend/lib/types/hand.ts
+// Updated HandState and related types for the NLH Trainer frontend.
+// This file mirrors the original types from the repository but clarifies
+// that the frontend should rely on server-provided fields for turn,
+// allowed actions, pot totals, and last-action details. It also adds
+// a typed shape for the last action with an optional committed amount.
 
-export type ActionKind = "fold" | "check" | "call" | "bet" | "raise" | "jam";
+// Define the possible actions a player can take.
+export type ActionKind =
+  | "fold"
+  | "check"
+  | "call"
+  | "bet"
+  | "raise"
+  | "jam";
 
+/**
+ * A single allowed action entry. The backend may return a list of these
+ * instead of simple bucket strings. For bet/raise/jam actions the
+ * `amount` field may indicate the total chip count required.
+ */
 export type AllowedAction = {
   type: ActionKind;
-  amount?: number; // required for bet/raise/jam in some engines
+  amount?: number;
 };
 
+/**
+ * The context for a player's turn describing call amount, minimum raise,
+ * and the set of allowed buckets. The UI should use this to decide
+ * which buttons to render. The backend may also return a richer
+ * `actions` array; if present, prefer it for constructing action
+ * requests.
+ */
 export type AllowedContext = {
   to_call: number;
   min_raise: number;
-  allowed_buckets: string[]; // e.g. ["call","2.2x","2.5x","3.0x","jam"]
-  /** Optional richer list of typed actions if backend ever provides it */
+  allowed_buckets: string[];
   actions?: AllowedAction[];
 };
 
 export type PlayerPublic = {
   seat: number;
-  hole_cards: [string, string] | string[]; // human: real; bots: ["XX","XX"]
+  hole_cards: [string, string] | string[];
 };
 
 export type TableShape = {
@@ -30,22 +52,49 @@ export type TableShape = {
   bb_seat: number;
 };
 
+/**
+ * A typed representation of the most recent action in the hand. The
+ * backend may include the seat, action kind, and an amount. When a
+ * player calls, the `committed` field contains the total chips put in
+ * by that call; for a bet/raise/jam the amount may reflect the new
+ * total bet. Extra keys from the backend are allowed to ensure
+ * forwards‑compatibility.
+ */
+export interface LastAction {
+  seat: number;
+  action: ActionKind | string;
+  committed?: number;
+  amount?: number;
+  [key: string]: any;
+}
+
 export type HandState = {
   table: TableShape;
   players: PlayerPublic[];
-  street: string; // "preflop" | "flop" | "turn" | "river" | "showdown"
+  street: string;
   deck_seed?: string | null;
-  last_action?: any;
-
-  // New/important:
-  pot_total?: number; // stable, cumulative pot (never resets per street)
-  to_act?: number | null; // seat index whose turn it is
+  /** The last action that occurred in this hand. */
+  last_action?: LastAction;
+  /**
+   * Stable, cumulative pot size. Always use this field rather than
+   * calculating pot from bets.
+   */
+  pot_total?: number;
+  /**
+   * The seat index whose turn it currently is. If null, no one can act
+   * (for example, the hand may be finished or waiting on bots).
+   */
+  to_act?: number | null;
+  /**
+   * The allowed actions for the current actor. The frontend should use
+   * this to determine which UI elements to enable.
+   */
   allowed?: AllowedContext;
-
-  /** Optional legacy alias some UIs used before `allowed` existed */
+  /**
+   * Legacy alias used by older UIs. Prefer `allowed`. Included for
+   * backwards compatibility.
+   */
   allowed_actions?: AllowedAction[];
-
-  // Keep room for any engine-specific extras
   [key: string]: any;
 };
 
@@ -58,14 +107,14 @@ export type Actor = {
 
 export type StateResponse = {
   state: HandState;
-  actor?: Actor | null; // kept for backwards-compat; prefer state.to_act + state.allowed
+  actor?: Actor | null;
   hand_id?: string;
   idx?: number;
 };
 
 export type ActionResponse = {
   ok: boolean;
-  bots_applied: Array<Record<string, any>>;
+  bots_applied: Array<{ seat: number; action: string; amount?: number }>;
   state: HandState;
   hand_id?: string;
   idx?: number;

@@ -1,10 +1,16 @@
 // frontend/pages/table.tsx
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Api, type AllowedContext, type HandState, type Actor } from "../lib/api";
-import { CoachPanel } from "../components/CoachPanel";
 
-const COACH_TOGGLE_KEY = "coachEnabled";
-const HUMAN_SEAT_KEY = "humanSeat";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Api } from "../lib/api";
+import type {
+  AllowedContext,
+  HandState,
+  Actor,
+  AllowedAction,
+} from "../lib/types/hand";
+import { CoachPanel } from "../components/CoachPanel";
+import { WaitingOverlay } from "../components/WaitingOverlay";
+import { BoardRow as CommunityBoardRow } from "../components/common/Cards";
 
 // Gate dev-only /api/hand/auto. Default is false unless explicitly enabled.
 const AUTO_HAND_ENABLED = ["1", "true", "yes", "on"].includes(
@@ -23,6 +29,9 @@ export default function TablePage() {
   const [err, setErr] = useState<string | null>(null);
   const [botsAdvancing, setBotsAdvancing] = useState(false);
 
+  const COACH_TOGGLE_KEY = "coachEnabled";
+  const HUMAN_SEAT_KEY = "humanSeat";
+
   const [coachEnabled, setCoachEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     const raw = localStorage.getItem(COACH_TOGGLE_KEY);
@@ -37,12 +46,14 @@ export default function TablePage() {
   const [handId, setHandId] = useState<string | null>(null);
 
   const humanSeat =
-    typeof window !== "undefined" ? parseInt(localStorage.getItem(HUMAN_SEAT_KEY) || "0", 10) : 0;
+    typeof window !== "undefined"
+      ? parseInt(localStorage.getItem(HUMAN_SEAT_KEY) || "0", 10)
+      : 0;
 
   const bb = useMemo(() => state?.table?.bb ?? 100, [state]);
 
   const pot = useMemo(
-    () => (state?.pot_total ?? (state as any)?.pot_after ?? (state as any)?.pot ?? 0),
+    () => state?.pot_total ?? (state as any)?.pot_after ?? (state as any)?.pot ?? 0,
     [state]
   );
 
@@ -70,7 +81,11 @@ export default function TablePage() {
       const r = await Api.getState();
       setState(r.state);
       setActor(r.actor ?? null);
-      const sid = (r as any)?.hand_id ?? r?.state?.hand_id ?? r?.state?.handId ?? null;
+      const sid =
+        (r as any)?.hand_id ??
+        r?.state?.hand_id ??
+        (r as any)?.state?.handId ??
+        null;
       if (sid) setHandId(String(sid));
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -99,29 +114,32 @@ export default function TablePage() {
 
   async function pollUntilSettled(humanSeat: number) {
     // Poll GET /api/hand/state until it's our turn or the hand is over.
-    // We show "Bots thinking…" only while this loop is actively waiting.
-    let safety = 64;
+    // Switch to a time-based cap to handle slower solves gracefully.
+    const start = Date.now();
+    const maxWaitMs = 30_000; // 30s cap
     let bannerSet = false;
 
     try {
-      while (safety-- > 0) {
+      while (Date.now() - start < maxWaitMs) {
         const snap = await Api.getState();
         setState(snap.state);
         setActor(snap.actor ?? null);
 
-        const sid = (snap as any)?.hand_id ?? snap?.state?.hand_id ?? snap?.state?.handId ?? null;
+        const sid =
+          (snap as any)?.hand_id ??
+          snap?.state?.hand_id ??
+          (snap as any)?.state?.handId ??
+          null;
         if (sid) setHandId(String(sid));
 
         const nextSeat = snap?.state?.to_act ?? snap?.actor?.seat ?? null;
         const finished = snap?.state?.street === "showdown";
         const heroTurn = nextSeat === humanSeat;
 
-        // Turn on the banner only if we actually need to wait
         if (!finished && !heroTurn && !bannerSet) {
           setBotsAdvancing(true);
           bannerSet = true;
         }
-
         if (finished || heroTurn) break;
 
         if (AUTO_HAND_ENABLED) {
@@ -135,10 +153,9 @@ export default function TablePage() {
           }
         }
 
-        await sleep(100);
+        await sleep(150);
       }
     } finally {
-      // Clear the banner when done waiting
       setBotsAdvancing(false);
     }
   }
@@ -151,9 +168,7 @@ export default function TablePage() {
       const res = await Api.postAction({ seat: humanSeat, action, amount });
       setState(res.state);
 
-      // Always follow up by polling until it's our turn or the hand is over,
-      // regardless of whether dev auto is enabled. This covers the post-raise
-      // path where the server returns a pre-bot snapshot.
+      // Always follow up by polling until it's our turn or the hand is over.
       await pollUntilSettled(humanSeat);
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -169,8 +184,18 @@ export default function TablePage() {
     const mult = parseFloat(m[1]);
     return Math.round(mult * bb);
   }
+
+  // Prefer typed jam amount when provided by backend; fallback to sentinel
+  const typedActions: AllowedAction[] = state?.allowed?.actions ?? [];
+  const jamTotal = useMemo(
+    () =>
+      typedActions.find(
+        (a) => a.type === "jam" && typeof a.amount === "number"
+      )?.amount,
+    [typedActions]
+  );
   function jamAmount(): number {
-    return 1_000_000_000;
+    return typeof jamTotal === "number" ? jamTotal : 1_000_000_000;
   }
 
   // Dynamic verb for any sized action
@@ -186,7 +211,11 @@ export default function TablePage() {
       : null;
 
   const coachShouldShow =
-    coachEnabled && canAct && state && state.street !== "preflop" && decisionIdx !== null;
+    coachEnabled &&
+    canAct &&
+    state &&
+    state.street !== "preflop" &&
+    decisionIdx !== null;
 
   // Dev util: copy raw state
   const copyState = async () => {
@@ -198,15 +227,30 @@ export default function TablePage() {
     }
   };
 
-  // Board extraction
-  const flop = state?.board?.flop ?? [];
-  const turn = state?.board?.turn ?? [];
-  const river = state?.board?.river ?? [];
-  const turnOnly = turn.length >= 4 ? [turn[3]] : [];
-  const riverOnly = river.length >= 5 ? [river[4]] : [];
+  // Board extraction using structured board; show latest single turn/river card
+  const flop: string[] = state?.board?.flop ?? [];
+  const turnArr: string[] = state?.board?.turn ?? [];
+  const riverArr: string[] = state?.board?.river ?? [];
+  const turnCard: string | null =
+    turnArr.length > 0 ? turnArr[turnArr.length - 1] : null;
+  const riverCard: string | null =
+    riverArr.length > 0 ? riverArr[riverArr.length - 1] : null;
+
+  // Allowed buckets helpers. Only show actions explicitly provided by the server,
+  // with a tiny defensive fallback for Fold when a call is required.
+  const allowedBuckets = allowedCtx?.allowed_buckets ?? [];
+  const showCheck = allowedBuckets.includes("check");
+  const showCall = allowedBuckets.includes("call");
+  // Defensive: if server omitted "fold" but to_call > 0, still show Fold.
+  const foldListed = allowedBuckets.includes("fold");
+  const showFold = foldListed || (!foldListed && (allowedCtx?.to_call ?? 0) > 0);
+  const sizedLabels = allowedBuckets.filter((b) => /^\d+(?:\.\d+)?x$/.test(b));
+  const showJam = allowedBuckets.includes("jam");
 
   return (
-    <main className="min-h-screen p-6 bg-gray-50">
+    <main className="min-h-screen p-6 bg-gray-50 relative">
+      {/* Overlay shown when waiting for bots to act (prod mode). */}
+      <WaitingOverlay show={botsAdvancing} message="Waiting for opponents…" />
       <div className="max-w-5xl mx-auto grid gap-6">
         <header className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">NLH Trainer — Table</h1>
@@ -302,11 +346,13 @@ export default function TablePage() {
             {/* Board (full-width) */}
             <div className="rounded-2xl bg-white shadow p-4 space-y-2 md:col-span-3">
               <h2 className="font-semibold">Board</h2>
-              <div className="space-y-2">
-                <BoardRow label="Flop" cards={flop} />
-                <BoardRow label="Turn" cards={turnOnly} />
-                <BoardRow label="River" cards={riverOnly} />
+
+              {/* [BOARD-LEGEND] — adds a tiny legend above the shared board row */}
+              <div className="space-y-1">
+                <div className="text-xs text-gray-500">Flop / Turn / River</div>
+                <CommunityBoardRow flop={flop} turn={turnCard} river={riverCard} />
               </div>
+              {/* [/BOARD-LEGEND] */}
             </div>
           </div>
         )}
@@ -318,13 +364,24 @@ export default function TablePage() {
             <div className="text-sm text-gray-700">
               <div>To call: {allowedCtx.to_call}</div>
               <div className="text-xs text-gray-500">
-                Allowed: {allowedCtx.allowed_buckets.join(", ")}
+                Allowed: {allowedBuckets.join(", ")}
               </div>
             </div>
 
             <div className="flex flex-wrap gap-2">
-              {/* If to_call == 0, "check" is legal */}
-              {allowedCtx.to_call === 0 && (
+              {/* Fold */}
+              {showFold && (
+                <button
+                  onClick={() => postAction("fold")}
+                  className="rounded-xl border px-3 py-2"
+                  disabled={loading}
+                >
+                  Fold
+                </button>
+              )}
+
+              {/* Check */}
+              {showCheck && (
                 <button
                   onClick={() => postAction("check")}
                   className="rounded-xl border px-3 py-2"
@@ -334,8 +391,8 @@ export default function TablePage() {
                 </button>
               )}
 
-              {/* If to_call > 0, "call" is legal */}
-              {allowedCtx.to_call > 0 && allowedCtx.allowed_buckets.includes("call") && (
+              {/* Call */}
+              {showCall && (
                 <button
                   onClick={() => postAction("call")}
                   className="rounded-xl border px-3 py-2"
@@ -345,26 +402,24 @@ export default function TablePage() {
                 </button>
               )}
 
-              {/* Quick open/raise sizes (use dynamic verb) */}
-              {allowedCtx.allowed_buckets
-                .filter((b) => /^\d+(\.\d+)?x$/.test(b))
-                .map((label) => {
-                  const amt = amountForOpenLabel(label);
-                  return (
-                    <button
-                      key={label}
-                      onClick={() => postAction(currentSizedVerb, amt)}
-                      className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50"
-                      disabled={loading}
-                      title={`Total ${amt}`}
-                    >
-                      {sizedLabel} {label}
-                    </button>
-                  );
-                })}
+              {/* Quick open/raise sizes (use dynamic verb, from bucket labels) */}
+              {sizedLabels.map((label) => {
+                const amt = amountForOpenLabel(label);
+                return (
+                  <button
+                    key={label}
+                    onClick={() => postAction(currentSizedVerb, amt)}
+                    className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50"
+                    disabled={loading}
+                    title={`Total ${amt}`}
+                  >
+                    {sizedLabel} {label}
+                  </button>
+                );
+              })}
 
-              {/* Jam (use dynamic verb) */}
-              {allowedCtx.allowed_buckets.includes("jam") && (
+              {/* Jam (use dynamic verb) — prefer typed amount when available */}
+              {showJam && (
                 <button
                   onClick={() => postAction(currentSizedVerb, jamAmount())}
                   className="rounded-xl bg-red-600 text-white px-3 py-2 disabled:opacity-50"
@@ -385,7 +440,14 @@ export default function TablePage() {
         )}
 
         {/* Coach Panel (postflop, human turn only) */}
-        {coachShouldShow && <CoachPanel enabled={true} handId={handId} idx={decisionIdx} />}
+        {coachShouldShow && (
+          <CoachPanel
+            enabled={true}
+            handId={handId}
+            idx={decisionIdx}
+            street={state?.street}
+          />
+        )}
 
         {/* Last action panel */}
         {state?.last_action && (
@@ -437,39 +499,5 @@ function CustomSized({
         {verb === "bet" ? "Bet" : "Raise"} (custom)
       </button>
     </form>
-  );
-}
-
-function BoardRow({ label, cards }: { label: string; cards: string[] }) {
-  return (
-    <div className="flex items-center gap-3">
-      <div className="w-14 text-xs text-gray-500">{label}</div>
-      <div className="flex items-center gap-2">
-        {cards.length === 0 ? (
-          <span className="text-xs text-gray-400">—</span>
-        ) : (
-          cards.map((c, idx) => <Card key={label + c + idx} code={c} />)
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Card({ code }: { code: string }) {
-  const pretty = code?.toUpperCase?.() ?? "";
-  const isHidden = pretty === "XX";
-  const suit = pretty.slice(-1);
-  const color =
-    suit === "H" || suit === "D" ? "text-red-600" : suit === "S" || suit === "C" ? "text-gray-800" : "text-gray-800";
-
-  return (
-    <span
-      className={`inline-flex items-center justify-center rounded-lg px-2 py-1 text-xs font-medium border bg-white shadow-sm ${
-        isHidden ? "border-gray-200 text-gray-400" : `border-gray-300 ${color}`
-      }`}
-      title={pretty}
-    >
-      {pretty}
-    </span>
   );
 }
