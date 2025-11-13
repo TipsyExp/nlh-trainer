@@ -1,90 +1,44 @@
 # Bot Policy
 
-The NLH Trainer ships with a deterministic bot system used for automated opponent
-actions in tests and examples. The default behavior remains **check/call only** for
-stability, and an optional **TAG** profile can be enabled via an environment
-variable for a slightly richer, still deterministic flow.
+Bot policies determine how automated opponents act when it's their turn.  A policy is a callable that receives a decision context and returns an action with an optional total commit amount.
 
----
+## Decision context
 
-## Profiles
+Before each bot action, the engine builds a context object containing the information necessary to make a decision.  The following example illustrates its shape:
 
-| Profile       | Enabled by                      | Preflop                         | Postflop                                                   | Notes |
-| ---           | ---                             | ---                             | ---                                                        | --- |
-| `CALLCHECK`   | Default (no env needed)         | Check if `to_call == 0`, else call | Check if `to_call == 0`, else call                         | Never folds/raises. Used for docs/examples and baseline tests. |
-| `TAG` (opt-in)| `BOT_PROFILE=TAG`               | Uses `range_manager` to pick fold/call/**raise bucket** | IP + first action on street + `to_call == 0` → **stab** with the **smallest simple Nx** bucket (e.g. `2.2x`); otherwise **check/call** | Deterministic via seeded RNG. Never raises postflop in this thin slice. |
+```json
+{
+  "seat": 0,
+  "street": "flop",
+  "bb": 100,
+  "to_call": 0,
+  "min_raise": 320,
+  "allowed_buckets": ["check", "2.2x", "2.5x", "3.0x", "jam"],
+  "in_position": false,
+  "first_action_this_street": true,
+  "button": 1,
+  "sb_seat": 1,
+  "bb_seat": 0
+}
+```
 
-> Determinism: bot decisions are driven by a seeded RNG constructed from
-> `[base_seed, session_id, hand_id, decision_idx, bot_seat, "bot"]`. With the same
-> path and seed, the bot produces identical actions across runs.
+Policies must choose an action from the allowed buckets.  They should return an object of the form:
 
----
+```json
+{
+  "action": "bet",
+  "amount": 320
+}
+```
 
-## Decision Details
+* `action` – one of `"fold"`, `"check"`, `"call"`, `"bet"`, or `"raise"`.  When `to_call` is zero the policy should use `"bet"` rather than `"raise"`.
+* `amount` – the **total** commitment target when betting or raising. Policies should aim for the legal buckets implied by `allowed_buckets`. If the requested total is off-bucket, the engine will **snap** to the nearest legal total.
 
-### Default `CALLCHECK`
-- **If `to_call == 0`** → `check`
-- **Else** → `call`
-- Applies **preflop and postflop**.
-- Used by default to keep existing docs/examples stable.
+## Profiles and timeouts
 
-### `TAG` (thin slice)
+Policies may implement different strategic profiles.  Two built‑in profiles are:
 
-**Preflop**
-- Uses the `range_manager` to obtain a structured choice:
-{"action": "fold"|"call"|"raise", "bucket": "2.2x"|"2.5x"|..., "freq": float}
+* `TAG` – tight‑aggressive: builds a range and chooses between calling, raising or folding based on hand strength.
+* `CALLCHECK` – always checks or calls; never bets or raises.
 
-- If `action == "raise"` and the suggested bucket is **not** present in `allowed_buckets`,
-snap **down** to the nearest allowed simple `Nx` size (down on ties).  
-If nothing legal remains, **fall back to call**.
-- Raise amounts are computed from bucket labels:
-- For simple `Nx`: `amount = round(N * bb)` (total commitment).
-- Missing charts fall back safely (prefer `call` over inventing raises).
-
-**Postflop**
-- If **in position (IP)**, **first action on the street**, and **`to_call == 0`**:
-- **Bet (stab)** using the **smallest simple `Nx`** bucket in `allowed_buckets`
-  (e.g., `2.2x`). *(Today the engine exposes `Nx`/`NxR` buckets, not %pot labels
-  like `33`. When %pot labels appear, the policy can be updated to prefer those.)*
-- Otherwise:
-- **If facing a bet** → `call`
-- **Else** → `check`
-- No raises/folds postflop in this slice.
-
----
-
-## Enabling the `TAG` Profile
-
-**bash/zsh**
-```bash
-export BOT_PROFILE=TAG
-uvicorn backend.main:app --reload
-
-PowerShell
-$env:BOT_PROFILE = "TAG"
-uvicorn backend.main:app --reload
-
-With BOT_PROFILE unset, the default CALLCHECK profile is used.
-Logging & Exports
-
-Each action (human or bot) is logged with:
-
-idx (per-hand decision index), street, actor_seat, type, amount
-
-bucket (as emitted by the engine), snapped (if engine auto-adjusts),
-
-to_call_after, pot_after, and rng_seed (for replay/debugging).
-
-Snapshots are upserted into hands after every action, so JSON/CSV exports
-reflect mid-hand state.
-
-Notes & Gotchas
-
-Never invent labels. Bots only emit bucket labels that appear in the current
-allowed_buckets.
-
-Determinism: Avoid global random.* calls. All bot randomness must come
-from the seeded RNG passed into the policy.
-
-Docs/examples stability: The default profile remains CALLCHECK, so existing
-example outputs don’t change.
+The environment variables `BOT_TIME_BUDGET_MS` and `BOT_MAX_STEPS` control how long and how deep bot decisions may run.  Policies must honour these limits and return a safe fallback action when they expire.
