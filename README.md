@@ -1,59 +1,177 @@
-# NLH Training Simulator (M0)
 
-This repository contains the initial scaffolding for a no‑limit hold'em
-training simulator.  The goal of milestone **M0** is to deliver a
-playable poker engine and user interface without any solver
-integration.  To that end the project includes a FastAPI backend, a
-Next.js frontend, a set of documentation files describing the
-requirements, and a Makefile to ease development and distribution.
+NLH Trainer
+A no-limit hold’em training simulator with a FastAPI backend and a Next.js frontend.
+Current focus: Milestone M0/M1 – a fully playable engine and UI (no solver), clear API semantics, deterministic examples, and tight CI.
+________________________________________
+Features
+•	FastAPI backend with clean HTTP API
+•	Next.js frontend (Tailwind) with modern UI
+•	Total-amount bet sizing (not deltas) with bucket snapping
+•	Pre-bot snapshot in action responses + bots_applied list
+•	Auto-advance gating via HAND_AUTO_ENABLED (returns 501 when disabled)
+•	Structured debug events (SSE) + export bundles (hand/session/events)
+•	Deterministic docs examples regeneration with drift-check in CI
+See the docs in /docs for details (API contract, state schema, bet trees, configuration, debugging, QA, etc.).
+________________________________________
+Prerequisites
+•	Python ≥ 3.12
+•	Node.js ≥ 20 (LTS recommended), npm ≥ 10
+________________________________________
+Quick Start
+1) Backend setup
+python -m venv .venv
+# macOS/Linux
+source .venv/bin/activate
+# Windows PowerShell
+# .\.venv\Scripts\Activate.ps1
 
-## Getting Started
+pip install -r backend/requirements.txt
 
-1. Create a Python virtual environment and install backend dependencies:
+Start it:
+# via Makefile (recommended)
+make api  # FastAPI on http://127.0.0.1:8000
 
-   ```bash
-   python -m venv .venv && source .venv/bin/activate
-   pip install -r backend/requirements.txt
-   ```
+# or directly
+uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 
-2. Install Node dependencies for the frontend:
+2) Frontend setup
+cd frontend
+npm install
 
-   ```bash
-   cd frontend && npm install
-   ```
+Start it:
+# via Makefile from repo root
+make web  # Next.js on http://127.0.0.1:3000
 
-3. Start the backend and frontend in separate terminals:
+# or directly
+npm run dev
 
-   ```bash
-   make api  # starts FastAPI on port 8000
-   make web  # starts Next.js on port 3000
-   ```
+Visit http://localhost:3000
 
-4. Navigate to `http://localhost:3000` to view the placeholder UI.
+Configuration
+Backend behavior is driven by environment variables. Common ones:
+Variable	Purpose	Typical dev
+HAND_AUTO_ENABLED	Enables /api/hand/auto and auto-advancing after actions. If false, /api/hand/auto returns 501.	true
+BOT_MODE	"heuristic" to enable built-in bot, "none" to disable.	heuristic
+BOT_PROFILE	Policy name (e.g. TAG, CALLCHECK).	TAG
+BOT_MAX_STEPS	Caps auto-advance loop steps.	100
+BOT_TIME_BUDGET_MS	Time budget per bot decision.	1000
+ENGINE_DEBUG_HTTP	Expose debug endpoints/SSE.	true (dev)
+LOG_DB_PATH	Path to SQLite log DB.	.data/dev.sqlite
 
-## Project Layout
+Example .env (backend):
+ENGINE_DEBUG_HTTP=true
+BOT_MODE=heuristic
+BOT_PROFILE=TAG
+BOT_MAX_STEPS=100
+BOT_TIME_BUDGET_MS=1000
+HAND_AUTO_ENABLED=true
 
-- **backend** – FastAPI application exposing API endpoints.  In M0 it
-  includes only a health check; future milestones will implement
-  session and hand control.
-- **frontend** – Next.js application with two pages: a table stub and a
-  settings placeholder.  Tailwind CSS is used for styling.
-- **data** – Location for SQLite databases and exported histories.  A
-  `.gitkeep` file keeps the directory tracked.
-- **adapters** – Thin wrappers around third‑party engines and
-  evaluators.  The `pokerkit_adapter.py` module currently contains a
-  stub implementation.
-- **docs** – Authoritative specification documents provided as
-  attachments.  These files define the scope and requirements for the
-  project.
-- **third_party** – Empty placeholder for future third‑party assets.
-- **Makefile** – Convenience targets to run the backend, frontend,
-  tests and build a distribution zip.
-- **.github/workflows** – CI configuration that runs linting, type
-  checking, tests and produces a slim zip artifact.
+Frontend env (Next.js) in frontend/.env.local:
+NEXT_PUBLIC_API_BASE=http://127.0.0.1:8000
+NEXT_PUBLIC_ENABLE_HAND_AUTO=true
+NEXT_PUBLIC_DEV_TOOLS=true
 
-## Roadmap
+Older variables like ALLOW_DEV_AUTO / MAX_BOT_STEPS are deprecated. Use the ones above.
 
-The full list of tasks for milestone M0 can be found in
-`docs/TASKS-M0.md`.  Development proceeds ticket by ticket, with one
-pull request per task, as described in the documentation.
+API Quickstart
+All amounts for bet/raise are totals (final commitment), not deltas. Off-tree totals are snapped to nearest legal bucket; responses indicate snapped.
+Create a session:
+curl -sS -X POST http://127.0.0.1:8000/api/session \
+  -H "Content-Type: application/json" \
+  -d '{"seats":2,"sb":50,"bb":100,"ante":0,"stacks":[10000,10000],"bot_mode":"heuristic","bot_profile":"TAG"}'
+
+Start a hand:
+curl -sS -X POST http://127.0.0.1:8000/api/hand/start
+
+Get state:
+curl -sS http://127.0.0.1:8000/api/hand/state
+
+Act (example: open for total 320 = “2.2x” class):
+curl -sS -X POST http://127.0.0.1:8000/api/hand/action \
+  -H "Content-Type: application/json" \
+  -H "X-Request-ID: demo-123" \
+  -d '{"seat":0,"action":"bet","amount":320}'
+
+Auto-advance bots (if gated on):
+curl -sS -X POST http://127.0.0.1:8000/api/hand/auto
+
+Exports:
+•	GET /api/export/hand/{hand_id}.json|.csv
+•	GET /api/export/session/{session_id}.json|.csv
+Debugging (when ENGINE_DEBUG_HTTP=true):
+•	GET /api/debug/engine/events (SSE). Filter: ?street=flop
+•	GET /api/debug/engine/bundle (ZIP with events/hand/session)
+Tip: include an X-Request-ID header in API calls to correlate with debug events.
+
+Buckets & Sizing
+•	Labels like 2.2x, 2.5xR are sizing classes, not always a literal multiplier × bb.
+•	When to_call = 0 (including SB HUP open): ["2.2x","2.5x","3.0x","jam"]
+•	When facing a bet/raise: ["2.5xR","3.0xR","jam"]
+•	Minimum raise total: current_price + max(bb, last_raise_size) → sub-min raises return 400 with a descriptive error.
+•	It’s fine to submit any total; engine snaps to nearest legal bucket and reports last_action.snapped.
+See /docs/BET-TREES.md and /docs/API-CONTRACT.md.
+________________________________________
+Deterministic Docs Examples & CI “Drift”
+The docs examples in docs/examples/* are generated by:
+python docs/scripts/capture_examples.py
+
+This script:
+•	Resets the docs SQLite DB so session_id starts at 1
+•	Normalizes line endings to LF
+•	Strips volatile fields (created_at, time_ms, rng_seed, meta)
+•	Plays a deterministic first human action (check/call)
+CI runs Docs Examples Drift to ensure committed examples match a fresh run.
+If the job fails, regenerate locally with the script and commit the updated files.
+________________________________________
+Development
+Quality gates:
+# Ruff + Black + Mypy + Pytest
+ruff check .
+black .
+mypy backend
+pytest -q
+
+Frontend checks:
+cd frontend
+npm run lint
+npm run typecheck
+
+Common troubleshooting:
+•	Port conflicts: change --port for uvicorn or PORT for Next.js
+•	CORS: ensure NEXT_PUBLIC_API_BASE points to your backend host:port
+•	SQLite locks: stop other processes or change LOG_DB_PATH
+________________________________________
+Project Layout
+.
+├── backend/                     # FastAPI application & adapters
+├── frontend/                    # Next.js app (Tailwind)
+├── docs/                        # API, schema, bet trees, configuration, debugging, QA
+│   ├── examples/                # Canonical example payloads (generated)
+│   └── scripts/capture_examples.py
+├── .github/workflows/           # CI (lint, tests, packaging, docs drift)
+├── .data/                       # Local SQLite (ignored by Git)
+├── Makefile                     # make api / make web / etc.
+└── README.md
+
+Key docs:
+•	API-CONTRACT.md – endpoints, errors, gating, pre-bot snapshots
+•	STATE-SCHEMA.md – full state, allowed, last_action
+•	BET-TREES.md – sizing classes, min-raise, snapping
+•	CONFIGURATION.md – env vars and recommended dev setup
+•	debugging.md – SSE, invariants, exports
+•	QA-CHECKLIST.md – what CI and reviewers verify
+•	BOT-POLICY.md – policy input/outputs and profiles
+________________________________________
+Roadmap
+•	M0: playable engine + UI, clean API, docs, CI ✅
+•	M1: expanded policies, UX iteration, export/reporting polish
+(See docs/TASKS-M0.md and docs/TASKS-M1.md)
+________________________________________
+Contributing
+•	Use feature branches and focused PRs (one task per PR)
+•	Ensure CI is green, including Docs Examples Drift
+•	Follow QA-CHECKLIST.md before requesting review
+________________________________________
+License
+See LICENSING-NOTES.md for third-party licenses and usage notes.
+
