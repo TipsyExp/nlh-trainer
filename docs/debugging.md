@@ -1,84 +1,71 @@
-# Debugging the NLH Trainer Engine
+# Debugging and Engine Events
 
-This document describes how to enable and use the backend debug tooling to
-inspect the internal state machine of the NLH trainer.  These capabilities
-are intended for developers and are **not** enabled in production.  All
-debug routes live under `/api/debug/engine` and are guarded behind the
-`ENGINE_DEBUG_HTTP` environment flag.
+The trainer backend can emit structured debug events to aid in understanding engine behaviour and diagnosing issues.  These events are accessible when the environment variable `ENGINE_DEBUG_HTTP` is set to `"true"`.
 
-## Enabling debug endpoints
+## Subscribing to events
 
-Set the `ENGINE_DEBUG_HTTP` environment variable to one of `1`, `true`,
-`yes` or `on` before starting the backend.  When enabled, the adapter
-emits a structured event for every state transition.  Each event includes:
-
-- `ts_ms` – monotonic wall‑clock timestamp (milliseconds).
-- `seq` – strictly increasing sequence number.
-- `hand_id` – current hand identifier.
-- `street` – current street (preflop/flop/turn/river/showdown).
-- `kind` – event type (start_hand, action, advance_street, etc.).
-- `pot` and `price` – total pot and current price to call.
-- `actor_before` / `actor_after` – seat index whose turn it was before
-  and after the event.
-- `state_hash` – short hash of key state fields (street, price, pot,
-  committed chips and actor).
-- `delta` – a diff of fields that changed since the previous event.
-- `req_id` – request ID attached by middleware (correlates to HTTP
-  requests).
-- `invariants` – boolean flags for common consistency checks (pot monotonicity,
-  to_call consistency, actor validity, last action semantics).
-- Optional latency metrics (`latency_ms`) when the event originates from
-  `apply_action`.
-
-## API reference
+Events are streamed via Server‑Sent Events (SSE) at the endpoint:
 
 ```
-GET /api/debug/engine/events?since={seq}&limit={n}&hand_id={hid}&street={street}
-  Return the most recent debug events filtered by sequence number, hand ID
-  or street.  The `since` parameter returns events with `seq > since`.
-
-GET /api/debug/engine/snapshot
-  Return the full internal engine state, including committed amounts,
-  current price, next actor and last action metadata.  This is useful
-  for verifying that the UI matches the backend truth.
-
-GET /api/debug/engine/diff?from_seq={a}&to_seq={b}
-  Compute a compact diff between two events.  Only fields that differ
-  between the two events are returned.
-
-GET /api/debug/engine/config
-  Inspect the effective debug configuration: environment toggles, ring
-  buffer size and sampling flags.
-
-POST /api/debug/engine/export?sanitize={true|false}
-  Export a ZIP bundle containing `events.json`, `snapshot.json`,
-  `config.json` and `seeds.json`.  Sanitization masks hole cards for
-  non‑human seats and removes request bodies.
+/api/debug/engine/events
 ```
 
-## Examples
+Clients may supply an `X-Request-ID` header on API calls.  This identifier will be echoed in any debug events triggered by that request, allowing correlation between client actions and engine transitions.
 
-The `docs/examples/debug` directory contains a few scripts to help you
-fetch and inspect debug data from the command line.
+### Event structure
 
-- **events-basic.sh / .ps1** – follow the debug event stream with `curl`.
-- **snapshot.sh / .ps1** – print the current engine snapshot as JSON.
+Each event is a JSON object with the following fields (core set):
 
-Below is a minimal example using `curl`:
+| Field | Description |
+|-------|-------------|
+| `ts_ms` | Millisecond timestamp of the event. |
+| `seq` | Monotonically increasing sequence number per backend process. |
+| `hand_id` | Identifier of the hand associated with the event. |
+| `street` | Current street (`"preflop"`, `"flop"`, `"turn"`, `"river"`, `"terminal"`). |
+| `kind` | Type of event (e.g., `"start_hand"`, `"action"`, `"advance_street"`, `"terminal"`). |
+| `pot` | Total pot size after the event. |
+| `price` | Current price to call. |
+| `to_act` | Seat index of the next actor.  May be `null` when the hand is over. |
+| `actor_before` | Seat index before the event. |
+| `actor_after` | Seat index after the event. |
+| `delta` | **Structured patch** of fields changed by the event (e.g., `price`, `pot`, `to_act`, `committed`, etc.). |
+| `invariants` | Object containing invariant checks such as `pot_non_decreasing`, `to_call_consistent`, `actor_valid`, `last_action_consistent`, and `no_check_carryover`.  Each invariant is `true` when satisfied. |
+| `req_id` | Echo of the client‑supplied `X-Request-ID` header, if present. |
 
-```bash
-#!/bin/bash
-# Fetch the last 50 events since sequence 0
-curl -s 'http://localhost:8000/api/debug/engine/events?since=0&limit=50' | jq .
+Additional optional fields may be present depending on the event type and build flags, including (but not limited to) `seat`, `action`, `bucket` (bucket label used), `latency_ms`, `next_actor`, and `state_hash`.
+
+#### Filtering events
+
+You can filter events by street using the `street` query parameter.  The comparison is case‑insensitive.  For example:
+
+```
+GET /api/debug/engine/events?street=flop
 ```
 
-On Windows PowerShell:
+returns only events on the flop.
 
-```powershell
-# Fetch a snapshot of the engine
-Invoke-RestMethod 'http://localhost:8000/api/debug/engine/snapshot' | ConvertTo-Json -Depth 4
+## Exporting bundles
+
+To capture a full hand and session for analysis, call:
+
+```
+GET /api/debug/engine/bundle
 ```
 
-Interpret the `delta` field as the difference between consecutive events.  A
-non‑empty `invariants` object with any `false` flags indicates a potential
-bug or mismatch between expected and actual state transitions.
+The backend will return a ZIP archive containing:
+
+* `events.json` – a list of all debug events.
+* `hand.json` – full final hand state.
+* `session.json` – current session state.
+
+Hole cards are masked for all players except the configured human seat.  The export helper automatically chooses an appropriate limit for event retrieval; no events will be missed.
+
+### Reproducing docs examples
+
+The docs examples are generated by `docs/scripts/capture_examples.py`, which:
+
+* Resets the docs SQLite DB so `session_id` starts at `1`.
+* Strips volatile fields (`created_at`, `time_ms`, `rng_seed`, `meta`) and normalises EOLs to LF.
+* Uses a deterministic first action (check when `to_call=0`, otherwise call).
+
+This prevents spurious “examples drift” in CI and explains minor differences from ad-hoc local runs.

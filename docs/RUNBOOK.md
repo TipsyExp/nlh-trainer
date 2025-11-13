@@ -1,171 +1,66 @@
 # Runbook
 
-This runbook provides a concise guide for setting up and operating the NLH Trainer backend as of milestone **M1**. It covers local installation, running the server, exporting hands, and replaying exported data to verify determinism.
+This runbook provides a high‑level overview of how to run and interact with the trainer backend.  It reflects the latest API semantics.
 
----
+## Starting the backend
 
-## Local Setup
+Install dependencies and launch the server with [`uvicorn`](https://www.uvicorn.org/):
 
-1. **Clone the repository** and navigate to its root.
-
-2. **(Optional) Create a virtual environment**
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate   # Windows PowerShell: .\.venv\Scripts\Activate.ps1
-
-Install dependencies using Python 3.12+:
+```bash
 python -m pip install -r requirements.txt
-The root requirements.txt pulls in backend dependencies (FastAPI, Uvicorn, etc.). Keep rlcard installed; it’s used by the default engine.
+uvicorn backend.main:app
+```
 
-Run the backend (FastAPI via Uvicorn):
-uvicorn backend.main:app --reload
+Configure behaviour via environment variables.  See [Configuration](CONFIGURATION.md) for details.
 
-The API will be available at http://localhost:8000/api
-Makefile shortcuts (optional):
+## Creating a session
 
-make api – runs the API locally
+Use the `/api/session` endpoint to create a new session. Include table params to match your environment. For example:
 
-make test – backend tests
-
-make autoplay – quick autoplay smoke
-
-make dist – builds the slim distribution zip
-
-Export & Replay Workflow (Determinism)
-
-One of the M1 acceptance checks verifies that exporting a hand and replaying it with the same seed yields an identical outcome. Below is a manual version of that workflow.
-
-1) Start a Session
-
-POST /api/session with a fixed base_seed so results are reproducible:
-curl -X POST "http://localhost:8000/api/session?base_seed=DOCS-EXAMPLES"
-
-Response includes a numeric session_id (e.g. 1).
-
-2) Start a Hand
-
-POST /api/hand/start with that session_id:
-curl -X POST "http://localhost:8000/api/hand/start?session_id=1"
-
-Response includes a string hand_id (e.g. "H1").
-
-3) Act Deterministically
-
-Fetch state to see the acting seat and allowed buckets:
-curl "http://localhost:8000/api/hand/state?hand_id=H1"
-
-Use a fixed rule for the first decision to keep runs comparable (e.g., check if you can, otherwise call). Submit actions with:
-
-curl -X POST "http://localhost:8000/api/hand/action?hand_id=H1" \
+```bash
+curl -X POST http://localhost:8000/api/session \
   -H "Content-Type: application/json" \
-  -d '{"action":"check"}'
+  -d '{"seats": 2, "sb": 50, "bb": 100, "stacks": [10000,10000], "bot_mode": "heuristic", "bot_profile": "TAG"}'
+```
 
-Bots will auto-respond. Repeat until the hand naturally ends.
+The response contains a `session_id` which must be supplied to subsequent hand and action calls.
 
-4) Export the Hand
+## Starting a hand
 
-Export as JSON and CSV:
-curl "http://localhost:8000/api/export/hand/H1.json" -o hand.json
-curl "http://localhost:8000/api/export/hand/H1.csv"  -o hand.csv
+```bash
+curl -X POST http://localhost:8000/api/hand/start \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "...", "seat": 0}'
+```
 
-JSON contains actions plus a final state snapshot.
+If bots are enabled (`BOT_MODE != "none"`), the engine will automatically apply all bot actions until it is the human's turn.  The response contains the full state and the actor information.
 
-CSV has one row per action. The current header is:
-hand_id,idx,street,actor_seat,action,amount,bucket,to_call_after,pot_after,snapped,engine,evaluator
+## Posting an action
 
-Notes:
+```bash
+curl -X POST http://localhost:8000/api/hand/action \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "...", "seat": 0, "action": "bet", "amount": 320}'
+```
 
-snapped is present; it may be empty when not applicable.
+The `amount` is a **total** commitment target; the engine will snap off‑tree totals to the nearest bucket.  The response includes a pre‑bot snapshot of the state and an array of bot actions applied in response (`bots_applied`).
 
-Engine/evaluator fields reflect the engine used (e.g., PokerKit).
+Tip: include an `X-Request-ID` header (any unique string) on API calls. This value is echoed in debug events and helps correlate requests with engine transitions.
 
-5) Replay & Verify
+## Auto‑stepping bots
 
-To validate determinism:
+For development convenience, bots can be auto‑advanced via `/api/hand/auto`.  Ensure `HAND_AUTO_ENABLED=true` and call:
 
-Create a new session with the same base_seed (DOCS-EXAMPLES).
+```bash
+curl -X POST http://localhost:8000/api/hand/auto \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "..."}'
+```
 
-Start a new hand and follow the same first-decision policy you used before (e.g., check-or-call rule).
+When `HAND_AUTO_ENABLED=false`, this endpoint returns HTTP `501 Not Implemented`.
 
-Let the hand complete and export again.
+## Debugging
 
-Compare canonical aspects between the two exports:
+Set `ENGINE_DEBUG_HTTP=true` to enable structured debug events.  Subscribe to them via Server‑Sent Events at `/api/debug/engine/events`.  Use the `X-Request-ID` header on API calls to correlate client requests with engine transitions.
 
-actions[*].type/action, amount, bucket, to_call_after, pot_after
-
-seating/position info in state (e.g., dealer_seat, sb_seat, bb_seat, street)
-
-table config (sb, bb, ante, seat_count)
-
-The automated test backend/tests/test_export_roundtrip.py performs this comparison programmatically.
-
-CSV Usage
-
-Exported CSVs are convenient for analysis. Each row corresponds to one decision (human or bot). Buckets reflect discretized sizes (see docs/BET-TREES.md). The snapped column indicates when an off-tree size was adjusted to the nearest allowed bucket.
-
-Troubleshooting
-
-Coach disabled / 501 responses: If you hit a coach/solver endpoint while coaching is disabled (no solver wired, or COACH_ENABLED=false), you should see 501 Not Implemented. Normal play and export endpoints do not require the coach.
-
-Determinism drift: Ensure you’re using the same base_seed and making the same initial decision policy; otherwise, action sequences can diverge.
-
-Ports in use: If :8000 is busy, either stop the other service or run Uvicorn on a different port with --port 8001.
-
-6) Warm the cache
-Pre-populate the SQLite cache with a small grid of common flop nodes so the first user hit is fast.
-
-Prerequisites
-
-COACH_ENABLED=true
-
-TEXASSOLVER_PATH set to the solver binary
-
-(Optional) COACH_TS_THREADS — set via --threads flag below
-
-Usage
-
-macOS/Linux
-export COACH_ENABLED=true
-export TEXASSOLVER_PATH=/path/to/solver_binary
-python -m backend.scripts.warm_cache --preset hu_srp --boards 50 --spr 20,40 --threads 1
-
-Windows (PowerShell)
-$env:COACH_ENABLED='true'
-$env:TEXASSOLVER_PATH='C:\path\to\solver.exe'
-python -m backend.scripts.warm_cache --preset hu_srp --boards 50 --spr 20,40 --threads 1
-
-What it does
-
-Generates a deterministic sample of flop boards and SPR values for HU SRP only.
-For each node, computes the node_key, checks the cache, solves on miss, and stores the result.
-Prints per-node progress and a summary:
-warm_cache: preset=hu_srp boards=50 sprs=[20.0, 40.0] threads=1
-node=8f3e1a9c2bde street=flop board=AhKd3s spr~2.0 cached=false latency_ms=842.1
-...
-warm_cache: done total=100 hits=0 misses=100 avg_ms=810.3 p50_ms=795.4
-
-Notes & Scope
-
-Currently warms only HU postflop (flop); other spots can be added later.
-
-This is compute-intensive; start small (e.g., --boards 25) and increase as needed.
-
-The cache is TTL-aware (COACH_CACHE_TTL_DAYS) and LRU-pruned (COACH_CACHE_MAX_ROWS).
-
-POST /coach/test_solve remains uncached; only GET /coach/advice uses the cache.
-
-Troubleshooting
-
-COACH_ENABLED is not true: Set COACH_ENABLED=true.
-
-TEXASSOLVER_PATH is not set: Point it to your solver binary.
-
-Slow warm-up: Increase --threads (and ensure your solver supports it). Consider fewer boards or fewer SPRs.
-
-Force refresh: Lower COACH_CACHE_TTL_DAYS temporarily or clear the cache:
-DELETE FROM solver_cache;
-
-Observability
-
-API log line (GET /coach/advice) includes cached=true|false and a short node_key prefix.
-Cache ops log as coach_cache hit/miss/expired/put/prune (info level).
+To capture a complete hand for analysis, call `/api/debug/engine/bundle` to download a ZIP archive of events and state.
