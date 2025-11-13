@@ -9,12 +9,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
+from fastapi.testclient import TestClient
+
 # ---- Repository root & import path shim (so "import backend" works when run as a script)
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-
-from fastapi.testclient import TestClient  # noqa: E402
 
 # IMPORTANT: set LOG_DB_PATH BEFORE importing/starting the app so the logger
 # initializes against our docs-local DB during startup.
@@ -22,7 +22,25 @@ EXAMPLES_DIR = ROOT / "docs" / "examples"
 EXAMPLES_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("LOG_DB_PATH", str(EXAMPLES_DIR / "examples.sqlite"))
 
-# Now import the FastAPI app
+# Canonical, CI-like environment (deterministic & coach off)
+os.environ.setdefault("COACH_ENABLED", "false")
+os.environ.setdefault("PYTHONHASHSEED", "0")
+for _k in ("BOT_MODE", "BOT_PROFILE", "HAND_AUTO_ENABLED", "ENGINE_DEBUG_HTTP"):
+    os.environ.pop(_k, None)
+
+# Reset the docs DB so session_id starts at 1 every run (remove DB + WAL/SHM if present)
+_db = Path(os.environ["LOG_DB_PATH"])
+for _p in (
+    _db,
+    _db.with_suffix(_db.suffix + "-wal"),
+    _db.with_suffix(_db.suffix + "-shm"),
+):
+    try:
+        _p.unlink()
+    except FileNotFoundError:
+        pass
+
+# Now import the FastAPI app (after env & DB reset)
 from backend.main import app  # noqa: E402
 
 # Volatile fields vary run-to-run; strip them from docs artifacts to avoid drift
