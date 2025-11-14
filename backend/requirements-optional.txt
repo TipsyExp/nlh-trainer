@@ -1,0 +1,3 @@
+# Optional backends/tools (not required for core engine, CI, or slim dist)
+# Enable range-based equities via pbots_calc:
+pbots_calc>=0.53

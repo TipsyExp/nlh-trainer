@@ -137,3 +137,61 @@ Auto‑advances the engine by applying bot actions until it is the human player'
  ```
  
  Submitting "raise": 500 will return 400 with a descriptive message; submitting 520 may snap to the legal bucket (e.g. 540) and report snapped=true.
+
+## “Equity helper (dev-only)” section
+
+```md
+## POST `/api/equity` (dev-only helper)
+
+Computes hand/range equities using the configured backend policy. Intended for development/testing and coach research; not required by the core table flow.
+
+### Request
+```json
+{
+  "players": [
+    { "hand": ["Ah", "Ad"] },
+    { "hand": ["Kh", "Qh"] }
+  ],
+  "board": ["As", "Kd", "2c"],
+  "dead": [],
+  "iters": 20000,
+  "exact": false
+}
+
+Ranges example (requires pbots_calc):
+{
+  "players": [
+    { "range": "JJ+" },
+    { "range": "random" }
+  ],
+  "iters": 50000
+}
+
+Response
+{
+  "ok": true,
+  "backend": "pbots_calc",
+  "mode": "hands",
+  "n_players": 2,
+  "board": ["As","Kd","2c"],
+  "dead": [],
+  "exact": false,
+  "iters": 20000,
+  "players": [
+    { "win": 12345, "tie": 234, "equity": 0.8123 },
+    { "win": 2765,  "tie": 234, "equity": 0.1877 }
+  ],
+  "raw": { "simulations": 20000 }
+}
+
+Errors
+•	400 invalid input (bad/missing cards, conflicting hand/range, too many board cards).
+•	400 backend unavailable for requested mode (e.g., ranges without pbots_calc when EQUITY_BACKEND_POLICY=pbots).
+Backend selection
+EQUITY_BACKEND_POLICY (default auto):
+•	auto: first compatible backend (tries pbots_calc if installed; else Henry; else PokerKit).
+•	pbots: force pbots_calc (supports ranges + hands, exact/MC).
+•	henry: force Henry evaluator placeholder (hands only).
+•	pokerkit: pure-Python fallback (hands only).
+Note: This endpoint is a helper for analysis/dev. Production UI need not call it.
+

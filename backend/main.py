@@ -40,6 +40,7 @@ from backend.api.export import router as export_router
 from backend.api.coach import router as coach_router  # coach scaffold (501 by default)
 from backend.api.review import router as review_router
 from backend.api.debug import router as debug_router  # conditionally included below
+from backend.api.routes.equity import router as equity_router  # equity helper endpoint
 
 
 # -------- Lifespan (replaces deprecated @on_event startup) --------
@@ -153,6 +154,8 @@ app.include_router(hand_router, prefix="/api")
 app.include_router(export_router, prefix="/api")
 app.include_router(coach_router, prefix="/api")
 app.include_router(review_router, prefix="/api")
+app.include_router(equity_router, prefix="/api")  # /api/equity
+
 
 # Optional: debug endpoints for engine event logs (dev-only)
 if ENGINE_DEBUG_HTTP:
