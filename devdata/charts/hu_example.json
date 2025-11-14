@@ -1,0 +1,23 @@
+{
+  "meta": {
+    "format_version": 1,
+    "name": "HU 25bb SRP vSB",
+    "game_type": "NLH",
+    "stack_bb": 25,
+    "rake": "0",
+    "positions": ["SB", "BB"],
+    "notes": "Example heads-up 25bb single-raised pot vs SB chart for dev/testing."
+  },
+  "rows": [
+    {
+      "hand": "AJo",
+      "node": "sb_open",
+      "bucket": "2.5x",
+      "strategy_bar": {
+        "fold": 0.0,
+        "call": 0.2,
+        "2.5x": 0.8
+      }
+    }
+  ]
+}
