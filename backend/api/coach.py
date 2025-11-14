@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict, List, Literal, cast
+from typing import Any, Dict, List, Literal, Optional, cast
 
 from fastapi import APIRouter, Body, Query
 from fastapi.responses import JSONResponse
@@ -22,13 +22,44 @@ from backend.adapters.solver.texassolver_adapter import (
     UnsupportedSpotError,
 )
 from backend.coach.texassolver_cache import resolve_with_cache
+from backend.coach.preflop.service import PreflopAdvisorService
+from backend.config import COACH_ENABLED as CONFIG_COACH_ENABLED
 
 router = APIRouter(tags=["coach"])
 
 
 def _coach_enabled() -> bool:
-    val = os.environ.get("COACH_ENABLED", "false").strip().lower()
-    return val in {"1", "true", "yes", "on"}
+    """
+    Determine whether the coach is enabled.
+
+    Priority:
+      1. Explicit COACH_ENABLED environment variable (for tests / runtime overrides).
+      2. backend.config.COACH_ENABLED (loaded from .env at startup).
+    """
+    env_val = os.environ.get("COACH_ENABLED")
+    if env_val is not None:
+        v = env_val.strip().lower()
+        return v in {"1", "true", "yes", "on"}
+    return bool(CONFIG_COACH_ENABLED)
+
+
+_preflop_service: Optional[PreflopAdvisorService] = None
+
+
+def _get_preflop_service() -> Optional[PreflopAdvisorService]:
+    """
+    Lazily construct the PreflopAdvisorService.
+
+    Any errors during construction (e.g. bad chart paths) are treated as
+    "charts not configured" and surfaced as a 501 from the endpoint.
+    """
+    global _preflop_service
+    if _preflop_service is None:
+        try:
+            _preflop_service = PreflopAdvisorService()
+        except Exception:
+            _preflop_service = None
+    return _preflop_service
 
 
 def _current_hand_id_str() -> str:
@@ -37,6 +68,59 @@ def _current_hand_id_str() -> str:
     if not h:
         raise RuntimeError("no hand in progress")
     return f"H{h}" if isinstance(h, int) else str(h)
+
+
+# -------------------------
+# GET /api/coach/preflop
+# -------------------------
+@router.get("/coach/preflop")
+def get_preflop_advice(
+    hand_id: str = Query(...),
+    idx: int = Query(0),
+) -> JSONResponse:
+    """
+    Chart-only preflop advisor endpoint.
+
+    Behaviour:
+      - 501 if COACH_ENABLED is false.
+      - 501 if no charts are configured / loadable.
+      - 200 with chart advice payload otherwise.
+    """
+    if not _coach_enabled():
+        return JSONResponse(
+            {"detail": "preflop coach is disabled"},
+            status_code=501,
+        )
+
+    svc = _get_preflop_service()
+    if svc is None or not svc.has_charts:
+        return JSONResponse(
+            {"detail": "preflop coach charts not configured"},
+            status_code=501,
+        )
+
+    try:
+        advice = svc.get_advice(hand_id=hand_id, idx=idx)
+    except LookupError as e:
+        # No matching chart entry for this spot
+        return JSONResponse({"detail": str(e)}, status_code=404)
+    except ValueError as e:
+        # Bad input/context formation
+        return JSONResponse({"detail": str(e)}, status_code=400)
+    except Exception as e:
+        # Generic advisor failure
+        return JSONResponse(
+            {"detail": f"preflop coach error: {e}"},
+            status_code=500,
+        )
+
+    payload: Dict[str, Any] = {
+        "source": advice.source,
+        "bucket": advice.bucket,
+        "rationale": advice.rationale,
+        "strategy_bar": advice.strategy_bar,
+    }
+    return JSONResponse(payload, status_code=200)
 
 
 # -------------------------

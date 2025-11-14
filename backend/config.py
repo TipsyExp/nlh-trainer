@@ -45,4 +45,16 @@ BOT_MAX_STEPS: int = int(os.getenv("BOT_MAX_STEPS", "100"))
 # Debug configuration
 ENGINE_DEBUG_HTTP: bool = _env_bool("ENGINE_DEBUG_HTTP", "false")
 
+# Coach / preflop advisor configuration
+COACH_ENABLED: bool = _env_bool("COACH_ENABLED", "false")
+
+# Paths to preflop chart JSON files (dev/coach only; ':' or ';' separated).
+# Example:
+#   PREFLOP_CHART_PATHS="devdata/charts/hu_example.json"
+PREFLOP_CHART_PATHS: str = os.getenv("PREFLOP_CHART_PATHS", "").strip()
+
+# Equity-based defend threshold for future preflop advisor heuristics.
+# Declared now so docs/tests can rely on it; not yet used in the chart-only MVP.
+PREFLOP_EQ_DEFEND_THRESH: float = float(os.getenv("PREFLOP_EQ_DEFEND_THRESH", "0.48"))
+
 # Expose additional flags here as needed.
