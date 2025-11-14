@@ -21,8 +21,8 @@ def canonicalize_hand(cards: Sequence[str]) -> str:
         ["Ah", "Jc"] -> "AJo"
 
     This helper is here for future use when we derive hand keys from real hole
-    cards. For this mini-milestone, charts are expected to already use these
-    canonical keys in their "hand" field.
+    cards. For now, charts are expected to already use these canonical keys in
+    their "hand" field.
     """
     if len(cards) != 2:
         raise ValueError(f"expected 2 cards, got {len(cards)}")
@@ -55,7 +55,7 @@ def _load_chart_from_path(path: str) -> PreflopChart:
     """
     Load a single chart JSON file into a PreflopChart.
 
-    Expected JSON shape:
+    Expected JSON shape (extra meta fields are ignored):
 
     {
       "meta": {
@@ -65,7 +65,8 @@ def _load_chart_from_path(path: str) -> PreflopChart:
         "stack_bb": 25,
         "rake": "0",
         "positions": ["SB", "BB"],
-        "notes": "optional"
+        "notes": "optional",
+        "...": "other fields tolerated"
       },
       "rows": [
         {

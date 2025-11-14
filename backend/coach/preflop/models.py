@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Literal
 
 
 @dataclass(frozen=True)
@@ -108,14 +108,16 @@ class Advice:
     Normalized preflop advice returned by the coach.
 
     Attributes:
-        source:        "chart" | "rule" | "equity" (or other future sources).
+        source:        One of:
+                         - "chart"  → direct lookup from a preflop chart
+                         - "equity" → equity-threshold fallback decision
         bucket:        Primary recommended bucket, e.g. "2.5x", "jam", "fold".
         rationale:     Human-readable explanation of the recommendation
                        (chart name, node, assumptions, etc.).
         strategy_bar:  Strategy distribution over buckets (bucket -> weight).
     """
 
-    source: str
+    source: Literal["chart", "equity"]
     bucket: str
     rationale: str
     strategy_bar: Dict[str, float]
@@ -131,10 +133,10 @@ class PreflopContext:
     precise node identifiers derived from the engine state.
 
     Attributes:
-        hand_key:       Canonical hand identifier, e.g. "AJo".
-        node:           Spot identifier within the chart, e.g. "sb_open".
-        stack_bb:       Optional effective stack in big blinds.
-        hero_position:  Optional logical position label, e.g. "SB", "BB".
+        hand_key:        Canonical hand identifier, e.g. "AJo".
+        node:            Spot identifier within the chart, e.g. "sb_open".
+        stack_bb:        Optional effective stack in big blinds.
+        hero_position:   Optional logical position label, e.g. "SB", "BB".
         villain_position: Optional opposing position, e.g. "BB".
     """
 
