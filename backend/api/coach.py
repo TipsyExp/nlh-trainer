@@ -24,6 +24,7 @@ from backend.adapters.solver.texassolver_adapter import (
 from backend.coach.texassolver_cache import resolve_with_cache
 from backend.coach.preflop.service import PreflopAdvisorService
 from backend.config import COACH_ENABLED as CONFIG_COACH_ENABLED
+from backend.services.equity.service import EquityService
 
 router = APIRouter(tags=["coach"])
 
@@ -43,23 +44,18 @@ def _coach_enabled() -> bool:
     return bool(CONFIG_COACH_ENABLED)
 
 
-_preflop_service: Optional[PreflopAdvisorService] = None
-
-
 def _get_preflop_service() -> Optional[PreflopAdvisorService]:
     """
-    Lazily construct the PreflopAdvisorService.
+    Construct a fresh PreflopAdvisorService.
 
-    Any errors during construction (e.g. bad chart paths) are treated as
-    "charts not configured" and surfaced as a 501 from the endpoint.
+    This is intentionally *not* cached so tests that tweak environment
+    variables (e.g. PREFLOP_CHART_PATHS) see effects per-request.
+    Any construction error is treated as "charts not configured".
     """
-    global _preflop_service
-    if _preflop_service is None:
-        try:
-            _preflop_service = PreflopAdvisorService()
-        except Exception:
-            _preflop_service = None
-    return _preflop_service
+    try:
+        return PreflopAdvisorService(equity_service=EquityService())
+    except Exception:
+        return None
 
 
 def _current_hand_id_str() -> str:
@@ -79,12 +75,12 @@ def get_preflop_advice(
     idx: int = Query(0),
 ) -> JSONResponse:
     """
-    Chart-only preflop advisor endpoint.
+    Preflop advisor endpoint (chart-first, equity fallback when available).
 
     Behaviour:
       - 501 if COACH_ENABLED is false.
       - 501 if no charts are configured / loadable.
-      - 200 with chart advice payload otherwise.
+      - 200 with advice payload otherwise (source ∈ {"chart","equity"}).
     """
     if not _coach_enabled():
         return JSONResponse(
@@ -102,7 +98,7 @@ def get_preflop_advice(
     try:
         advice = svc.get_advice(hand_id=hand_id, idx=idx)
     except LookupError as e:
-        # No matching chart entry for this spot
+        # No matching chart entry and no usable fallback
         return JSONResponse({"detail": str(e)}, status_code=404)
     except ValueError as e:
         # Bad input/context formation
@@ -181,7 +177,9 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
             ck = "true" if cached else "false"
             nk = (node_key or "")[:12]
             print(
-                f"coach_advice hand={hand_id} idx={idx} status=ok latency_ms={payload['meta']['latency_ms']} top={top} cached={ck} node_key={nk}"
+                f"coach_advice hand={hand_id} idx={idx} status=ok "
+                f"latency_ms={payload['meta']['latency_ms']} top={top} "
+                f"cached={ck} node_key={nk}"
             )
         except Exception:
             pass

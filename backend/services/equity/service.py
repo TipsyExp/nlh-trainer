@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 from .base import Card, EquityBackend, EquityResult, PlayerSpec
 from .pbots_backend import PbotsBackend
@@ -18,6 +18,7 @@ class EquityService:
       - Instantiate available backends (pbots_calc, henry, pokerkit).
       - Select a backend according to EQUITY_BACKEND_POLICY and input shape.
       - Provide a single `calc_equity` entry point for callers (API/CLI/coach).
+      - Offer small convenience helpers (e.g. hero vs villain range equity).
     """
 
     def __init__(self) -> None:
@@ -111,3 +112,48 @@ class EquityService:
             exact=exact,
             timeout_ms=timeout_ms,
         )
+
+    # ------------------------------------------------------------------ #
+    # Convenience helpers
+    # ------------------------------------------------------------------ #
+
+    def hero_vs_range_equity(
+        self,
+        hero_hand: Tuple[Card, Card],
+        villain_range: str,
+        board: Sequence[Card] = (),
+        dead: Sequence[Card] = (),
+        iters: Optional[int] = None,
+        exact: bool = False,
+        timeout_ms: Optional[int] = None,
+    ) -> float:
+        """
+        Convenience helper: compute hero's equity vs a single villain range.
+
+        This is primarily intended for preflop advisor / HU defend rules.
+        Assumes:
+          - seat 0: hero fixed hand
+          - seat 1: villain pbots-style range string
+
+        Returns:
+          Hero equity as a float in [0.0, 1.0].
+
+        Raises:
+          Whatever `calc_equity` would raise, e.g. RuntimeError if no
+          ranges-capable backend is available under the current policy.
+        """
+        result = self.calc_equity(
+            players=[
+                PlayerSpec(hand=hero_hand),
+                PlayerSpec(range=villain_range),
+            ],
+            board=board,
+            dead=dead,
+            iters=iters,
+            exact=exact,
+            timeout_ms=timeout_ms,
+        )
+        if not result.per_player:
+            raise RuntimeError("equity result contained no players")
+        hero = result.per_player[0]
+        return float(hero.get("equity", 0.0))
