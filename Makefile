@@ -4,7 +4,7 @@
 
 .PHONY: api web dev install-backend install-frontend install-optional \
         test test-backend test-frontend lint fmt autoplay docs-examples \
-        equity dist dist-clean
+        equity bench-equity dist dist-clean
 
 # Choose the Python and Node entry points (Windows-friendly)
 PY    ?= python
@@ -14,6 +14,9 @@ NODE  ?= npm
 API_ADDR     ?= 127.0.0.1
 API_PORT     ?= 8000
 UVICORN_OPTS ?= --reload --host $(API_ADDR) --port $(API_PORT)
+
+# Default benchmark policies (can override: POLICIES=auto,pbots)
+POLICIES ?= auto,pokerkit,henry,pbots
 
 ##
 ## Launch the FastAPI backend in development mode
@@ -27,7 +30,7 @@ api:
 ##
 web:
 	@echo "Starting frontend on http://localhost:3000 …"
-	cd frontend && $(NODE) run dev
+	$(NODE) --prefix frontend run dev
 
 ##
 ## Start both backend and frontend (parallel)
@@ -43,15 +46,18 @@ install-backend:
 	$(PY) -m pip install -r backend/requirements.txt
 
 install-frontend:
-	cd frontend && $(NODE) install
+	$(NODE) --prefix frontend install
 
-# Optional extras (e.g., pbots_calc for range equities)
+# Optional extras (e.g., pbots_calc for range equities) — PowerShell-safe
 install-optional:
-	@if [ -f backend/requirements-optional.txt ]; then \
-		$(PY) -m pip install -r backend/requirements-optional.txt ; \
-	else \
-		echo "No backend/requirements-optional.txt found."; \
-	fi
+	@$(PY) - <<'PY'
+import os, sys, subprocess
+p = "backend/requirements-optional.txt"
+if os.path.isfile(p):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", p])
+else:
+    print("No backend/requirements-optional.txt found.")
+PY
 
 ##
 ## Tests & quality
@@ -60,7 +66,7 @@ test-backend:
 	$(PY) -m pytest -q backend/tests
 
 test-frontend:
-	cd frontend && $(NODE) test -- --passWithNoTests
+	$(NODE) --prefix frontend test -- --passWithNoTests
 
 test: test-backend test-frontend
 
@@ -73,47 +79,101 @@ fmt:
 	black .
 
 ##
-## Autoplay a small sample (headless)
+## Autoplay a small sample (headless) — PowerShell-safe
 ## Usage: make autoplay N=100 SEED=autoplay SEATS=2 SB=50 BB=100
 ##
 autoplay:
 	@echo "Running autoplay…"
-	@if [ -f backend/scripts/autoplay.py ]; then \
-		$(PY) backend/scripts/autoplay.py --hands $${N:-100} --seed $${SEED:-autoplay} --seats $${SEATS:-2} --sb $${SB:-50} --bb $${BB:-100}; \
-	else \
-		echo "autoplay script not found: backend/scripts/autoplay.py"; \
-		exit 1; \
-	fi
+	@$(PY) - <<'PY'
+import os, sys, subprocess
+script = os.path.join("backend", "scripts", "autoplay.py")
+if not os.path.isfile(script):
+    print("autoplay script not found:", script)
+    sys.exit(1)
+N     = os.environ.get("N", "100")
+SEED  = os.environ.get("SEED", "autoplay")
+SEATS = os.environ.get("SEATS", "2")
+SB    = os.environ.get("SB", "50")
+BB    = os.environ.get("BB", "100")
+args = [sys.executable, script, "--hands", N, "--seed", SEED, "--seats", SEATS, "--sb", SB, "--bb", BB]
+subprocess.check_call(args)
+PY
 
 ##
-## Re-capture docs/examples from the live API (deterministic env)
+## Re-capture docs/examples from the live API (deterministic env) — PowerShell-safe
 ##
 docs-examples:
 	@echo "Capturing docs/examples via docs/scripts/capture_examples.py …"
-	COACH_ENABLED=false PYTHONHASHSEED=0 $(PY) docs/scripts/capture_examples.py
-	@echo "Done. Check docs/examples/"
+	@$(PY) - <<'PY'
+import os, sys, subprocess
+env = os.environ.copy()
+env["COACH_ENABLED"] = "false"
+env["PYTHONHASHSEED"] = "0"
+subprocess.check_call([sys.executable, "docs/scripts/capture_examples.py"], env=env)
+print("Done. Check docs/examples/")
+PY
 
 ##
-## Equity helper (hands or ranges via equity_cli)
+## Equity helper (hands or ranges via equity_cli) — PowerShell-safe
 ## Examples:
 ##   make equity HANDS='AhAd,KhQh' BOARD='AsKd2c' EXACT=1
 ##   make equity RANGES='JJ+,random' ITERS=50000
 ##
 equity:
 	@echo "Equity helper…"
-	@if [ -n "$$HANDS" ]; then \
-		set -e; \
-		h1=$$(echo $$HANDS | cut -d, -f1); \
-		h2=$$(echo $$HANDS | cut -d, -f2); \
-		$(PY) -m backend.scripts.equity_cli --hand $$h1 --hand $$h2 --board "$${BOARD:-}" --dead "$${DEAD:-}" $$( [ "$${EXACT:-}" = "1" ] && echo --exact ); \
-	elif [ -n "$$RANGES" ]; then \
-		r1=$$(echo $$RANGES | cut -d, -f1); \
-		r2=$$(echo $$RANGES | cut -d, -f2); \
-		$(PY) -m backend.scripts.equity_cli --range "$$r1" --range "$$r2" --iters "$${ITERS:-20000}"; \
-	else \
-		echo "Provide HANDS='AhAd,KhQh' or RANGES='JJ+,random' (see comments)."; \
-		exit 2; \
-	fi
+	@$(PY) - <<'PY'
+import os, sys, subprocess
+hands  = os.environ.get("HANDS", "").strip()
+ranges = os.environ.get("RANGES", "").strip()
+board  = os.environ.get("BOARD", "")
+dead   = os.environ.get("DEAD", "")
+exact  = os.environ.get("EXACT", "")
+iters  = os.environ.get("ITERS", "")
+
+cmd = [sys.executable, "-m", "backend.scripts.equity_cli"]
+
+if hands:
+    parts = [p.strip() for p in hands.split(",") if p.strip()]
+    if len(parts) < 2:
+        print("HANDS must contain at least two comma-separated hands, e.g. AhAd,KhQh")
+        sys.exit(2)
+    for h in parts:
+        cmd += ["--hand", h]
+    if board:
+        cmd += ["--board", board]
+    if dead:
+        cmd += ["--dead", dead]
+    if exact == "1":
+        cmd += ["--exact"]
+elif ranges:
+    parts = [p.strip() for p in ranges.split(",") if p.strip()]
+    if len(parts) < 2:
+        print("RANGES must contain at least two comma-separated ranges, e.g. JJ+,random")
+        sys.exit(2)
+    for r in parts:
+        cmd += ["--range", r]
+    if iters:
+        cmd += ["--iters", iters]
+else:
+    print("Provide HANDS='AhAd,KhQh' or RANGES='JJ+,random' (see target comments).")
+    sys.exit(2)
+
+subprocess.check_call(cmd)
+PY
+
+##
+## Equity benchmark (tiny matrix; CSV output)
+## Examples:
+##   make bench-equity
+##   make bench-equity OUT=bench_equity.csv POLICIES=auto,pbots
+##
+bench-equity:
+	@echo "Running equity benchmark…"
+ifeq ($(strip $(OUT)),)
+	$(PY) -m backend.scripts.benchmark_equity --policies "$(POLICIES)"
+else
+	$(PY) -m backend.scripts.benchmark_equity --policies "$(POLICIES)" --out "$(OUT)"
+endif
 
 ##
 ## Build a slim distribution zip using allowlist-only includes
@@ -123,8 +183,11 @@ dist:
 	$(PY) tools/build_dist.py --include-file dist-include.txt --out-dir dist
 
 ##
-## Clean distribution artifacts
+## Clean distribution artifacts — PowerShell-safe
 ##
 dist-clean:
-	rm -rf dist
-	@echo "Cleaned dist/"
+	@$(PY) - <<'PY'
+import shutil
+shutil.rmtree("dist", ignore_errors=True)
+print("Cleaned dist/")
+PY
