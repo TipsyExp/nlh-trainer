@@ -1,34 +1,76 @@
-## Makefile for NLH Training Simulator (M1)
+# NLH Training Simulator — Makefile
 #
-# Convenience targets for dev, tests, autoplay, and building a slim dist.
+# Convenience targets for dev, tests, autoplay, docs examples, and slim dist.
 
-.PHONY: api web test autoplay dist dist-clean
+.PHONY: api web dev install-backend install-frontend install-optional \
+        test test-backend test-frontend lint fmt autoplay docs-examples \
+        equity dist dist-clean
 
-# Choose the Python entry (Windows-friendly)
-PY ?= python
+# Choose the Python and Node entry points (Windows-friendly)
+PY    ?= python
+NODE  ?= npm
+
+# Backend dev server options
+API_ADDR     ?= 127.0.0.1
+API_PORT     ?= 8000
+UVICORN_OPTS ?= --reload --host $(API_ADDR) --port $(API_PORT)
 
 ##
 ## Launch the FastAPI backend in development mode
 ##
 api:
-	@echo "Starting backend on http://localhost:8000 …"
-	$(PY) -m uvicorn backend.main:app --reload
+	@echo "Starting backend on http://$(API_ADDR):$(API_PORT) …"
+	$(PY) -m uvicorn backend.main:app $(UVICORN_OPTS)
 
 ##
 ## Launch the Next.js frontend in development mode
 ##
 web:
 	@echo "Starting frontend on http://localhost:3000 …"
-	cd frontend && npm run dev
+	cd frontend && $(NODE) run dev
 
 ##
-## Run backend + frontend tests
+## Start both backend and frontend (parallel)
 ##
-test:
-	@echo "Running backend tests…"
+dev:
+	@echo "Starting backend + frontend …"
+	@$(MAKE) -j2 api web
+
+##
+## Install dependencies
+##
+install-backend:
+	$(PY) -m pip install -r backend/requirements.txt
+
+install-frontend:
+	cd frontend && $(NODE) install
+
+# Optional extras (e.g., pbots_calc for range equities)
+install-optional:
+	@if [ -f backend/requirements-optional.txt ]; then \
+		$(PY) -m pip install -r backend/requirements-optional.txt ; \
+	else \
+		echo "No backend/requirements-optional.txt found."; \
+	fi
+
+##
+## Tests & quality
+##
+test-backend:
 	$(PY) -m pytest -q backend/tests
-	@echo "Running frontend tests…"
-	cd frontend && npm test -- --passWithNoTests
+
+test-frontend:
+	cd frontend && $(NODE) test -- --passWithNoTests
+
+test: test-backend test-frontend
+
+lint:
+	ruff check .
+	mypy backend
+
+fmt:
+	ruff check . --fix
+	black .
 
 ##
 ## Autoplay a small sample (headless)
@@ -44,29 +86,45 @@ autoplay:
 	fi
 
 ##
+## Re-capture docs/examples from the live API (deterministic env)
+##
+docs-examples:
+	@echo "Capturing docs/examples via docs/scripts/capture_examples.py …"
+	COACH_ENABLED=false PYTHONHASHSEED=0 $(PY) docs/scripts/capture_examples.py
+	@echo "Done. Check docs/examples/"
+
+##
+## Equity helper (hands or ranges via equity_cli)
+## Examples:
+##   make equity HANDS='AhAd,KhQh' BOARD='AsKd2c' EXACT=1
+##   make equity RANGES='JJ+,random' ITERS=50000
+##
+equity:
+	@echo "Equity helper…"
+	@if [ -n "$$HANDS" ]; then \
+		set -e; \
+		h1=$$(echo $$HANDS | cut -d, -f1); \
+		h2=$$(echo $$HANDS | cut -d, -f2); \
+		$(PY) -m backend.scripts.equity_cli --hand $$h1 --hand $$h2 --board "$${BOARD:-}" --dead "$${DEAD:-}" $$( [ "$${EXACT:-}" = "1" ] && echo --exact ); \
+	elif [ -n "$$RANGES" ]; then \
+		r1=$$(echo $$RANGES | cut -d, -f1); \
+		r2=$$(echo $$RANGES | cut -d, -f2); \
+		$(PY) -m backend.scripts.equity_cli --range "$$r1" --range "$$r2" --iters "$${ITERS:-20000}"; \
+	else \
+		echo "Provide HANDS='AhAd,KhQh' or RANGES='JJ+,random' (see comments)."; \
+		exit 2; \
+	fi
+
+##
 ## Build a slim distribution zip using allowlist-only includes
 ##
 dist:
-	@echo "Creating slim distribution zip (allowlist)…"
-	@$(PY) tools/build_dist.py --include-file dist-include.txt --out-dir dist
+	@echo "Building allowlisted distribution…"
+	$(PY) tools/build_dist.py --include-file dist-include.txt --out-dir dist
 
 ##
 ## Clean distribution artifacts
 ##
 dist-clean:
-	@rm -rf dist
+	rm -rf dist
 	@echo "Cleaned dist/"
-
-.PHONY: dist dist-clean
-
-dist-clean:
-	@echo "Cleaning dist/…"
-	@python - <<'PY'
-import shutil, os
-shutil.rmtree("dist", ignore_errors=True)
-print("OK")
-PY
-
-dist:
-	@echo "Building allowlisted distribution…"
-	@python tools/build_dist.py --include-file dist-include.txt --out-dir dist
