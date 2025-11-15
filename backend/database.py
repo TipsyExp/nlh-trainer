@@ -96,6 +96,8 @@ class SQLiteLogger:
                 node_key TEXT,
                 engine TEXT,
                 evaluator TEXT,
+                equity_snapshot_json TEXT,
+                preflop_advice_json TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (hand_id) REFERENCES hands(hand_id)
             )
@@ -139,6 +141,8 @@ class SQLiteLogger:
                 "node_key": "TEXT",
                 "engine": "TEXT",
                 "evaluator": "TEXT",
+                "equity_snapshot_json": "TEXT",
+                "preflop_advice_json": "TEXT",
                 "created_at": "TEXT",
             },
         )
@@ -359,9 +363,10 @@ class SQLiteLogger:
             INSERT INTO actions (
                 hand_id, idx, street, actor_seat, type, amount, bucket,
                 to_call_after, pot_after, time_ms, rng_seed, snapped, meta,
-                node_key, engine, evaluator, created_at
+                node_key, engine, evaluator, equity_snapshot_json,
+                preflop_advice_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 hand_id,
@@ -380,6 +385,8 @@ class SQLiteLogger:
                 node_key,
                 engine or DEFAULT_ENGINE,
                 evaluator or DEFAULT_EVALUATOR,
+                None,  # equity_snapshot_json starts empty
+                None,  # preflop_advice_json starts empty
                 datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
             ),
         )
@@ -414,7 +421,8 @@ class SQLiteLogger:
             """
             SELECT idx, street, actor_seat, type, amount, bucket,
                    to_call_after, pot_after, time_ms, rng_seed, snapped, meta,
-                   node_key, engine, evaluator, created_at
+                   node_key, engine, evaluator, equity_snapshot_json,
+                   preflop_advice_json, created_at
             FROM actions
             WHERE hand_id = ?
             ORDER BY idx
@@ -437,9 +445,11 @@ class SQLiteLogger:
         cur = self.conn.cursor()
         for row in cur.execute(
             """
-            SELECT a.hand_id, a.idx, a.street, a.actor_seat, a.type, a.amount, a.bucket,
-                   a.to_call_after, a.pot_after, a.time_ms, a.rng_seed, a.snapped, a.meta,
-                   a.node_key, a.engine, a.evaluator, a.created_at
+            SELECT a.hand_id, a.idx, a.street, a.actor_seat, a.type, a.amount,
+                   a.bucket, a.to_call_after, a.pot_after, a.time_ms,
+                   a.rng_seed, a.snapped, a.meta, a.node_key, a.engine,
+                   a.evaluator, a.equity_snapshot_json, a.preflop_advice_json,
+                   a.created_at
             FROM actions a
             JOIN hands h ON h.hand_id = a.hand_id
             WHERE h.session_id = ?
