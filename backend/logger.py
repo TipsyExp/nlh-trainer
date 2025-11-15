@@ -25,12 +25,12 @@ import os
 import tempfile
 from typing import Any, Mapping, Optional
 
-from .database import SQLiteLogger
 from .config import (
     LOG_EQUITY_SNAPSHOT,
     LOG_EQUITY_SNAPSHOT_REDACT,
     LOG_PREFLOP_ADVICE,
 )
+from .database import SQLiteLogger
 
 _LOGGER: Optional[SQLiteLogger] = None
 _DB_PATH_CACHED: Optional[str] = None
