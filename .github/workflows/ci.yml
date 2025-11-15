@@ -130,6 +130,54 @@ jobs:
       - name: Run tests
         run: pytest -q backend/tests
 
+  unit-tests-pbots:
+    name: Unit Tests (Backend, pbots optional deps)
+    runs-on: ubuntu-24.04
+    needs: lint-python
+    env:
+      LOG_DB_PATH: ${{ github.workspace }}/.data/ci-unit-pbots.sqlite
+      COACH_ENABLED: "false"
+      PYTHONHASHSEED: "0"
+      PYTHONPATH: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install backend deps (base + optional)
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
+          if [ -f backend/requirements-optional.txt ]; then
+            # Best-effort: pbots_calc and friends may not be available on all platforms.
+            pip install -r backend/requirements-optional.txt || \
+              echo "Optional backend deps failed to install; continuing without them."
+          else
+            echo "No backend/requirements-optional.txt found (pbots optional deps not installed)."
+          fi
+          pip install pytest pytest-xdist
+
+      - name: Run backend tests (pbots-enabled)
+        run: pytest -q backend/tests
+
+      - name: Run equity benchmark (tiny matrix)
+        run: |
+          mkdir -p .bench
+          python -m backend.scripts.benchmark_equity --policies auto,pbots --out .bench/bench_equity.csv
+
+      - name: Upload equity benchmark CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: equity-bench-pbots
+          path: .bench/bench_equity.csv
+          if-no-files-found: warn
+
   export-contract:
     name: Export Contract Tests
     runs-on: ubuntu-24.04
@@ -488,4 +536,3 @@ jobs:
       - name: Skip (no Coach API)
         if: steps.detect_coach.outputs.present != 'true'
         run: echo "No backend/api/coach.py; job skipped."
-
