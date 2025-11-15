@@ -63,13 +63,30 @@ def _row_get(row: Any, key: str) -> Any:
         return None
 
 
+def _maybe_parse_json(value: Any) -> Any:
+    """
+    Best-effort JSON decode helper.
+
+    If `value` is a string containing JSON, attempt to parse it. On failure,
+    or if the value is None/non-string, return it as-is.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
 def _actions_to_dicts(
     rows: Iterable[Any], include_hand_id: str | None = None
 ) -> List[Dict[str, Any]]:
     """Convert action rows into JSON-serialisable dicts with contract field names."""
     out: List[Dict[str, Any]] = []
     for r in rows:
-        item = {
+        item: Dict[str, Any] = {
             "idx": _row_get(r, "idx"),
             "street": _row_get(r, "street"),
             "actor_seat": _row_get(r, "actor_seat"),
@@ -86,6 +103,19 @@ def _actions_to_dicts(
             "evaluator": _row_get(r, "evaluator"),
             "created_at": _row_get(r, "created_at"),
         }
+
+        # Optional snapshots (added by TASK-26); only include when present.
+        equity_snapshot_raw = _row_get(r, "equity_snapshot_json")
+        preflop_advice_raw = _row_get(r, "preflop_advice_json")
+
+        equity_snapshot = _maybe_parse_json(equity_snapshot_raw)
+        preflop_advice = _maybe_parse_json(preflop_advice_raw)
+
+        if equity_snapshot is not None:
+            item["equity_snapshot"] = equity_snapshot
+        if preflop_advice is not None:
+            item["preflop_advice"] = preflop_advice
+
         if include_hand_id is not None:
             item = {"hand_id": include_hand_id, **item}
         out.append(item)
