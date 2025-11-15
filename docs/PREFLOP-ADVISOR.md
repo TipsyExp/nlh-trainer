@@ -1,206 +1,339 @@
+
 # Preflop Advisor
 
-The preflop advisor is a **chart-driven helper** that returns normalized advice
-for common preflop spots. For M2.1 it is deliberately simple:
+The preflop advisor provides normalized strategy advice for common heads-up
+preflop spots. It is designed to be:
 
-- Uses **static charts** (JSON files) as the only source of advice.
-- Exposes advice through `/api/coach/preflop`.
-- Is controlled via environment/config flags.
-- Does **not** yet use equity or solvers for fallback decisions.
+- **Chart-first** – use static range charts when available.
+- **Rule / equity-aware** – fall back to simple rules and, when configured,
+  equity thresholds.
+- **Pluggable** – charts can be swapped without code changes, and the
+  equity backend is shared with the main equity service.
 
-Later milestones will add:
-
-- Equity-based fallback for chart gaps.
-- Multiway / 6-max support.
-- More chart formats and tooling.
+This document describes the chart format, configuration flags, decision logic,
+API behaviour and current limitations.
 
 ---
 
-## High-level design
+## High-level architecture
 
-The advisor is implemented in:
+The advisor lives under:
 
-- `backend/coach/preflop/models.py` – data models for charts and advice.
-- `backend/coach/preflop/charts.py` – chart loading and lookup helpers.
-- `backend/coach/preflop/service.py` – `PreflopAdvisorService` entrypoint.
-- `backend/api/coach.py` – HTTP API integration.
+- `backend/coach/preflop/`
 
-At a high level:
+Key pieces (names may vary slightly depending on implementation):
 
-1. On startup, the advisor loads chart files from `PREFLOP_CHART_PATHS`.
-2. Each chart describes metadata (`meta`) and a list of rows (`rows`).
-3. When `/api/coach/preflop` is called, the advisor:
-   - Builds a minimal **preflop context** for the current spot.
-   - Selects a chart that matches the context.
-   - Looks up a row `(node, hand_key)` and returns a normalized **advice** object.
+- **Chart loader**
+  - Loads JSON/TOML chart files.
+  - Validates basic metadata (format version, stack, positions).
+  - Indexes rows by `(node, hand_key)` for fast lookup.
 
-If the advisor is disabled or charts are missing, `/api/coach/preflop` returns
-`501` to make it obvious that preflop coaching is not available.
+- **Advisor core**
+  - Accepts a hand context (via `hand_id`/`idx`).
+  - Resolves the relevant node (e.g. `sb_open`, `bb_vs_sb_open`).
+  - Canonicalizes the hero hand into a chart key (e.g. `AJo`, `KTs`, `JJ`).
+  - Applies **chart → equity → rule** logic to return advice.
+
+- **Equity integration**
+  - Uses `EquityService` for equity fallback where enabled and supported.
+  - Only needed when charts are missing for a particular node/hand.
+
+The advisor is exposed over HTTP via:
+
+- `GET /api/coach/preflop`
+
+and is gated by `COACH_ENABLED`.
 
 ---
 
-## Chart JSON format
+## Chart format
 
-Charts are plain JSON files with two top-level fields: `meta` and `rows`.
+Charts define preflop advice for a given configuration (stack, rake, positions)
+and a specific node (e.g. SB open, BB defend). Files are JSON or TOML with two
+top-level keys:
 
-### `meta` (ChartMeta)
+- `meta`
+- `rows`
 
-Example:
+### `meta` section
+
+The `meta` block describes global assumptions for the chart:
+
+| Field           | Type    | Description                                           |
+|----------------|---------|-------------------------------------------------------|
+| `format_version` | int   | Schema version of the chart file.                     |
+| `name`         | string  | Optional human-readable chart name.                   |
+| `stack_bb`     | number  | Effective stack depth in big blinds (e.g. `25`).      |
+| `rake`         | string  | Rake description (e.g. `"0"`, `"5% capped"`).         |
+| `positions`    | array   | Ordered positions, typically `["SB","BB"]` for HU.    |
+| `notes`        | string  | Optional free-form notes about the population, etc.   |
+
+Example (JSON):
 
 ```json
 {
   "meta": {
     "format_version": 1,
-    "name": "HU 25bb SRP vSB",
-    "game_type": "NLH",
+    "name": "HU_25bb_srp_vsb",
     "stack_bb": 25,
     "rake": "0",
     "positions": ["SB", "BB"],
-    "notes": "Example heads-up 25bb single-raised pot vs SB chart."
+    "notes": "Example HU chart for SB open / BB defend at 25bb."
+  },
+  "rows": [ /* ... */ ]
+}
+
+rows section
+Each row describes advice for a canonical hand at a specific preflop node.
+Field	Type	Description
+hand	string	Canonical hand key, e.g. "JJ", "A5s", "AJo".
+node	string	Logical node identifier, e.g. "sb_open", "bb_vs_sb_open".
+bucket	string	Primary recommended action/bucket, e.g. "fold", "call", "2.5x".
+strategy_bar	object	Map of bucket labels → weights (floats summing to ≈ 1.0).
+Example row:
+{
+  "hand": "AJo",
+  "node": "sb_open",
+  "bucket": "2.5x",
+  "strategy_bar": {
+    "fold": 0.0,
+    "2.2x": 0.2,
+    "2.5x": 0.5,
+    "3.0x": 0.3
   }
 }
-Fields:
-•	format_version – integer schema version (e.g. 1).
-•	name – human-readable chart name.
-•	game_type – game type identifier (e.g. "NLH").
-•	stack_bb – effective stack in big blinds (e.g. 25).
-•	rake – rake descriptor (e.g. "0", "5% capped").
-•	positions – ordered list of seat labels (e.g. ["SB","BB"]).
-•	notes – optional free-form notes (assumptions, pool, etc.).
-rows (ChartRow)
-Each row describes a single action recommendation for a canonical hand at a
-specific node.
-Example:
-
-{
-  "rows": [
-    {
-      "hand": "AJo",
-      "node": "sb_open",
-      "bucket": "2.5x",
-      "strategy_bar": {
-        "fold": 0.0,
-        "call": 0.2,
-        "2.5x": 0.8
-      }
-    }
-  ]
-}
-
-Fields:
-•	hand – canonical hand key:
-o	Pairs: "JJ", "QQ", etc.
-o	Suited: "A5s", "KQs", etc.
-o	Offsuit: "AJo", "KTo", etc.
-•	node – logical spot identifier, e.g.:
-o	"sb_open" – SB open-raise spot.
-o	"bb_vs_sb_open" – BB vs SB open.
-o	Future nodes can follow similar naming.
-•	bucket – primary recommended bucket label:
-o	Examples: "2.2x", "2.5x", "3.0x", "jam", "fold", "call".
-•	strategy_bar – strategy distribution:
-o	Map of bucket -> weight where weights are in [0.0, 1.0].
-o	The sum should be approximately 1.0 (validation is tolerant to floating
-point noise).
-Internally, charts are loaded into PreflopChart objects with indexes
-on (node, hand_key) for fast lookup.
+Internally, the advisor indexes rows by (node, hand) so lookups are O(1) for
+chart hits.
 ________________________________________
-Configuration
-The preflop advisor is controlled by environment/config values exposed in
-backend/config.py (names shown here; exact location may vary):
-COACH_ENABLED
-•	Boolean gate for the coach API.
-•	When false, /api/coach/preflop returns 501 and should not be called.
-PREFLOP_CHART_PATHS
-•	String containing one or more paths to chart JSON files.
-•	Paths are separated by : (or ; – both are normalized internally).
-•	Example:
-export PREFLOP_CHART_PATHS="devdata/charts/hu_example.json"
-
-•	Multiple charts:
-export PREFLOP_CHART_PATHS="devdata/charts/hu_example.json:devdata/charts/another_chart.json"
-
-If no charts can be loaded (paths empty or files missing/invalid), the advisor
-treats charts as not configured. The coach endpoint should then return 501
-with a clear message such as:
-{ "detail": "preflop coach charts not configured" }
-
-
-PREFLOP_EQ_DEFEND_THRESH (placeholder)
-•	Float threshold (e.g. 0.48) intended for future equity-based fallback.
-•	Not used in the chart-only MVP.
-•	Later milestones will use this to decide when to defend vs an assumed range
-when a chart entry is missing.
+Configuration flags
+The preflop advisor is configured via environment variables. These are typically
+parsed in backend/config.py and imported by the advisor.
+Core coach flags
+•	COACH_ENABLED
+o	Gate for all coaching endpoints.
+o	When false, GET /api/coach/preflop responds with HTTP 501
+(“not implemented / disabled”).
+•	PREFLOP_CHART_PATHS
+o	Colon- or semicolon-separated list of chart files to load.
+o	Example: devdata/charts/hu_example.json.
+o	At least one file must be present for chart-based advice.
+o	Invalid or missing paths cause the advisor to fall back (501/404)
+depending on configuration.
+Equity fallback flags
+•	PREFLOP_EQ_DEFEND_THRESH
+o	Float threshold in [0, 1] (e.g. 0.48).
+o	Used when the advisor runs an equity calculation for a “defend vs fold”
+decision.
+o	If hero equity ≥ threshold → defend (call/jam).
+o	If hero equity < threshold → fold.
+•	PREFLOP_FALLBACK_REQUIRED
+o	Controls behaviour when charts and equity fallback cannot produce a
+recommendation.
+o	Typical values (exact strings may vary in implementation):
+	e.g. "raise" or "conservative" as high-level modes.
+o	Effect:
+	In a conservative mode, the advisor tends to return a safe default (often
+fold) and mark source="rule".
+	In a stricter mode, missing coverage might lead to conservative folds or
+explicit errors.
+The full behaviour is determined by the advisor implementation; this document
+captures the intent: charts first, equity second, rule fallback last.
 ________________________________________
-API: /api/coach/preflop
-The preflop advisor is exposed through the existing coach router.
-Request
-
+Decision logic
+When GET /api/coach/preflop is called, the advisor follows roughly this flow:
+1.	Check gating
+o	If COACH_ENABLED=false, return HTTP 501.
+2.	Resolve context from hand
+o	Locate the hand by hand_id.
+o	Use idx to find the relevant decision point.
+o	Determine:
+	Hero position (SB/BB).
+	Board street (must be preflop).
+	Node identifier (e.g. "sb_open", "bb_vs_sb_open").
+	Hero hole cards, canonicalized into a key ("JJ", "A5s", "AJo", …).
+3.	Chart lookup
+o	Search loaded charts for a row matching (node, hand_key).
+o	If found:
+	Return advice with:
+	source = "chart"
+	bucket = row.bucket
+	strategy_bar = row.strategy_bar
+	rationale referencing chart metadata and node (e.g. chart name, stack).
+4.	Equity fallback (optional)
+o	If no chart row is found and equity fallback is enabled and supported:
+	Construct assumed villain range for the node (implementation-specific).
+	Call EquityService to compute hero equity vs that range.
+	If equity ≥ PREFLOP_EQ_DEFEND_THRESH:
+	Suggest a defend bucket (e.g. "call" or "2.5x").
+	Set source = "equity".
+	Include equity and threshold details in rationale.
+	Otherwise:
+	Suggest "fold" (or similarly conservative action).
+	Set source = "equity".
+o	Equity fallback requires:
+	A ranges-capable backend (pbots_calc) and compatible EQUITY_BACKEND_POLICY.
+	A valid villain range model for the node.
+5.	Rule fallback
+o	If neither chart nor equity fallback can produce advice:
+	Apply a simple rule policy controlled by PREFLOP_FALLBACK_REQUIRED.
+	Examples:
+	Return "fold" with source="rule" for uncharted / unsupported spots.
+	Return a benign default (e.g. "fold" or "call") depending on node.
+	Include a rationale explaining the rule (e.g. “conservative default
+because no chart and no equity fallback were available”).
+If all of the above fail (e.g. misconfigured charts and no fallback allowed),
+the advisor returns an error status (typically 404 or 501) with a descriptive
+message.
+________________________________________
+API behaviour
+Endpoint
+•	GET /api/coach/preflop
+Query parameters
+•	hand_id (required)
+o	Identifies the current hand.
+o	Must refer to a hand started via /api/hand/start.
+o	Used to locate hero position, hole cards, and node.
+•	idx (optional, default 0)
+o	Zero-based decision index within the hand.
+o	Allows multiple decisions (e.g. different preflop actions) to be targeted.
+Example request:
 GET /api/coach/preflop?hand_id=H1&idx=0
-
-
-Query parameters:
-•	hand_id – engine-specific hand identifier (same as used in other coach APIs).
-•	idx – decision index within the hand (0-based). For now, this is used only
-to derive a minimal context; it will become more meaningful when wired to
-real engine state.
-Responses
-200 – Chart advice
-Example:
-
+Successful response (200 OK)
+On success, the payload is an advice object:
 {
   "source": "chart",
   "bucket": "2.5x",
-  "rationale": "chart:HU 25bb SRP vSB; node=sb_open; hand=AJo; hand_id=H1; idx=0",
+  "rationale": "chart:HU_25bb_srp_vsb; node=sb_open; hand=AJo",
   "strategy_bar": {
-    "fold": 0.0,
-    "call": 0.2,
-    "2.5x": 0.8
+    "fold": 0.15,
+    "call": 0.55,
+    "2.5x": 0.30
   }
 }
-
-
 Fields:
-•	source – "chart" in the current MVP (future: "rule" / "equity").
-•	bucket – primary recommended bucket.
-•	rationale – short string explaining why this was recommended
-(chart name, node, hand, query identifiers).
-•	strategy_bar – bucket → weight map.
-404 / 400 – No chart row for this spot
-If the advisor cannot find any chart row for the derived context
-(e.g. (node, hand_key)), it should return a clear error. Implementations may
-use 404 (“no chart for this spot”) or 400 (“unsupported spot”) as long as:
-•	The status code is consistent.
-•	The detail message clearly describes the situation.
-Example:
-
-{ "detail": "no preflop chart entry for node=sb_open, hand=AQo" }
-
-501 – Coach disabled or not configured
-Two common 501 cases:
-1.	COACH_ENABLED is false:
-{ "detail": "preflop coach is disabled" }
-
-2.  COACH_ENABLED is true but no charts are configured or loadable:
-{ "detail": "preflop coach charts not configured" }
-
-Current limitations (M2.1)
-The chart-only MVP intentionally leaves out a few features that will be added
-in later milestones:
-•	No equity fallback yet
-If a chart row is missing for a spot (hand/node), the advisor does not
-run an equity calculation. It simply reports the absence of a chart entry.
-•	Limited context
-The advisor currently uses a minimal PreflopContext (hand key + node,
-optional stack/positions). Future work will derive a richer context directly
-from the engine state.
+•	source
+o	"chart" – advice taken directly from a chart row.
+o	"equity" – advice derived from an equity calculation vs assumed range.
+o	"rule" – advice from a simple rule fallback when charts/equity are not
+available or permitted.
+•	bucket
+o	Primary recommended action bucket (e.g. "fold", "call", "2.2x",
+"2.5x", "3.0x", "jam").
+o	Bucket naming is consistent with bet sizing labels used by the engine.
+•	rationale
+o	Short human-readable string explaining the source:
+	Chart name, node, and hand for chart advice.
+	Equity percentage, threshold and villain range description for equity
+fallback.
+	Rule description for rule-based fallbacks.
+•	strategy_bar
+o	Map of bucket labels → weights (floats).
+o	Typically sums to 1.0 (within rounding error).
+o	For rule or equity fallbacks this may be a degenerate distribution (e.g.
+a single bucket with weight 1.0) unless the implementation models mixes.
+Error responses
+Typical status codes:
+Status	When	Example
+200	Advice successfully computed	Advice object as above.
+400	Bad input (hand_id missing, invalid idx)	{"detail":"..."}
+404	No advice possible for this spot (chart+fallback unavailable/disabled)	{"detail":"no advice for node/hand"}
+501	Coaching globally disabled or charts unusable	{"detail":"coach disabled"} or similar
+Exact wording is implementation-defined; errors should be descriptive and
+stable enough for QA.
+________________________________________
+Logging & exports
+When snapshot logging is enabled, preflop advice is stored and surfaced via
+export endpoints.
+Configuration
+•	LOG_PREFLOP_ADVICE (boolean)
+o	When true, successful GET /api/coach/preflop responses that are
+associated with a (hand_id, idx) pair are recorded in the logger DB.
+o	Each snapshot is tied to that (hand_id, idx) and later exposed in
+exports.
+Internally, logger helpers (e.g. log_preflop_advice) write a JSON payload
+for each advice call, including source, bucket, strategy_bar and
+rationale.
+Export format
+•	GET /api/export/hand/{hand_id}.json
+o	Returns a JSON object with:
+	hand_id
+	state – serialized hand state.
+	actions – list of actions.
+o	For each action, when a preflop advice snapshot exists:
+{
+  "idx": 0,
+  "street": "pre",
+  "actor_seat": 0,
+  "action": "bet",
+  "amount": 250,
+  "...": "...",
+  "preflop_advice": {
+    "source": "chart",
+    "bucket": "2.5x",
+    "rationale": "chart:HU_25bb_srp_vsb; node=sb_open; hand=AJo",
+    "strategy_bar": {
+      "fold": 0.15,
+      "call": 0.55,
+      "2.5x": 0.30
+    }
+  }
+}
+•	GET /api/export/session/{session_id}.json
+o	Returns analogous per-hand data; each hand’s actions array may include
+preflop_advice fields where logging is enabled.
+CSV exports (/api/export/hand/{hand_id}.csv and session CSV) intentionally
+do not include extra columns for snapshots; JSON exports are the source of
+truth for advice logging.
+________________________________________
+Assumptions & limitations
+The current advisor is intentionally modest and focused on HU preflop:
 •	Heads-up only
-The example charts are HU-only (SB vs BB). Multiway / 6-max charts and logic
-will be introduced later alongside the multiway equity and range parsing work.
-Despite these limitations, the advisor already provides:
-•	A stable chart format.
-•	A clear configuration story.
-•	A testable and documented /api/coach/preflop endpoint.
-This makes it straightforward to plug in more charts and gradually roll in
-equity-based fallbacks, additional nodes, and more complex table configurations.
+o	Charts are built for heads-up SB vs BB.
+o	Multiway and 6-max / full ring support are out of scope for this milestone.
+•	Assumption-bound charts
+o	Each chart is tied to specific assumptions: stack size, rake, positions.
+o	Advice is only guaranteed to be meaningful when requests match these
+assumptions (e.g. same effective stack, HU positions).
+o	Mismatched configurations may lead to missing rows (404) or rule fallbacks.
+•	Not a solver
+o	The advisor is not running a full GTO solver.
+o	Charts are static references; equity fallback uses simple thresholds; rules
+are conservative defaults.
+o	Treat advice as reasonable guidance, not as ground truth strategy.
+•	Equity fallback requires ranges
+o	Equity fallback is only available when:
+	The equity backend supports ranges (pbots_calc installed).
+	EQUITY_BACKEND_POLICY allows a ranges-capable backend (auto or
+pbots).
+o	In hands-only configurations (e.g. EQUITY_BACKEND_POLICY=pokerkit), the
+advisor will skip equity fallback and rely on charts or rules.
+•	Logging and privacy
+o	When LOG_PREFLOP_ADVICE=true, advice snapshots are persisted and surfaced
+in exports.
+o	Downstream consumers must handle these snapshots carefully (e.g. do not
+leak opponent ranges or private notes if that becomes part of the payload).
+________________________________________
+Operational checklist
+When bringing the preflop advisor up in a new environment:
+1.	Configure charts
+o	Place chart files (e.g. hu_example.json) under a suitable directory.
+o	Set PREFLOP_CHART_PATHS to include those files.
+2.	Enable coach (if desired)
+o	Set COACH_ENABLED=true for environments where advice is needed.
+o	Keep it false in environments that should not expose coaching (e.g. some
+production deployments).
+3.	Configure equity fallback (optional)
+o	Install optional equity deps (pbots_calc) if you want equity fallback.
+o	Ensure EQUITY_BACKEND_POLICY is compatible (auto/pbots).
+o	Set PREFLOP_EQ_DEFEND_THRESH to a sensible value (e.g. 0.48).
+4.	Enable logging (optional)
+o	Set LOG_PREFLOP_ADVICE=true to attach advice snapshots to exports.
+5.	Smoke test
+o	Start a HU session, play a simple preflop node and call:
+	GET /api/coach/preflop?hand_id=H1&idx=0
+o	Verify:
+	200 with source="chart" for chart-covered hands.
+	200 with source="equity" for chart gaps when equity fallback is
+available.
+	Appropriate 404/501 codes when coach is disabled or misconfigured.
 
