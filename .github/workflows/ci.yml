@@ -155,9 +155,11 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
           if [ -f backend/requirements-optional.txt ]; then
-            pip install -r backend/requirements-optional.txt;
+            # Best-effort: pbots_calc and friends may not be available on all platforms.
+            pip install -r backend/requirements-optional.txt || \
+              echo "Optional backend deps failed to install; continuing without them."
           else
-            echo "No backend/requirements-optional.txt found (pbots optional deps not installed).";
+            echo "No backend/requirements-optional.txt found (pbots optional deps not installed)."
           fi
           pip install pytest pytest-xdist
 
