@@ -79,4 +79,24 @@ PREFLOP_EQ_DEFEND_THRESH: float = float(os.getenv("PREFLOP_EQ_DEFEND_THRESH", "0
 #     rationale explaining that fallback was unavailable.
 PREFLOP_FALLBACK_REQUIRED: bool = _env_bool("PREFLOP_FALLBACK_REQUIRED", "true")
 
+
+# ---------------------------------------------------------------------------
+# Logging / snapshot configuration
+# ---------------------------------------------------------------------------
+
+# When true, successful equity calculations tied to a specific hand/index
+# may be persisted as JSON snapshots and surfaced in exports.
+LOG_EQUITY_SNAPSHOT: bool = _env_bool("LOG_EQUITY_SNAPSHOT", "false")
+
+# When true, preflop advisor responses (chart or equity-based) tied to a
+# specific hand/index may be persisted and surfaced in exports.
+LOG_PREFLOP_ADVICE: bool = _env_bool("LOG_PREFLOP_ADVICE", "false")
+
+# Optional redaction knob for equity snapshots. When true, callers that
+# log equity snapshots should avoid storing raw card/range detail and
+# instead prefer abstracted identifiers (e.g. hand keys, range profile
+# names). Behaviour is enforced by callers; this flag is intentionally
+# conservative and defaults to false.
+LOG_EQUITY_SNAPSHOT_REDACT: bool = _env_bool("LOG_EQUITY_SNAPSHOT_REDACT", "false")
+
 # Expose additional flags here as needed.

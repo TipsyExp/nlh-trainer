@@ -7,7 +7,8 @@ from typing import List, Literal, Optional, Tuple, cast
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from ...services.equity.base import PlayerSpec, Card
+from ...logger import log_equity_snapshot
+from ...services.equity.base import Card, PlayerSpec
 from ...services.equity.service import EquityService
 
 router = APIRouter(tags=["equity"])
@@ -119,7 +120,9 @@ def _validate_players(players: List[PlayerIn]) -> None:
 
 
 def _validate_no_collisions_if_fixed_hands(
-    players: List[PlayerIn], board: List[Card], dead: List[Card]
+    players: List[PlayerIn],
+    board: List[Card],
+    dead: List[Card],
 ) -> None:
     """When everyone supplies fixed hands, ensure no duplicates across all inputs."""
     if all(p.hand is not None for p in players):
@@ -143,11 +146,23 @@ def _validate_no_collisions_if_fixed_hands(
 
 
 @router.post("/equity", response_model=EquityResponse)
-def calc_equity(req: EquityRequest) -> EquityResponse:
+def calc_equity(
+    req: EquityRequest,
+    hand_id: Optional[str] = None,
+    idx: Optional[int] = None,
+) -> EquityResponse:
     """
     POST /api/equity
 
     Compute equities for either explicit hands or pbots-style ranges.
+
+    Optional query parameters:
+      - hand_id: engine hand identifier (e.g. "H1"), used only for logging.
+      - idx:     decision index within the hand, used only for logging.
+
+    When both are provided and logging is enabled, a normalized snapshot
+    of the request/response is attached to the corresponding decision row
+    in the log database.
     """
     # Validate inputs defensively.
     _validate_players(req.players)
@@ -179,7 +194,9 @@ def calc_equity(req: EquityRequest) -> EquityResponse:
         Literal["hands", "ranges"], result.mode
     )
 
-    return EquityResponse(
+    players_out = [PlayerOut(**p) for p in result.per_player]
+
+    response = EquityResponse(
         ok=True,
         backend=result.backend,
         mode=mode_literal,  # "hands" or "ranges"
@@ -188,6 +205,33 @@ def calc_equity(req: EquityRequest) -> EquityResponse:
         dead=list(result.dead),
         exact=result.exact,
         iters=result.iters,
-        players=[PlayerOut(**p) for p in result.per_player],
+        players=players_out,
         raw=result.raw,
     )
+
+    # Best-effort snapshot logging when the equity call is tied to a hand/decision.
+    if hand_id is not None and idx is not None:
+        try:
+            snapshot = {
+                "backend": result.backend,
+                "mode": result.mode,
+                "policy": getattr(_service, "_policy", "auto"),
+                "n_players": result.n_players,
+                "board": list(result.board),
+                "dead": list(result.dead),
+                "exact": result.exact,
+                "iters": result.iters,
+                "per_player": result.per_player,
+                "raw": result.raw,
+                "inputs": {
+                    "players": [p.dict() for p in req.players],
+                    "board": list(req.board),
+                    "dead": list(req.dead),
+                },
+            }
+            log_equity_snapshot(hand_id=str(hand_id), idx=int(idx), snapshot=snapshot)
+        except Exception:
+            # Never let logging failures affect the API response.
+            pass
+
+    return response

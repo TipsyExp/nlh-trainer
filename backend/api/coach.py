@@ -25,6 +25,7 @@ from backend.coach.texassolver_cache import resolve_with_cache
 from backend.coach.preflop.service import PreflopAdvisorService
 from backend.config import COACH_ENABLED as CONFIG_COACH_ENABLED
 from backend.services.equity.service import EquityService
+from backend.logger import log_preflop_advice
 
 router = APIRouter(tags=["coach"])
 
@@ -116,6 +117,14 @@ def get_preflop_advice(
         "rationale": advice.rationale,
         "strategy_bar": advice.strategy_bar,
     }
+
+    # Best-effort snapshot logging (gated by config in backend.logger).
+    try:
+        log_preflop_advice(hand_id=str(hand_id), idx=int(idx), advice=payload)
+    except Exception:
+        # Never fail the request on logging errors.
+        pass
+
     return JSONResponse(payload, status_code=200)
 
 
