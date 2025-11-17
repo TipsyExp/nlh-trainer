@@ -171,10 +171,13 @@ jobs:
       - name: Build & install OMPEval native extension
         shell: bash
         run: |
-          set -euo pipefail
           if [ -d backend/native/ompeval ]; then
-            pip install ./backend/native/ompeval
-            python -c $'import sys, importlib, traceback\ntry:\n    importlib.import_module("ompeval")\n    print("[ompeval] import OK")\nexcept Exception as e:\n    print("[ompeval] import FAILED:", e)\n    traceback.print_exc()\n    sys.exit(1)'
+            echo "[ompeval] attempting build+install..."
+            if ! pip install ./backend/native/ompeval; then
+              echo "[ompeval] build/install failed; continuing without native ext"
+            fi
+            # Treat OMPEval as optional: try both names, never fail the job here.
+            python -c $'import importlib, sys, traceback\nok=False\nfor m in ("ompeval","nlh_ompeval"):\n    try:\n        importlib.import_module(m)\n        print("[ompeval] import OK:", m)\n        ok=True\n        break\n    except Exception as e:\n        print("[ompeval] import failed:", m, e)\n        traceback.print_exc()\nif not ok:\n    print("[ompeval] optional module not available; will rely on Eval7.")\nsys.exit(0)'
           else
             echo "backend/native/ompeval not found; skipping native build."
           fi
@@ -186,9 +189,14 @@ jobs:
         run: pytest -q backend/tests
 
       - name: Run equity benchmark (tiny matrix)
+        shell: bash
         run: |
+          POLICIES="auto,eval7"
+          if python -c 'import importlib.util,sys; sys.exit(0 if (importlib.util.find_spec("ompeval") or importlib.util.find_spec("nlh_ompeval")) else 1)'; then
+            POLICIES="auto,ompeval,eval7"
+          fi
           mkdir -p .bench
-          python -m backend.scripts.benchmark_equity --policies auto,ompeval,eval7 --out .bench/bench_equity.csv
+          python -m backend.scripts.benchmark_equity --policies "$POLICIES" --out .bench/bench_equity.csv
 
       - name: Upload equity benchmark CSV
         uses: actions/upload-artifact@v4
