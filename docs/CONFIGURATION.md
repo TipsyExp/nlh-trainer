@@ -1,4 +1,3 @@
-
 # Configuration
 
 The trainer backend is configured via environment variables. All variables are
@@ -40,13 +39,26 @@ manager configuration).
 These variables control the equity service. See [EQUITY.md](EQUITY.md) for
 details on backends and capabilities.
 
-| Variable                | Description                                                                                                                                                                                           | Default   | Typical use                                                                                               |
-|-------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------|-----------------------------------------------------------------------------------------------------------|
-| `EQUITY_BACKEND_POLICY` | Backend selection policy: `auto`, `pokerkit`, `henry`, or `pbots`. `auto` tries each backend in order and picks the first that can handle the request (ranges/multiway ⇒ pbots; otherwise henry/pokerkit). | `"auto"`  | Leave as `auto` in dev; pin to a specific backend in CI to exercise particular code paths.               |
-| `EQUITY_ITERS`          | Default number of Monte Carlo iterations for non-exact runs. Can be overridden per request (`iters` field in `/api/equity`).                                                                          | `20000`   | Increase for more accurate MC results; decrease for faster responses or when running many tests.         |
-| `EQUITY_SEED`           | Optional RNG seed for Monte Carlo simulation. When set, repeated calls with identical inputs produce identical MC results (subject to backend behaviour).                                             | not set   | Set in tests/benchmarks for determinism; leave unset in interactive environments to avoid correlation.   |
-| `EQUITY_TIMEOUT_MS`     | Optional soft timeout (milliseconds). Backends may stop sampling once this budget is exceeded, returning the best estimate so far.                                                                    | not set   | Use in CI or batch jobs to bound worst-case latency on large trees.                                      |
-| `HREVAL_LIB_PATH`       | Absolute path to the HenryRLee native evaluator library (e.g. `/usr/local/lib/libhreval.so`). If missing or invalid, the Henry backend is disabled and `EQUITY_BACKEND_POLICY=henry` will fall back.  | not set   | Set only in environments where you’ve installed the Henry library and want its exact HU fast path.       |
+**Backends & policy**
+
+| Variable                | Description                                                                                                                                                                                                                                     | Default  | Typical use                                                                                          |
+|-------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------|------------------------------------------------------------------------------------------------------|
+| `EQUITY_BACKEND_POLICY` | Backend selection policy: `auto`, `ompeval`, `eval7`, or `pokerkit`. `auto` tries each backend in order and picks the first that can handle the request (ranges/multiway ⇒ `ompeval`; otherwise falls back to `eval7`/`pokerkit` as available). | `"auto"` | Leave as `auto` in dev; pin to a specific backend in CI to exercise particular code paths.           |
+| `EQUITY_ITERS`          | Default number of Monte Carlo iterations for non-exact runs. Can be overridden per request (`iters` field in `/api/equity`).                                                                                                                    | `20000`  | Increase for more accurate MC results; decrease for faster responses or when running many tests.     |
+| `EQUITY_TIMEOUT_MS`     | Optional soft timeout (milliseconds). Backends may stop sampling once this budget is exceeded, returning the best estimate so far.                                                                                                              | not set  | Use in CI or batch jobs to bound worst-case latency on large trees.                                   |
+
+**OMPEval (native) knobs**
+
+| Variable                 | Description                                                                                                                                                                                                                                 | Default | Typical use                                                                                      |
+|--------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|--------------------------------------------------------------------------------------------------|
+| `OMPEVAL_THREADS`        | Number of threads OMPEval should use in Monte Carlo / enumeration where applicable. `0` lets OMPEval auto-detect hardware parallelism.                                                                                                     | `0`     | Set to a small number on CI or shared machines; leave at `0` locally to use all cores.          |
+| `OMPEVAL_STDERR_TARGET`  | Optional early-stop target for Monte Carlo standard error (as a fraction, e.g. `0.0005` = 0.05%). If set, OMPEval may stop before `iters` when the estimate stabilizes; if unset, fixed-iteration behaviour is used.                        | not set | Use in CI to keep runs short but stable; leave unset for strictly fixed-iteration runs.         |
+
+**Notes**
+
+- `ompeval` supports ranges and multiway equities up to **6 players**. Larger tables are out of scope for this backend and should be simplified (e.g., fold-out players).
+- `eval7` is a pure-Python/Cython fallback that handles hands and basic ranges; it is slower and primarily intended for environments without a native build toolchain.
+- `pokerkit` remains a pure-Python safety net (hands-focused) and is always available.
 
 ---
 
@@ -55,12 +67,12 @@ details on backends and capabilities.
 These variables control the preflop advisor. See
 [PREFLOP-ADVISOR.md](PREFLOP-ADVISOR.md) for chart format and decision logic.
 
-| Variable                 | Description                                                                                                                                                                                                                                                                   | Default | Typical use                                                                                                                        |
-|--------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|------------------------------------------------------------------------------------------------------------------------------------|
-| `COACH_ENABLED`          | Global gate for coaching APIs. When `false`, `GET /api/coach/preflop` returns HTTP `501` and no charts are loaded.                                                                                                                                                           | `false` | Enable in dev/demos when you want advice; keep `false` in environments that don’t expose coaching to end users.                   |
-| `PREFLOP_CHART_PATHS`    | Colon- or semicolon-separated list of chart file paths to load at startup (e.g. `devdata/charts/hu_example.json`). At least one valid file must be present for chart-based advice.                                                                                           | empty   | Point to your HU charts in dev or on a coaching node; leave empty if you don’t ship charts.                                       |
+| Variable                   | Description                                                                                                                                                                                                                                                                   | Default | Typical use                                                                                                                        |
+|----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|------------------------------------------------------------------------------------------------------------------------------------|
+| `COACH_ENABLED`            | Global gate for coaching APIs. When `false`, `GET /api/coach/preflop` returns HTTP `501` and no charts are loaded.                                                                                                                                                           | `false` | Enable in dev/demos when you want advice; keep `false` in environments that don’t expose coaching to end users.                   |
+| `PREFLOP_CHART_PATHS`      | Colon- or semicolon-separated list of chart file paths to load at startup (e.g. `devdata/charts/hu_example.json`). At least one valid file must be present for chart-based advice.                                                                                           | empty   | Point to your HU charts in dev or on a coaching node; leave empty if you don’t ship charts.                                       |
 | `PREFLOP_EQ_DEFEND_THRESH` | Equity threshold for the fallback policy (0–1). When chart advice is missing and equity fallback runs, hero defends (call/continue) if equity ≥ threshold; otherwise fold.                                                                                                   | `0.48`  | Tune based on pool and risk tolerance (e.g. slightly lower to defend more vs aggressive open ranges).                             |
-| `PREFLOP_FALLBACK_REQUIRED` | Boolean knob that controls behaviour when chart advice is missing **and** equity fallback can’t run (e.g. no range-capable backend). When `true`, the advisor raises and the API returns `501` instead of guessing. When `false`, it returns a conservative default (usually fold) with `source="rule"`. | `true`  | Use `true` in CI and “strict” environments; use `false` if you prefer a best-effort, conservative recommendation instead of `501`. |
+| `PREFLOP_FALLBACK_REQUIRED`| Boolean knob that controls behaviour when chart advice is missing **and** equity fallback can’t run (e.g. no range-capable backend). When `true`, the advisor raises and the API returns `501` instead of guessing. When `false`, it returns a conservative default (usually fold) with `source="rule"`. | `true`  | Use `true` in CI and “strict” environments; use `false` if you prefer a best-effort, conservative recommendation instead of `501`. |
 
 ---
 
@@ -70,11 +82,11 @@ These variables control optional logging of equity and preflop advice
 snapshots. Snapshots are not part of the core state; they appear only in JSON
 exports for debugging, analysis, or audit.
 
-| Variable                    | Description                                                                                                                                                                                                                                                   | Default | Typical use                                                                                                  |
-|-----------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|--------------------------------------------------------------------------------------------------------------|
-| `LOG_EQUITY_SNAPSHOT`       | When `true`, successful `POST /api/equity` calls that include `hand_id` and `idx` are persisted by the logger. Export endpoints (`/api/export/hand/*.json`, `/api/export/session/*.json`) then surface this data under `equity_snapshot` for the matching action. | `false` | Enable temporarily when analysing hands or validating the preflop advisor against equity outputs.           |
-| `LOG_EQUITY_SNAPSHOT_REDACT`| When `true`, callers that log snapshots should avoid storing raw hole cards/ranges and instead use abstract identifiers (e.g. hand keys, range names). Enforcement is done by callers; this flag just signals that redaction is desired.                      | `false` | Set to `true` in production or shared environments to reduce sensitive information in logged snapshots.     |
-| `LOG_PREFLOP_ADVICE`        | When `true`, successful `GET /api/coach/preflop` responses are persisted and attached as `preflop_advice` objects in JSON exports for the corresponding `(hand_id, idx)` action.                                                                            | `false` | Enable when you want a replayable record of advice used during training/coaching sessions.                  |
+| Variable                      | Description                                                                                                                                                                                                                                                   | Default | Typical use                                                                                                  |
+|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|--------------------------------------------------------------------------------------------------------------|
+| `LOG_EQUITY_SNAPSHOT`         | When `true`, successful `POST /api/equity` calls that include `hand_id` and `idx` are persisted by the logger. Export endpoints (`/api/export/hand/*.json`, `/api/export/session/*.json`) then surface this data under `equity_snapshot` for the matching action. | `false` | Enable temporarily when analysing hands or validating the preflop advisor against equity outputs.           |
+| `LOG_EQUITY_SNAPSHOT_REDACT`  | When `true`, callers that log snapshots should avoid storing raw hole cards/ranges and instead use abstract identifiers (e.g. hand keys, range names). Enforcement is done by callers; this flag just signals that redaction is desired.                      | `false` | Set to `true` in production or shared environments to reduce sensitive information in logged snapshots.     |
+| `LOG_PREFLOP_ADVICE`          | When `true`, successful `GET /api/coach/preflop` responses are persisted and attached as `preflop_advice` objects in JSON exports for the corresponding `(hand_id, idx)` action.                                                                            | `false` | Enable when you want a replayable record of advice used during training/coaching sessions.                  |
 
 Notes:
 
@@ -101,9 +113,12 @@ HAND_AUTO_ENABLED=true
 # Equity settings
 EQUITY_BACKEND_POLICY=auto
 EQUITY_ITERS=20000
-# Optional; uncomment for deterministic MC results:
-# EQUITY_SEED=42
+# Optional runtime limits for MC:
 # EQUITY_TIMEOUT_MS=500
+
+# OMPEval tuning (optional; native backend)
+# OMPEVAL_THREADS=0           # 0 = auto
+# OMPEVAL_STDERR_TARGET=0.001 # stop MC early when <= 0.1% std error
 
 # Preflop coach
 COACH_ENABLED=true

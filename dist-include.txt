@@ -4,6 +4,7 @@ LICENSE
 Makefile
 requirements.txt
 backend/requirements.txt
+backend/requirements-optional.txt
 
 # ---- Backend runtime (no tests)
 backend/__init__.py
@@ -15,13 +16,23 @@ backend/models/**
 backend/adapters/**
 backend/policy/**
 backend/routers/**
-backend/coach/**            # coach scaffold (node_key/cache/api runtime)
+backend/services/**          # includes equity service + backends (OMPEval/Eval7/range shim)
+backend/coach/**             # coach scaffold (node_key/cache/api runtime)
 backend/scripts/autoplay.py
+backend/scripts/equity_cli.py
+backend/scripts/benchmark_equity.py
+
+# ---- Native bindings / optional build files for OMPEval
+backend/native/ompeval/**
 
 # ---- External adapters (if any live outside backend/)
-adapters/solver/**          # TexasSolver stub adapter (kept out of backend/)
+adapters/solver/**           # TexasSolver stub adapter (kept out of backend/)
 
 # ---- Docs (API, schema, runbook, examples). Exclude scripts.
 docs/*.md
 docs/examples/*.json
 docs/examples/*.csv
+
+# ---- Helper build scripts (optional)
+scripts/build_ompeval.sh
+scripts/build_ompeval.ps1

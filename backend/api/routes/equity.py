@@ -72,7 +72,7 @@ class EquityResponse(BaseModel):
     """
 
     ok: bool
-    backend: str
+    backend: str  # e.g. "ompeval", "eval7", or "pokerkit"
     mode: Literal["hands", "ranges"]
     n_players: int
     board: List[Card]
@@ -154,7 +154,8 @@ def calc_equity(
     """
     POST /api/equity
 
-    Compute equities for either explicit hands or pbots-style ranges.
+    Compute equities for either explicit hands or range strings
+    (PokerStove/Equilab-like).
 
     Optional query parameters:
       - hand_id: engine hand identifier (e.g. "H1"), used only for logging.

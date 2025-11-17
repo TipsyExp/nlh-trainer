@@ -130,15 +130,17 @@ jobs:
       - name: Run tests
         run: pytest -q backend/tests
 
-  unit-tests-pbots:
-    name: Unit Tests (Backend, pbots optional deps)
+  unit-tests-ompeval:
+    name: Unit Tests (Backend, OMPEval native + Eval7)
     runs-on: ubuntu-24.04
     needs: lint-python
     env:
-      LOG_DB_PATH: ${{ github.workspace }}/.data/ci-unit-pbots.sqlite
+      LOG_DB_PATH: ${{ github.workspace }}/.data/ci-unit-ompeval.sqlite
       COACH_ENABLED: "false"
       PYTHONHASHSEED: "0"
       PYTHONPATH: .
+      # Prefer OMPEval when available; service still falls back if build fails
+      EQUITY_BACKEND_POLICY: "auto"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -149,32 +151,56 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install backend deps (base + optional)
+      - name: Install build toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build
+
+      - name: Install backend deps (base)
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
-          if [ -f backend/requirements-optional.txt ]; then
-            # Best-effort: pbots_calc and friends may not be available on all platforms.
-            pip install -r backend/requirements-optional.txt || \
-              echo "Optional backend deps failed to install; continuing without them."
-          else
-            echo "No backend/requirements-optional.txt found (pbots optional deps not installed)."
-          fi
-          pip install pytest pytest-xdist
 
-      - name: Run backend tests (pbots-enabled)
+      - name: Install optional deps (Eval7 + build helpers)
+        run: |
+          if [ -f backend/requirements-optional.txt ]; then
+            pip install -r backend/requirements-optional.txt || true
+          fi
+          pip install --upgrade scikit-build-core pybind11
+
+      - name: Build & install OMPEval native extension
+        run: |
+          if [ -d backend/native/ompeval ]; then
+            pip install ./backend/native/ompeval
+            python - <<'PY'
+import sys
+try:
+    import ompeval  # noqa:F401
+    print("[ompeval] import OK")
+except Exception as e:
+    print("[ompeval] import FAILED:", e)
+    sys.exit(1)
+PY
+          else
+            echo "backend/native/ompeval not found; skipping native build."
+          fi
+
+      - name: Install test tooling
+        run: pip install pytest pytest-xdist
+
+      - name: Run backend tests (native-enabled)
         run: pytest -q backend/tests
 
       - name: Run equity benchmark (tiny matrix)
         run: |
           mkdir -p .bench
-          python -m backend.scripts.benchmark_equity --policies auto,pbots --out .bench/bench_equity.csv
+          python -m backend.scripts.benchmark_equity --policies auto,ompeval,eval7 --out .bench/bench_equity.csv
 
       - name: Upload equity benchmark CSV
         uses: actions/upload-artifact@v4
         with:
-          name: equity-bench-pbots
+          name: equity-bench-ompeval
           path: .bench/bench_equity.csv
           if-no-files-found: warn
 
@@ -337,36 +363,26 @@ jobs:
             exit 1
           fi
 
-      # Robust root detection
       - name: Determine extracted root
         if: steps.detect_dist.outputs.present == 'true'
         id: find_root
         run: |
           set -euo pipefail
           ROOT_DIR=".tmp-dist"
-
-          # Case 1: flat archive (files land directly in .tmp-dist)
           if [ -f "$ROOT_DIR/backend/main.py" ]; then
             echo "root=$ROOT_DIR" >> $GITHUB_OUTPUT
-            echo "Using extracted root (flat): $ROOT_DIR"
             exit 0
           fi
-
-          # Case 2: single top-level folder
           mapfile -t CANDIDATES < <(find "$ROOT_DIR" -mindepth 1 -maxdepth 1 -type d | sort)
           if [ "${#CANDIDATES[@]}" -eq 1 ]; then
             ROOT_DIR="${CANDIDATES[0]}"
           else
-            # Case 3: search for folder that contains backend/main.py
             MATCH_PARENT="$(dirname "$(find "$ROOT_DIR" -type f -path "*/backend/main.py" | head -n 1 || true)")"
             if [ -n "$MATCH_PARENT" ]; then
               ROOT_DIR="$MATCH_PARENT"
             fi
           fi
-
           echo "root=$ROOT_DIR" >> $GITHUB_OUTPUT
-          echo "Using extracted root: $ROOT_DIR"
-          # Helpful listing for quick debugging
           find "$ROOT_DIR" -maxdepth 2 -type f | sort
 
       - name: Forbidden content check
@@ -493,7 +509,6 @@ jobs:
       - name: Detect Coach API
         id: detect_coach
         run: |
-          # Consider coach API "present" only if a coach router file exists
           if [ -f backend/api/coach.py ]; then
             echo "present=true" >> $GITHUB_OUTPUT
           else

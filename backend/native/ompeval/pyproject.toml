@@ -1,0 +1,48 @@
+# backend/native/ompeval/pyproject.toml
+#
+# Build config for the OMPEval Python extension.
+# This uses setuptools as the PEP 517 backend and expects a companion
+# setup.py in the same directory that defines an Extension named "ompeval"
+# built from pybind_ompeval.cpp (and links against OMPEval).
+#
+# Notes:
+# - Requires a C++17-capable compiler.
+# - Requires OMPEval headers/libraries in your compiler include/link paths.
+# - Requires pybind11 headers available at build time.
+# - The built module is intended to be importable as `ompeval`.
+
+[build-system]
+requires = [
+  "setuptools>=68",
+  "wheel",
+  "pybind11>=2.10",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nlh-ompeval"
+version = "0.1.0"
+description = "OMPEval (C++) Python bindings for NLH equity (ranges, multiway)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "ISC" }
+authors = [{ name = "NLH Trainer", email = "devnull@example.com" }]
+keywords = ["poker", "equity", "ompeval", "nlh", "ranges", "pybind11"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C++",
+  "License :: OSI Approved :: ISC License (ISCL)",
+  "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pybind11>=2.10",
+]
+
+[tool.setuptools]
+# We only build a compiled extension; no Python packages to discover here.
+include-package-data = true
+
+# The actual Extension (name, sources, include/link args) is defined in setup.py.
+# This file exists to provide a modern PEP 517 build entrypoint and metadata.

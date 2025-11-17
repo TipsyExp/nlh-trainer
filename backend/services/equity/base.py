@@ -22,11 +22,11 @@ class PlayerSpec:
 
     Exactly one of `hand` or `range` must be provided:
       - `hand`: a fixed two-card hand like ("Ah", "Ad").
-      - `range`: a pbots_calc-style range string, e.g. "JJ+,AKs,AKo" or "random".
+      - `range`: a range string (PokerStove/Equilab-like), e.g. "JJ+,AKs,AKo" or "random".
     """
 
     hand: Optional[Tuple[Card, Card]] = None
-    range: Optional[str] = None  # pbots_calc syntax ranges or "random"
+    range: Optional[str] = None  # PokerStove/Equilab-like syntax ranges or "random"
 
     def __post_init__(self) -> None:
         # Exactly one of hand/range must be provided
@@ -42,7 +42,7 @@ class EquityResult:
     Normalized result returned by all equity backends.
 
     Fields:
-      - backend: which backend produced this result ("pbots_calc" | "henry" | "pokerkit").
+      - backend: which backend produced this result ("ompeval" | "eval7" | "pokerkit").
       - mode:    "hands" if all players have fixed hands, otherwise "ranges".
       - n_players: number of players in the query.
       - board:   tuple of board cards.
@@ -51,10 +51,15 @@ class EquityResult:
       - iters:   number of iterations used in MC mode (None for exact).
       - per_player: list of dicts such as:
             {"win": int, "tie": int, "equity": float, ...}
-      - raw:     backend-specific extras (optional).
+      - raw:     backend-specific extras (optional). Common keys include:
+            - "simulations" / "samples": total trials or boards evaluated
+            - "std_err": Monte Carlo standard error (if available)
+            - "threads": number of threads used (if applicable)
+            - "policy": backend policy name used by the service
+            - any other backend-native diagnostics
     """
 
-    backend: str  # "pbots_calc" | "henry" | "pokerkit"
+    backend: str  # "ompeval" | "eval7" | "pokerkit"
     mode: str  # "hands" | "ranges"
     n_players: int
     board: Tuple[Card, ...]
@@ -74,7 +79,7 @@ class EquityBackend(Protocol):
 
     def supports_ranges(self) -> bool:
         """
-        Return True if this backend can handle ranged inputs (pbots-style),
+        Return True if this backend can handle ranged inputs (PokerStove/Equilab-like),
         False if it only supports fixed hands.
         """
         ...

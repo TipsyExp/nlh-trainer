@@ -6,7 +6,7 @@ import csv
 import os
 import sys
 import time
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence  # <- removed Tuple
 
 from backend.services.equity.base import Card, EquityResult, PlayerSpec
 from backend.services.equity.service import EquityService
@@ -18,9 +18,11 @@ def _scenarios() -> List[Dict[str, Any]]:
 
     These are intentionally small so they are safe to run locally or in CI.
     They cover:
-      - HU fixed hands (preflop + flop).
-      - HU ranges (preflop).
-      - 3-way ranges (preflop).
+      - HU fixed hands (preflop MC).
+      - HU fixed hands (flop exact).
+      - HU fixed hands (flop MC) -> compared vs exact to compute err.
+      - HU ranges (preflop MC).
+      - 3-way ranges (preflop MC).
     """
     return [
         {
@@ -35,15 +37,27 @@ def _scenarios() -> List[Dict[str, Any]]:
             "iters": 10_000,
         },
         {
-            "name": "hu_hands_flop",
+            "name": "hu_hands_flop_exact",
             "players": [
                 PlayerSpec(hand=("Ah", "Ad")),
                 PlayerSpec(hand=("Kh", "Qh")),
             ],
             "board": ["As", "Kd", "2c"],
             "dead": [],
-            "exact": True,  # prefer exact when feasible
+            "exact": True,
             "iters": None,
+        },
+        {
+            # Same as the exact flop case, but MC to estimate error vs exact
+            "name": "hu_hands_flop_mc",
+            "players": [
+                PlayerSpec(hand=("Ah", "Ad")),
+                PlayerSpec(hand=("Kh", "Qh")),
+            ],
+            "board": ["As", "Kd", "2c"],
+            "dead": [],
+            "exact": False,
+            "iters": 20_000,
         },
         {
             "name": "hu_ranges_preflop",
@@ -73,7 +87,8 @@ def _scenarios() -> List[Dict[str, Any]]:
 
 def _parse_policies(raw: Optional[str]) -> List[str]:
     if not raw:
-        return ["auto", "pokerkit", "henry", "pbots"]
+        # Default matrix for CI/local: new stack (ompeval primary), plus fallbacks
+        return ["auto", "ompeval", "eval7", "pokerkit"]
     parts = [p.strip().lower() for p in raw.split(",")]
     return [p for p in parts if p]
 
@@ -82,20 +97,38 @@ def _samples_from_result(res: EquityResult) -> int:
     """
     Best-effort extraction of 'samples' from an EquityResult.
 
-    For pbots_calc: raw["simulations"] (or res.iters in some builds).
-    For PokerKit/Henry fallbacks: raw["trials"].
-    Fallback to res.iters when present.
+    For OMPEval: prefer raw["iters"] (for MC), else res.iters.
+    For Eval7:   raw["trials"] or res.iters.
+    For PokerKit: raw["trials"] or res.iters.
     """
     if res.raw:
-        sims = res.raw.get("simulations")
-        if isinstance(sims, (int, float)):
-            return int(sims)
-        trials = res.raw.get("trials")
-        if isinstance(trials, (int, float)):
-            return int(trials)
+        for key in ("iters", "samples", "simulations", "trials"):
+            v = res.raw.get(key)
+            if isinstance(v, (int, float)):
+                return int(v)
     if res.iters is not None:
         return int(res.iters)
     return 0
+
+
+def _stderr_from_result(res: EquityResult) -> Optional[float]:
+    if res.raw:
+        v = res.raw.get("stderr") or res.raw.get("std_err")
+        try:
+            return float(v) if v is not None else None
+        except Exception:
+            return None
+    return None
+
+
+def _threads_from_result(res: EquityResult) -> Optional[int]:
+    if res.raw:
+        v = res.raw.get("threads")
+        try:
+            return int(v) if v is not None else None
+        except Exception:
+            return None
+    return None
 
 
 def _equities_from_result(res: EquityResult) -> List[float]:
@@ -123,6 +156,51 @@ def _backend_supports_ranges(
     return None
 
 
+def _mean_abs_err(a: Sequence[float], b: Sequence[float]) -> Optional[float]:
+    if not a or not b or len(a) != len(b):
+        return None
+    return sum(abs(x - y) for x, y in zip(a, b)) / float(len(a))
+
+
+def _compute_err_vs_exact(
+    svc: EquityService,
+    players: Sequence[PlayerSpec],
+    board: Sequence[Card],
+    dead: Sequence[Card],
+    iters: Optional[int],
+) -> Optional[float]:
+    """
+    For a small HU flop case, run an exact baseline and compare to MC equities.
+
+    Returns mean absolute error across players, or None if exact is unavailable.
+    """
+    try:
+        exact_res = svc.calc_equity(
+            players=players,
+            board=board,
+            dead=dead,
+            iters=None,
+            exact=True,
+            timeout_ms=None,
+        )
+        if not exact_res.exact:
+            return None
+        exact_eqs = _equities_from_result(exact_res)
+
+        mc_res = svc.calc_equity(
+            players=players,
+            board=board,
+            dead=dead,
+            iters=iters or 20_000,
+            exact=False,
+            timeout_ms=None,
+        )
+        mc_eqs = _equities_from_result(mc_res)
+        return _mean_abs_err(exact_eqs, mc_eqs)
+    except Exception:
+        return None
+
+
 def run_matrix(
     policies: Iterable[str],
     scenarios: Iterable[Dict[str, Any]],
@@ -141,10 +219,13 @@ def run_matrix(
         "exact",
         "iters",
         "samples",
+        "stderr",
+        "threads",
         "elapsed_ms",
         "evals_per_sec",
         "eq_sum",
         "equities",
+        "err_vs_exact",
     ]
     writer = csv.DictWriter(csv_out, fieldnames=fieldnames)
     writer.writeheader()
@@ -177,6 +258,9 @@ def run_matrix(
             board_len = len(board)
             samples = 0
             equities: List[float] = []
+            stderr_val: Optional[float] = None
+            threads_val: Optional[int] = None
+            err_vs_exact: Optional[float] = None
 
             try:
                 res = svc.calc_equity(
@@ -194,6 +278,19 @@ def run_matrix(
                 supports_ranges = _backend_supports_ranges(svc, backend_name)
                 samples = _samples_from_result(res)
                 equities = _equities_from_result(res)
+                stderr_val = _stderr_from_result(res)
+                threads_val = _threads_from_result(res)
+
+                # Optional correctness probe: for the HU flop MC scenario,
+                # compute mean absolute error vs exact (if exact is supported).
+                if scenario_name == "hu_hands_flop_mc" and not exact:
+                    err_vs_exact = _compute_err_vs_exact(
+                        svc=svc,
+                        players=players,
+                        board=board,
+                        dead=dead,
+                        iters=iters,
+                    )
 
             except Exception as e:
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -222,10 +319,15 @@ def run_matrix(
                 "exact": int(bool(exact)),
                 "iters": "" if iters is None else int(iters),
                 "samples": samples,
+                "stderr": "" if stderr_val is None else f"{stderr_val:.6g}",
+                "threads": "" if threads_val is None else int(threads_val),
                 "elapsed_ms": round(elapsed_ms, 3),
                 "evals_per_sec": round(evals_per_sec, 3) if evals_per_sec else 0.0,
                 "eq_sum": round(eq_sum, 6) if equities else "",
                 "equities": ";".join(f"{e:.6f}" for e in equities),
+                "err_vs_exact": (
+                    "" if err_vs_exact is None else f"{float(err_vs_exact):.6f}"
+                ),
             }
             writer.writerow(row)
 
@@ -239,7 +341,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "and basic equity summaries.\n\n"
             "Example:\n"
             "  python -m backend.scripts.benchmark_equity --out bench.csv\n"
-            "  python -m backend.scripts.benchmark_equity --policies auto,pbots\n"
+            "  python -m backend.scripts.benchmark_equity --policies auto,ompeval,eval7\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -250,9 +352,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument(
         "--policies",
-        default="auto,pokerkit,henry,pbots",
+        default="auto,ompeval,eval7,pokerkit",
         help="Comma-separated EQUITY_BACKEND_POLICY values to benchmark "
-        '(default: "auto,pokerkit,henry,pbots").',
+        '(default: "auto,ompeval,eval7,pokerkit").',
     )
     return ap
 

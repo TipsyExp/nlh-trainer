@@ -88,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--range",
         dest="ranges",
         action="append",
-        help="Range string for each player (pbots_calc syntax, e.g. 'JJ+', 'random').",
+        help="Range string per player (PokerStove/Equilab-style, e.g. 'JJ+', 'AQs+', 'random').",
     )
 
     ap.add_argument(
@@ -120,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument(
         "--policy",
-        choices=["auto", "pokerkit", "henry", "pbots"],
+        choices=["auto", "ompeval", "eval7", "pokerkit"],
         default=os.getenv("EQUITY_BACKEND_POLICY", "auto"),
         help="Backend selection policy (default: %(default)s).",
     )
@@ -194,9 +194,28 @@ def main() -> None:
 
     # Optional backend extras
     if res.raw:
-        sims = res.raw.get("simulations") or res.raw.get("trials")
+        sims = (
+            res.raw.get("simulations")
+            or res.raw.get("trials")
+            or res.raw.get("samples")
+        )
+        stderr = res.raw.get("std_err") or res.raw.get("stderr")
+        speed = res.raw.get("boards_per_sec") or res.raw.get("speed")
+        extras = []
         if sims:
-            print(f"(samples: {sims})")
+            extras.append(f"samples={int(sims)}")
+        if stderr is not None:
+            try:
+                extras.append(f"std_err={float(stderr):.6g}")
+            except Exception:
+                extras.append(f"std_err={stderr}")
+        if speed is not None:
+            try:
+                extras.append(f"speed={float(speed):.0f}/s")
+            except Exception:
+                extras.append(f"speed={speed}/s")
+        if extras:
+            print("(" + ", ".join(extras) + ")")
 
 
 if __name__ == "__main__":

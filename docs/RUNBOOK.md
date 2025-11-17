@@ -1,25 +1,25 @@
-
 # Runbook
 
-This runbook provides a high-level overview of how to run and interact with
-the trainer backend. It reflects the latest API semantics.
+This runbook shows how to run and interact with the trainer backend. It reflects the latest equity stack (OMPEval → Eval7 → PokerKit), total-amount bet semantics, unified gating, and snapshot logging.
 
 ---
 
-## Starting the backend
+## 1) Start the backend
 
-Install dependencies and launch the server with [`uvicorn`](https://www.uvicorn.org/):
+Install backend deps (plus optional deps if you want Eval7), then launch via `uvicorn`.
 
 ```bash
-python -m pip install -r requirements.txt
-uvicorn backend.main:app
-Configure behaviour via environment variables. See
-Configuration for details.
+# From repo root
+python -m pip install -r backend/requirements.txt
+# Optional (Eval7 fallback and build helpers; OMPEval is a native build — see docs/BUILD-OMPEVAL.md)
+python -m pip install -r backend/requirements-optional.txt
 
-Creating a session
-Use the /api/session endpoint to create a new session. Include table params
-to match your environment. For example:
-curl -X POST http://localhost:8000/api/session \
+# Run the API (hot reload for dev)
+uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+Configure behavior via environment variables (recommended in a .env). See docs/CONFIGURATION.md
+2) Create a session
+Use /api/session to define table params (seats, blinds, stacks, bot mode/profile, etc.).
+curl -X POST http://127.0.0.1:8000/api/session \
   -H "Content-Type: application/json" \
   -d '{
     "seats": 2,
@@ -29,185 +29,140 @@ curl -X POST http://localhost:8000/api/session \
     "bot_mode": "heuristic",
     "bot_profile": "TAG"
   }'
-
-The response contains a session_id which must be supplied to subsequent hand
-and action calls.
+The response includes session_id—pass it to subsequent hand/action calls.
 ________________________________________
-Starting a hand
-curl -X POST http://localhost:8000/api/hand/start \
+3) Start a hand
+curl -X POST http://127.0.0.1:8000/api/hand/start \
   -H "Content-Type: application/json" \
-  -d '{"session_id": "...", "seat": 0}'
+  -d '{"session_id": "YOUR_SESSION_ID", "seat": 0}'
 
-If bots are enabled (BOT_MODE != "none"), the engine will automatically
-apply all bot actions until it is the human's turn. The response contains the
-full state and the actor information.
+If bots are enabled (bot_mode != "none"), the engine auto-plays until the first human decision. The response includes the full state and the current actor.
 ________________________________________
-Posting an action
-curl -X POST http://localhost:8000/api/hand/action \
+4) Post an action (total-amount semantics)
+When betting or raising, you specify the total stack commitment target (the engine snaps it to the nearest legal bucket if needed).
+curl -X POST http://127.0.0.1:8000/api/hand/action \
   -H "Content-Type: application/json" \
-  -d '{"session_id": "...", "seat": 0, "action": "bet", "amount": 320}'
-
-The amount is a total commitment target; the engine will snap off-tree
-totals to the nearest bucket. The response includes a pre-bot snapshot of the
-state and an array of bot actions applied in response (bots_applied).
-Tip: include an X-Request-ID header (any unique string) on API calls. This
-value is echoed in debug events and helps correlate requests with engine
-transitions.
+  -d '{"session_id":"YOUR_SESSION_ID","seat":0,"action":"bet","amount":320}'
+The response includes:
+•	a pre-bot state snapshot, and
+•	bots_applied: the auto-played responses (if any).
+Tips
+•	If you send an off-tree total, the engine snaps to a legal bucket and sets snapped=true in state.last_action.
+•	You can pass a unique X-Request-ID header to correlate with debug streams.
 ________________________________________
-Auto-stepping bots
-For development convenience, bots can be auto-advanced via /api/hand/auto.
-Ensure HAND_AUTO_ENABLED=true and call:
-curl -X POST http://localhost:8000/api/hand/auto \
+5) Auto-step bots (dev convenience)
+Enable via HAND_AUTO_ENABLED=true then:
+curl -X POST http://127.0.0.1:8000/api/hand/auto \
   -H "Content-Type: application/json" \
-  -d '{"session_id": "..."}'
+  -d '{"session_id": "YOUR_SESSION_ID"}'
 
-When HAND_AUTO_ENABLED=false, this endpoint returns HTTP 501 Not Implemented.
+If disabled, you get HTTP 501.
 ________________________________________
-Debugging
-Set ENGINE_DEBUG_HTTP=true to enable structured debug events. Subscribe to
-them via Server-Sent Events at /api/debug/engine/events. Use the
-X-Request-ID header on API calls to correlate client requests with engine
-transitions.
-To capture a complete hand for analysis, call /api/debug/engine/bundle to
-download a ZIP archive of events and state.
+6) Debugging
+Set ENGINE_DEBUG_HTTP=true to expose structured events.
+•	SSE stream: /api/debug/engine/events
+•	Bundle: /api/debug/engine/bundle (zip of recent events and state)
+Include X-Request-ID in API calls to correlate client requests with engine transitions.
 ________________________________________
-Equity & preflop advisor
-This section covers how to verify the equity service and preflop advisor,
-how to enable and inspect snapshots via exports, and how to debug common
-issues.
-See also:
-•	EQUITY.md for backend details and capabilities.
-•	PREFLOP-ADVISOR.md for backend details and capabilities.
-•	API-CONTRACT.md for full endpoint schemas.
-Verifying the equity service
-The equity service computes exact or Monte Carlo (MC) equity for fixed hands
-and, when supported, ranges.
-1.	Basic HU sanity check
-With the backend running, call:
-curl -X POST http://localhost:8000/api/equity \
+7) Equity & preflop advisor
+Equity service
+Computes exact or Monte Carlo (MC) equities for hands and, where supported, ranges/multiway.
+•	Primary backend: OMPEval (native, fast, 2–6 players, ranges + exact/MC, multithreaded)
+•	Fallback: Eval7 (pip, ranges; slower)
+•	Last resort: PokerKit (pure Python; hands-focused)
+Backends are auto-selected via EQUITY_BACKEND_POLICY=auto (ompeval → eval7 → pokerkit). See EQUITY.md for details.
+HU sanity check (hands)
+curl -X POST http://127.0.0.1:8000/api/equity \
   -H "Content-Type: application/json" \
   -d '{
-    "players": [
-      { "hand": ["As", "Kd"] },
-      { "hand": ["Qc", "Jh"] }
+    "players":[
+      {"hand":["As","Kd"]},
+      {"hand":["Qc","Jh"]}
     ],
-    "board": [],
-    "dead": [],
-    "iters": 20000,
-    "exact": false
+    "board":[],
+    "dead":[],
+    "iters":20000,
+    "exact":false
   }'
-•  Verify in the response:
-•	ok is true.
-•	backend is one of pokerkit, henry, or pbots.
-•	mode is "hands".
-•	n_players is 2.
-•	The sum of equity in players[*].equity is ≈ 1.0.
-•  Exact vs MC
-•	Repeat the same request with "exact": true and omit iters.
-•	Expect exact=true and iters=null (or 0 depending on backend).
-•	MC (exact=false) runs will vary slightly between calls unless
-EQUITY_SEED is set.
-•  Ranges (when supported)
-If you have a ranges-capable backend (e.g. pbots) installed and
-EQUITY_BACKEND_POLICY allows it:
 
-curl -X POST http://localhost:8000/api/equity \
+Verify:
+•	ok: true
+•	backend is one of "ompeval", "eval7", "pokerkit"
+•	mode: "hands", n_players: 2
+•	sum(players[*].equity) ≈ 1.0
+Exact vs MC
+•	Repeat with "exact": true (omit iters). Expect exact=true, iters=null.
+•	MC runs vary unless you set EQUITY_SEED.
+Ranges & multiway (requires ranges-capable backend)
+With OMPEval built or Eval7 installed:
+curl -X POST http://127.0.0.1:8000/api/equity \
   -H "Content-Type: application/json" \
   -d '{
-    "players": [
-      { "range": "JJ+" },
-      { "range": "random" }
+    "players":[
+      {"range":"JJ+"},
+      {"range":"random"}
     ],
-    "board": [],
-    "dead": [],
-    "iters": 50000,
-    "exact": false
+    "board":[],
+    "dead":[],
+    "iters":50000,
+    "exact":false
   }'
-•	•  
-mode should be "ranges".
-•	If no ranges-capable backend is available, expect a 400 with a clear
-message about unsupported mode.
-•  CLI helper & benchmark
-For quick local experiments:
-# CLI script (hands or ranges)
+•	Expect mode: "ranges".
+•	If your environment lacks a ranges-capable backend, the endpoint returns 400 with a clear message.
+CLI helper & benchmark
+# Quick CLI
 python -m backend.scripts.equity_cli --hand AsKd --hand QcJh --iters 20000
-
-# or via Makefile:
+# or via Makefile
 make equity HANDS='AsKd,QcJh' ITERS=20000
 
-# Tiny benchmark matrix (writes CSV)
+# Tiny benchmark matrix (CSV)
 python -m backend.scripts.benchmark_equity --out bench_equity.csv
-
-# or:
+# or
 make bench-equity OUT=bench_equity.csv
-
-1.	Inspect bench_equity.csv for columns like backend, policy,
-board_len, iters, elapsed_ms, evals_per_sec.
-________________________________________
-Verifying the preflop advisor
-The preflop advisor is chart-first, with optional equity fallback. It can be
-fully disabled via COACH_ENABLED=false.
-1.	Enable coach and charts
-Set (for example in .env):
+Open the CSV and inspect columns like backend, policy, board_len, iters, elapsed_ms, evals_per_sec.
+Preflop advisor
+Chart-first with optional equity fallback. Gated by COACH_ENABLED.
+1.	Enable and load a chart (e.g. HU dev chart):
+# .env or environment
 COACH_ENABLED=true
 PREFLOP_CHART_PATHS=devdata/charts/hu_example.json
-
-•  Restart the backend so charts are loaded on startup.
-•  Query the advisor
-Make sure you have an active hand (via /api/hand/start), then:
-
-curl http://localhost:8000/api/coach/preflop?hand_id=H1&idx=0
-
-•  (Replace H1 with a real hand id from your session.)
-On success (HTTP 200), the response should contain:
-•	source: "chart", "equity", or "rule".
-•	bucket: recommended action bucket (e.g. "fold", "call", "2.5x").
-•	rationale: short string describing why this action was chosen.
-•	strategy_bar: map from bucket label to weight (sums ≈ 1.0).
-•  Behaviour by mode
-•	If the hand/node appears in your chart:
-o	source="chart" and bucket matches the chart row.
-•	If the chart misses and equity fallback is available (ranges-capable
-backend + preflop rules):
-o	source="equity" and rationale mentions the threshold and villain
-range assumption.
-•	If neither chart nor equity can be used:
-o	Either source="rule" (conservative default) or HTTP 501 depending
-on PREFLOP_FALLBACK_REQUIRED. See PREFLOP-ADVISOR.md
-1.	Coach disabled
-If COACH_ENABLED=false, the same request should return 501 Not Implemented
-with a descriptive message.
+Restart the backend.
+2.	Query:
+# Use a real hand_id/idx from your session
+curl "http://127.0.0.1:8000/api/coach/preflop?hand_id=H1&idx=0"
+Response contains:
+•	source: "chart", "equity", or "rule"
+•	bucket: recommended primary bucket (e.g., "fold", "call", "2.5x")
+•	rationale: brief explanation
+•	strategy_bar: bucket → weight (≈ sum to 1)
+Behavior:
+•	Chart hit → source="chart"
+•	Chart miss + ranges-capable equity → source="equity" with threshold in rationale
+•	Otherwise → conservative default ("rule") or 501 depending on PREFLOP_FALLBACK_REQUIRED
+If COACH_ENABLED=false, the endpoint returns 501.
 ________________________________________
-Snapshot logging & exports
-Equity and preflop advice calls can be logged and surfaced in JSON exports
-to aid debugging and analysis.
-1.	Enable snapshot logging
-Set some or all of:
+8) Snapshot logging & exports
+You can log equity and preflop advice snapshots and surface them in JSON exports.
+1.	Enable:
 LOG_EQUITY_SNAPSHOT=true
 LOG_PREFLOP_ADVICE=true
-LOG_EQUITY_SNAPSHOT_REDACT=true  # recommended in shared/prod envs
-
-•  Restart the backend.
-•  Generate snapshots
-•	Play a hand normally via /api/hand/start and /api/hand/action.
-•	Call POST /api/equity with hand_id and idx query parameters:
-curl -X POST "http://localhost:8000/api/equity?hand_id=H1&idx=0" \
+LOG_EQUITY_SNAPSHOT_REDACT=true  # recommended for shared/prod
+Restart the backend.
+2.	Generate snapshots:
+•	Play a hand normally via /api/hand/start + /api/hand/action.
+•	Call equity with hand_id and idx:
+curl -X POST "http://127.0.0.1:8000/api/equity?hand_id=H1&idx=0" \
   -H "Content-Type: application/json" \
   -d '{ "players":[{"hand":["As","Kd"]},{"hand":["Qc","Jh"]}], "board":[], "dead":[], "iters":20000 }'
+Call preflop coach during that same decision:
+curl http://127.0.0.1:8000/api/coach/preflop?hand_id=H1&idx=0
+Inspect exports:
+# Hand
+curl "http://127.0.0.1:8000/api/export/hand/H1.json" | jq .
 
-•	•  
-Call GET /api/coach/preflop?hand_id=H1&idx=0 during that same hand.
-These calls will be tied to the action at index idx for hand H1.
-•  Inspect JSON exports
-•	Export a specific hand:
-curl "http://localhost:8000/api/export/hand/H1.json" | jq .
-
-Export a session:
-curl "http://localhost:8000/api/export/session/1.json" | jq .
-
-In the resulting JSON:
-•	Each hand contains an actions array.
-•	Individual actions may include:
+# Session
+curl "http://127.0.0.1:8000/api/export/session/1.json" | jq .
+Exported actions[*] may include:
 {
   "action": "bet",
   "amount": 320,
@@ -215,70 +170,76 @@ In the resulting JSON:
   "equity_snapshot": { /* decoded snapshot from /api/equity (if logged) */ },
   "preflop_advice": { /* decoded advice from /api/coach/preflop (if logged) */ }
 }
-
-1.	Notes:
-o	These fields are optional. If logging is disabled, they are simply
-omitted.
-o	CSV exports (/api/export/hand/{id}.csv, /api/export/session/{id}.csv)
-intentionally do not contain snapshot columns; JSON is the source
-of truth for snapshots.
+Notes
+•	These fields are optional; if logging is disabled they are omitted.
+•	CSV exports do not include snapshot columns; JSON is the source of truth.
 ________________________________________
-Troubleshooting
-Common issues and how to diagnose them.
-Equity service
-Symptom: Equity always reports backend: "pokerkit" even though you
-expect pbots/Henry.
+9) Troubleshooting
+Equity
+Symptom: backend: "pokerkit" even though you expect OMPEval/Eval7
 •	Check EQUITY_BACKEND_POLICY:
-o	auto is fine; the service will try pbots, then Henry, then PokerKit.
-o	If it’s explicitly pokerkit, that’s what you’ll always get.
-•	Confirm optional backends are installed in your environment (for pbots) or
-that HREVAL_LIB_PATH points to a valid Henry library.
-•	Look at the raw field in the /api/equity response or backend logs for
-import/load errors.
-Symptom: /api/equity returns 400 with an error about unsupported mode.
-•	You likely requested ranges ("range": "...") but no ranges-capable
-backend is available under the current EQUITY_BACKEND_POLICY.
+o	auto tries ompeval → eval7 → pokerkit.
+o	If explicitly pokerkit, that’s what you’ll get.
+•	Ensure optional deps are present:
+o	Build OMPEval (see docs/BUILD-OMPEVAL.md).
+o	Install eval7 (via backend/requirements-optional.txt).
+•	Inspect raw in the equity response; look for hints like threads, samples, stderr.
+Symptom: /api/equity returns 400 about unsupported mode
+•	You likely requested range equities but no ranges-capable backend is available under the current policy.
 •	Either:
-o	Switch to fixed hands ("hand": ["Ah","Ad"] style), or
-o	Install/enable a ranges-capable backend and set EQUITY_BACKEND_POLICY
-to auto or the appropriate backend.
-Symptom: Results are noisy or “change every time.”
+o	Switch to fixed hand inputs, or
+o	Build/enable OMPEval or install Eval7 and set EQUITY_BACKEND_POLICY=auto|ompeval|eval7.
+Symptom: Results are noisy/run-to-run different
 •	MC sampling is in use (exact=false).
 •	Options:
-o	Increase EQUITY_ITERS or the iters field in the request.
-o	Set EQUITY_SEED to a fixed integer for deterministic MC runs.
-o	Use exact=true where the backend supports it (small HU trees).
-________________________________________
+o	Increase EQUITY_ITERS or request-level iters.
+o	Set EQUITY_SEED for deterministic MC.
+o	Use exact=true where supported (small trees).
 Preflop advisor
-Symptom: GET /api/coach/preflop returns 501.
-•	Check COACH_ENABLED:
-o	If false, this is expected.
-•	Verify PREFLOP_CHART_PATHS is set correctly and points to at least one
-valid chart file.
-•	Ensure the advisor code is present and wired into the app (see
-PREFLOP-ADVISOR.md
-Symptom: GET /api/coach/preflop returns 404.
-•	The request likely refers to a hand/node that isn’t covered by any loaded
-chart and equity fallback is either disabled or unavailable.
+Symptom: GET /api/coach/preflop returns 501
+•	Check COACH_ENABLED.
+•	Verify PREFLOP_CHART_PATHS points to at least one valid chart file.
+Symptom: GET /api/coach/preflop returns 404 / no advice
+•	Node/hand may be missing from charts and equity fallback is unavailable or disabled.
 •	Check:
 o	Chart metadata (positions, stack depth, format version).
 o	PREFLOP_EQ_DEFEND_THRESH and PREFLOP_FALLBACK_REQUIRED.
-o	Equity backend: equity fallback needs ranges-capable support.
+o	Equity backend availability (ranges-capable for fallback).
+Snapshots / Exports
+Symptom: equity_snapshot / preflop_advice missing in JSON exports
+•	Verify flags:
+o	LOG_EQUITY_SNAPSHOT
+o	LOG_PREFLOP_ADVICE
+o	LOG_EQUITY_SNAPSHOT_REDACT (redacts content, doesn’t disable)
+•	Ensure you included hand_id and idx in the equity/coach calls.
+•	Confirm those API calls succeeded (ok: true / HTTP 200).
+•	Remember: CSV exports do not include snapshots (JSON only).
 ________________________________________
-Snapshot logging & exports
-Symptom: equity_snapshot / preflop_advice are missing in JSON exports.
-•	Verify the flags:
-LOG_EQUITY_SNAPSHOT
-LOG_PREFLOP_ADVICE
-LOG_EQUITY_SNAPSHOT_REDACT
-•	Check that calls to /api/equity and /api/coach/preflop included
-hand_id and idx (these are required to tie snapshots to actions).
-•	Ensure the equity/advice calls succeeded with ok=true / HTTP 200.
-•	Remember: CSV exports intentionally exclude snapshots; use JSON.
-________________________________________
-If a problem persists after these checks, capture a minimal reproduction:
-1.	Enable ENGINE_DEBUG_HTTP=true.
-2.	Reproduce the issue while sending a unique X-Request-ID.
-3.	Download /api/debug/engine/bundle and the relevant /api/export/hand/*.json.
-4.	Attach these artefacts when reporting the issue.
+10) Helpful Make targets
+# Start backend (dev)
+make api
 
+# Install deps
+make install-backend
+make install-optional   # installs backend/requirements-optional.txt if present
+
+# Tests & quality
+make test-backend
+make test-frontend
+make test
+make lint
+make fmt
+
+# Equity helpers
+make equity HANDS='AhAd,KhQh' BOARD='AsKd2c' EXACT=1
+make equity RANGES='JJ+,random' ITERS=50000
+make bench-equity OUT=bench_equity.csv POLICIES='auto,ompeval,eval7'
+
+# Frontend (if present)
+make web
+
+If problems persist:
+1.	Enable ENGINE_DEBUG_HTTP=true.
+2.	Reproduce with a unique X-Request-ID.
+3.	Download /api/debug/engine/bundle and relevant /api/export/*.json.
+4.	Attach these artifacts when reporting issues.

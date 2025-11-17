@@ -45,7 +45,7 @@ together with EQUITY.md, API-CONTRACT.md and RUNBOOK.md.
 * [ ] `POST /api/equity` with two fixed hands and an empty board returns:
   * [ ] HTTP `200`.
   * [ ] `ok=true`.
-  * [ ] `backend` is one of `pokerkit`, `henry` or `pbots`.
+  * [ ] `backend` is one of `pokerkit`, `eval7`, or `ompeval`.
   * [ ] `mode="hands"`.
   * [ ] `n_players` equals the number of players sent.
   * [ ] Each entry in `players` has `win`, `tie` and `equity` fields.
@@ -58,14 +58,17 @@ together with EQUITY.md, API-CONTRACT.md and RUNBOOK.md.
   * [ ] Repeated calls show small variance in `equity` unless `EQUITY_SEED` is set.
   * [ ] Increasing `iters` produces smoother, less noisy equities.
 * [ ] Setting `EQUITY_BACKEND_POLICY=auto`:
-  * [ ] When a ranges-capable backend (pbots) is installed, calls with `range` fields report `backend="pbots"` and `mode="ranges"`.
-  * [ ] When no ranges-capable backend is installed, a ranges request returns HTTP `400` with a clear “no backend available for requested mode”-style error.
+  * [ ] When a ranges-capable backend is available (preferably `ompeval`, otherwise `eval7`), calls with `range` fields succeed and report `backend="ompeval"` (if built) or `backend="eval7"`, and `mode="ranges"`.
+  * [ ] When no ranges-capable backend is available, a ranges request returns HTTP `400` with a clear “no backend available for requested mode”-style error.
 * [ ] Setting `EQUITY_BACKEND_POLICY=pokerkit`:
   * [ ] Fixed-hand requests succeed with `backend="pokerkit"`.
   * [ ] Any ranges request fails with HTTP `400` and a clear message.
-* [ ] Optional: with Henry configured (`HREVAL_LIB_PATH` set), setting `EQUITY_BACKEND_POLICY=henry`:
-  * [ ] HU fixed-hand requests succeed with `backend="henry"`.
-  * [ ] Results are consistent for small boards in exact mode.
+* [ ] Optional: with OMPEval native extension built, setting `EQUITY_BACKEND_POLICY=ompeval`:
+  * [ ] Ranges and multiway (up to 6 players) succeed with `backend="ompeval"`.
+  * [ ] Exact/MC behaviour matches expectations on tiny boards.
+* [ ] Optional: with Eval7 installed, setting `EQUITY_BACKEND_POLICY=eval7`:
+  * [ ] Ranges succeed with `backend="eval7"` (slower than OMPEval).
+  * [ ] Results are reasonable vs OMPEval on small scenarios.
 
 ---
 
@@ -90,7 +93,7 @@ With environment:
   * [ ] `source="chart"`.
   * [ ] `bucket` matches the chart row’s primary recommendation.
 * [ ] For a hand that is deliberately left uncharted but eligible for equity fallback:
-  * [ ] If a ranges-capable backend is available and fallback is configured, `source="equity"` and `rationale` mentions the threshold (`PREFLOP_EQ_DEFEND_THRESH`) and villain range.
+  * [ ] If a ranges-capable backend is available (`ompeval` or `eval7`) and fallback is configured, `source="equity"` and `rationale` mentions the threshold (`PREFLOP_EQ_DEFEND_THRESH`) and villain range.
   * [ ] The recommended `bucket` (call/defend vs fold) matches the threshold rule.
 * [ ] When both chart and equity fallback are unavailable for a node:
   * [ ] Behaviour matches `PREFLOP_FALLBACK_REQUIRED` (for example, conservative default with `source="rule"` or a clean `404`/`501` error).
@@ -160,18 +163,20 @@ With:
 
 ---
 
-## M2: CI and benchmarks (pbots optional deps)
+## M2: CI and benchmarks (OMPEval native + Eval7 fallback)
 
-These checks are primarily for CI and developer experience. They assume an
-environment where optional deps (for example pbots) can be installed.
+These checks are primarily for CI and developer experience.
 
-* [ ] In a pbots-enabled environment, `make bench-equity OUT=bench_equity.csv POLICIES=auto,pbots`:
+* [ ] In an **OMPEval-enabled** environment, `make bench-equity OUT=bench_equity.csv POLICIES=auto,ompeval,eval7`:
   * [ ] Completes successfully within a short time.
   * [ ] Produces `bench_equity.csv` with at least one data row.
   * [ ] CSV rows include fields such as `scenario`, `policy`, `backend`, `board_len`, `iters`, `elapsed_ms`, `evals_per_sec`, and `equities`.
   * [ ] `elapsed_ms` is non-negative, `evals_per_sec` is non-negative, and values look reasonable for a tiny benchmark.
-* [ ] In the pbots-enabled CI job:
-  * [ ] Backend tests pass with optional deps installed.
-  * [ ] The equity benchmark step runs and uploads a CSV artifact (for example `equity-bench-pbots`).
-  * [ ] The default (non-optional) CI job still passes when optional deps are not available (equity range/multiway behaviour degrades gracefully).
-
+* [ ] In the OMPEval-enabled CI job:
+  * [ ] The native extension is built per `docs/BUILD-OMPEVAL.md`.
+  * [ ] Backend tests pass with the native backend available.
+  * [ ] The equity benchmark step runs and uploads a CSV artifact (for example `equity-bench-ompeval`).
+* [ ] In the default CI job (no native extension / no optional deps):
+  * [ ] Tests that require ranges/multiway **skip cleanly** (e.g., `importorskip` for OMPEval wrapper).
+  * [ ] Remaining tests pass with PokerKit and/or Eval7 if installed.
+  * [ ] The benchmark still runs with policies that are available (e.g., `auto` → `pokerkit`), producing a small CSV artifact or writing to stdout.
