@@ -174,15 +174,7 @@ jobs:
           set -euo pipefail
           if [ -d backend/native/ompeval ]; then
             pip install ./backend/native/ompeval
-            python -c "import sys, importlib
-import traceback
-try:
-    importlib.import_module('ompeval')
-    print('[ompeval] import OK')
-except Exception as e:
-    print('[ompeval] import FAILED:', e)
-    traceback.print_exc()
-    sys.exit(1)"
+            python -c $'import sys, importlib, traceback\ntry:\n    importlib.import_module("ompeval")\n    print("[ompeval] import OK")\nexcept Exception as e:\n    print("[ompeval] import FAILED:", e)\n    traceback.print_exc()\n    sys.exit(1)'
           else
             echo "backend/native/ompeval not found; skipping native build."
           fi
