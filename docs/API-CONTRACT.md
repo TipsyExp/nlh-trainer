@@ -1,4 +1,3 @@
-
 # API Contract
 
 This document describes the HTTP API exposed by the trainer backend. The
@@ -77,18 +76,17 @@ Subsequent bot moves are returned separately.
     }
   }
 }
-•  bots_applied – list of auto-applied bot actions after the human move. Each
+•	bots_applied – list of auto-applied bot actions after the human move. Each
 entry contains the bot seat, the normalised action and its total amount (if
 applicable).
-•  state – the full game state, described in State Schema
+•	state – the full game state, described in State Schema.
 •	last_action – summary of the human action, including the requested total,
 the actual amount committed, whether snapping occurred, the bucket label and
 the list of allowed buckets at the time.
 Important: bucket labels (e.g. 2.2x, 2.5xR) are human-readable sizing
 classes, not literal multipliers of the big blind. The exact numeric totals
 are contextual (street, current price, last raise size). Clients may compute
-a candidate total using the rules in Bet Trees
-but it is also
+a candidate total using the rules in Bet Trees, but it is also
 fine to submit any total; the engine will snap it to the nearest legal bucket
 and indicate this with last_action.snapped.
 ________________________________________
@@ -143,19 +141,19 @@ whether bots auto-advance after human actions. The initial auto-advance on
 /api/hand/start always occurs when the session's bot_mode is not
 "none".
 •	Debugging – When ENGINE_DEBUG_HTTP=true structured debug events are
-emitted. See debugging
+emitted. See debugging docs.
+Status codes
 Status	When	Example body
 400	Minimum raise total not met	{ "detail": "min-raise not met: need ≥ 540, got 500" }
-409	Action submitted when it isn’t hero’s turn	{ "detail": "not your turn" }
+409	Action submitted out of turn	{ "detail": "not your turn" }
 422	Validation error (shape/verb)	Pydantic validation message
 501	/api/hand/auto disabled by gating	{ "detail": "auto-advance is disabled" }
 Worked example: minimum raise total
 Assume bb = 100, current price (total to call) is 320 and the previous
 raise size was 220.
 min_raise_total = current_price + max(bb, last_raise_size)
-
-               = 320 + max(100, 220)
-               = 540
+                = 320 + max(100, 220)
+                = 540
 
 Submitting "raise": 500 will return 400 with a descriptive message;
 submitting 520 may snap to the legal bucket (e.g. 540) and report
@@ -183,7 +181,7 @@ Request body
 }
 •	players – list of player specifications. Each entry must have either:
 o	hand: two card strings such as ["Ah","Ad"], or
-o	range: a pbots-style range string such as "JJ+" or "random".
+o	range: a range string such as "JJ+" or "random".
 All players in one request must use the same mode (all hands or all ranges).
 •	board – optional list of known board cards (0–5 cards). Duplicates or
 collisions with hole cards or dead cards are rejected.
@@ -196,6 +194,9 @@ ranges may be rejected depending on backend; when unsupported, the service
 falls back or errors with a clear 400.
 •	timeout_ms – optional soft timeout hint (milliseconds). Backends may use
 this to bound long-running simulations.
+Multiway note: Multiway range equities (3–6 players) require a multiway-capable
+backend (primarily ompeval). If an appropriate backend is unavailable,
+a clear 400 is returned.
 Query parameters (logging)
 The equity endpoint also accepts optional query parameters used only for
 logging and export snapshot association:
@@ -207,7 +208,7 @@ These parameters do not affect the equity calculation itself.
 Response
 {
   "ok": true,
-  "backend": "pokerkit",
+  "backend": "ompeval",
   "mode": "hands",
   "n_players": 2,
   "board": ["As","Kd","2c"],
@@ -223,7 +224,7 @@ Response
   }
 }
 •	backend – name of the backend that produced the result
-("pokerkit", "henry", "pbots_calc").
+("ompeval", "eval7", or "pokerkit").
 •	mode – "hands" when players specify fixed hands, "ranges" when ranges
 are used.
 •	n_players – number of players (minimum 2).
@@ -234,30 +235,29 @@ are used.
 o	win – number of wins (backend-specific units).
 o	tie – number of ties.
 o	equity – normalized equity in [0,1].
-•	raw – backend-specific details (e.g. simulations for pbots_calc or
-trials for heads-up fallbacks). Intended for debugging and benchmarking.
+•	raw – backend-specific details (e.g., samples, stderr, threads).
+Intended for debugging and benchmarking.
 Errors
 Typical error conditions:
 Status	Condition	Example body
-400	Invalid input (malformed cards, duplicate cards across players/board/dead, mixed hands/ranges).	{ "detail": "duplicate cards across players/board/dead" }
-400	Requested mode unsupported by any available backend under the current EQUITY_BACKEND_POLICY.	{ "detail": "no equity backend available for requested mode" }
+400	Invalid input (malformed cards, duplicate cards across players/board/dead, mixed mode)	{ "detail": "duplicate cards across players/board/dead" }
+400	Requested mode unsupported by any available backend under current policy	{ "detail": "no equity backend available for requested mode" }
 Backend selection
 The backend used is selected according to the EQUITY_BACKEND_POLICY
 environment variable:
-•	auto – default; tries backends in order (pbots_calc → henry → pokerkit)
-and picks the first compatible one.
-•	pbots – force pbots_calc (supports ranges + multiway).
-•	henry – force the Henry evaluator (hands only).
-•	pokerkit – pure-Python fallback (hands only).
-See EQUITY.md
-for full details.
+•	auto – default; tries backends in order (ompeval → eval7 → pokerkit)
+and picks the first compatible one for the request (e.g., ranges/multiway prefer ompeval).
+•	ompeval – force the OMPEval backend (supports ranges + multiway up to 6 players).
+•	eval7 – force the Eval7 backend (pure-Python/Cython; ranges supported; slower).
+•	pokerkit – pure-Python fallback (hands-focused).
+See EQUITY.md for full details.
 ________________________________________
 Preflop coaching API
 The preflop advisor provides heads-up preflop guidance using charts plus
 optional equity / rule fallbacks. It is exposed via GET /api/coach/preflop
 and gated by COACH_ENABLED.
 For charts, configuration and decision logic, see
-PREFLOP-ADVISOR.md
+PREFLOP-ADVISOR.md.
 GET /api/coach/preflop
 Query parameters
 •	hand_id – required. Identifies the hand for which advice is requested.
@@ -292,6 +292,7 @@ Status	Condition	Example body
 400	Bad input (missing hand_id, invalid idx)	{ "detail": "hand_id is required" }
 404	No advice available (no matching chart row and fallback unavailable)	{ "detail": "no advice for node" }
 501	Coaching disabled or charts unusable (COACH_ENABLED=false, etc.)	{ "detail": "coach disabled" }
+
 Exact error messages may vary but should remain descriptive.
 Logging
 When LOG_PREFLOP_ADVICE=true, successful advice responses associated with a
@@ -318,54 +319,7 @@ in the export module, but at a high level:
       "amount": 250,
       "...": "...",
       "equity_snapshot": {
-        "backend": "pokerkit",
-        "mode": "hands",
-        "board": [],
-        "dead": [],
-        "players": [
-          { "equity": 0.62 },
-          { "equity": 0.38 }
-        ],
-        "raw": { "...": "..." }
-      },
-      "preflop_advice": {
-        "source": "chart",
-        "bucket": "2.5x",
-        "rationale": "chart:HU_25bb_srp_vsb; node=sb_open; hand=AJo",
-        "strategy_bar": {
-          "fold": 0.15,
-          "call": 0.55,
-          "2.5x": 0.30
-        }
-      }
-    }
-  ]
-}
-Notes:
-•	equity_snapshot and preflop_advice are optional and appear only when:
-o	The relevant logging flags are enabled (LOG_EQUITY_SNAPSHOT,
-LOG_PREFLOP_ADVICE), and
-o	The corresponding API calls were made with hand_id/idx in scope.
-•	When logging is disabled, these fields are simply absent.
-The shape of equity_snapshot mirrors the equity API response (possibly
-trimmed/redacted). The shape of preflop_advice mirrors the preflop API
-response.
-GET /api/export/session/{session_id}.json
-Returns a JSON document describing a session. At a high level:
-{
-  "hand_id": "H1",
-  "session_id": 1,
-  "state": { /* initial + terminal state snapshot */ },
-  "actions": [
-    {
-      "idx": 0,
-      "street": "pre",
-      "actor_seat": 0,
-      "action": "bet",
-      "amount": 250,
-      "...": "...",
-      "equity_snapshot": {
-        "backend": "pokerkit",
+        "backend": "ompeval",
         "mode": "hands",
         "board": [],
         "dead": [],
@@ -433,8 +387,7 @@ street, etc.) and are not affected by snapshot logging.
 JSON exports are the source of truth for snapshot data.
 Snapshot configuration
 The following environment variables control snapshot behaviour (see
-CONFIGURATION.md
-for details):
+CONFIGURATION.md for details):
 •	LOG_EQUITY_SNAPSHOT – when true, successful /api/equity calls with
 hand_id and idx are logged and attached as equity_snapshot.
 •	LOG_EQUITY_SNAPSHOT_REDACT – when true, logged equity snapshots may
@@ -443,4 +396,3 @@ omit or abstract sensitive card/range information in production.
 are logged and attached as preflop_advice.
 All snapshot fields are optional and backwards-compatible: old exports remain
 valid and consumers should treat missing snapshots as “not logged”.
-

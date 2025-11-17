@@ -5,9 +5,9 @@ import os
 from typing import Optional, Sequence, Tuple
 
 from .base import Card, EquityBackend, EquityResult, PlayerSpec
-from .pbots_backend import PbotsBackend
-from .pokerkit_backend import PokerKitBackend
-from .henry_backend import HenryBackend
+from .backends.ompeval_backend import OmpevalBackend
+from .backends.eval7_backend import Eval7Backend
+from .backends.pokerkit_backend import PokerKitBackend
 
 
 class EquityService:
@@ -15,7 +15,7 @@ class EquityService:
     High-level orchestrator for equity calculations.
 
     Responsibilities:
-      - Instantiate available backends (pbots_calc, henry, pokerkit).
+      - Instantiate available backends (ompeval, eval7, pokerkit).
       - Select a backend according to EQUITY_BACKEND_POLICY and input shape.
       - Provide a single `calc_equity` entry point for callers (API/CLI/coach).
       - Offer small convenience helpers (e.g. hero vs villain range equity).
@@ -23,31 +23,31 @@ class EquityService:
 
     def __init__(self) -> None:
         # Policy: how we choose which backend to use.
-        #   auto     -> first compatible backend (pbots -> henry -> pokerkit)
-        #   pbots    -> force pbots_calc
-        #   henry    -> force Henry backend
+        #   auto     -> first compatible backend (ompeval -> eval7 -> pokerkit)
+        #   ompeval  -> force OMPEval backend
+        #   eval7    -> force Eval7 backend
         #   pokerkit -> force PokerKit fallback
         self._policy = os.getenv("EQUITY_BACKEND_POLICY", "auto").lower()
 
         backends: list[EquityBackend] = []
 
+        def _maybe_add(backend_ctor) -> None:
+            try:
+                b = backend_ctor()
+            except Exception:
+                return
+            # Only register if the backend reports itself as available.
+            try:
+                if hasattr(b, "is_available") and b.is_available():
+                    backends.append(b)
+            except Exception:
+                # Defensive: if availability check itself errors, skip it.
+                return
+
         # Order matters for `auto` fallback.
-        # pbots_calc (ranges + hands; MC or exact; multiway)
-        try:
-            backends.append(PbotsBackend())
-        except Exception:
-            # pbots_calc may be unavailable; that's fine, we fall back.
-            pass
-
-        # HenryRLee C evaluator (placeholder; hands-only; HU exact preferred)
-        try:
-            backends.append(HenryBackend())
-        except Exception:
-            # Missing/failed native lib is allowed; we still have other backends.
-            pass
-
-        # Pure-Python fallback (hands-only; exact on tiny trees, else MC)
-        backends.append(PokerKitBackend())
+        _maybe_add(OmpevalBackend)  # OMPEval (ranges + hands; MC or exact; multiway)
+        _maybe_add(Eval7Backend)  # Eval7 (pure-Python/Cython; ranges via MC)
+        _maybe_add(PokerKitBackend)  # Compatibility fallback (hands-only wrapper)
 
         self._backends: list[EquityBackend] = backends
 
@@ -55,33 +55,64 @@ class EquityService:
         """
         Pick a backend consistent with the configured policy and input shape.
         """
-        # Forced policies first with friendly errors.
-        if self._policy == "pbots":
-            for b in self._backends:
-                if getattr(b, "name", "") == "pbots_calc":
-                    return b
-            raise RuntimeError("Policy 'pbots' selected but pbots_calc is unavailable")
 
-        if self._policy == "henry":
+        def _find(name: str) -> EquityBackend | None:
             for b in self._backends:
-                if getattr(b, "name", "") == "henry":
+                if (
+                    getattr(b, "name", "") == name
+                    and getattr(b, "is_available", lambda: False)()
+                ):
                     return b
-            raise RuntimeError(
-                "Policy 'henry' selected but Henry backend is unavailable"
-            )
+            return None
+
+        # Forced policies first with friendly errors (only if actually available).
+        if self._policy == "ompeval":
+            b = _find("ompeval")
+            if b is None:
+                raise RuntimeError(
+                    "Policy 'ompeval' selected but OMPEval is unavailable"
+                )
+            if wants_ranges and not b.supports_ranges():
+                raise RuntimeError(
+                    "Policy 'ompeval' selected but it does not support ranges"
+                )
+            return b
+
+        if self._policy == "eval7":
+            b = _find("eval7")
+            if b is None:
+                raise RuntimeError(
+                    "Policy 'eval7' selected but Eval7 backend is unavailable"
+                )
+            if wants_ranges and not b.supports_ranges():
+                raise RuntimeError(
+                    "Policy 'eval7' selected but it does not support ranges"
+                )
+            return b
 
         if self._policy == "pokerkit":
-            for b in self._backends:
-                if getattr(b, "name", "") == "pokerkit":
-                    return b
-            raise RuntimeError(
-                "Policy 'pokerkit' selected but PokerKit backend missing"
-            )
+            b = _find("pokerkit")
+            if b is None:
+                raise RuntimeError(
+                    "Policy 'pokerkit' selected but PokerKit backend is unavailable"
+                )
+            if wants_ranges and not b.supports_ranges():
+                raise RuntimeError(
+                    "Policy 'pokerkit' selected but it does not support ranges"
+                )
+            return b
 
-        # Auto: walk configured backends in order, skipping those that
-        # can't handle the requested input style (e.g. ranges).
+        # Auto: walk configured backends in order, skipping those that can't handle
+        # the requested input style (e.g. ranges) or are unavailable.
         for backend in self._backends:
-            if wants_ranges and not backend.supports_ranges():
+            try:
+                if wants_ranges and not backend.supports_ranges():
+                    continue
+            except Exception:
+                # If backend can't even answer supports_ranges, skip it.
+                continue
+            # is_available() already enforced at registration time, but keep defensive.
+            if hasattr(backend, "is_available") and not backend.is_available():
                 continue
             return backend
 
@@ -133,7 +164,7 @@ class EquityService:
         This is primarily intended for preflop advisor / HU defend rules.
         Assumes:
           - seat 0: hero fixed hand
-          - seat 1: villain pbots-style range string
+          - seat 1: villain range string
 
         Returns:
           Hero equity as a float in [0.0, 1.0].

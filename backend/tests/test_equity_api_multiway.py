@@ -11,33 +11,34 @@ from backend.main import app
 client = TestClient(app)
 
 
-def _require_pbots() -> None:
+def _require_ompeval() -> None:
     """
-    Skip the calling test if pbots_calc is not available.
+    Skip the calling test if the OMPEval native module is not available.
 
-    This keeps the default CI job (without optional deps) green while still
-    exercising multiway/range behaviour when pbots is installed locally or
-    in an optional matrix job.
+    Keeps the default CI job (no native build) green, while exercising
+    multiway/range behaviour in environments where OMPEval is built.
     """
     try:
-        import pbots_calc  # type: ignore[import-not-found]  # noqa: F401
+        import ompeval  # type: ignore[import-not-found]  # noqa: F401
     except Exception:
-        pytest.skip("pbots_calc not installed; skipping /api/equity multiway tests.")
+        pytest.skip(
+            "ompeval extension not installed; skipping multiway /api/equity tests."
+        )
 
 
 def test_equity_api_multiway_ranges_three_way() -> None:
     """
-    3-way ranges via /api/equity using the pbots backend.
+    3-way ranges via /api/equity using the OMPEval backend.
 
     We assert:
       - HTTP 200
-      - backend == "pbots_calc"
+      - backend == "ompeval"
       - mode == "ranges"
       - n_players == 3
       - per-player equities in [0, 1]
       - sum of equities ~ 1.0 (within a small tolerance)
     """
-    _require_pbots()
+    _require_ompeval()
 
     payload: Dict[str, Any] = {
         "players": [
@@ -45,7 +46,6 @@ def test_equity_api_multiway_ranges_three_way() -> None:
             {"range": "TT+"},
             {"range": "random"},
         ],
-        # board/dead optional; empty is fine for pure preflop ranges.
         "board": [],
         "dead": [],
         "iters": 10_000,
@@ -57,7 +57,7 @@ def test_equity_api_multiway_ranges_three_way() -> None:
 
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("backend") == "pbots_calc"
+    assert body.get("backend") == "ompeval"
     assert body.get("mode") == "ranges"
     assert body.get("n_players") == 3
 
@@ -69,17 +69,16 @@ def test_equity_api_multiway_ranges_three_way() -> None:
         assert 0.0 <= e <= 1.0
 
     total = sum(equities)
-    # pbots_calc EVs should sum very close to 1.0 across all players
     assert abs(total - 1.0) <= 1e-3
 
 
 def test_equity_api_multiway_ranges_four_way() -> None:
     """
-    4-way ranges via /api/equity using the pbots backend.
+    4-way ranges via /api/equity using the OMPEval backend.
 
     Same checks as the 3-way case, but with four players.
     """
-    _require_pbots()
+    _require_ompeval()
 
     payload: Dict[str, Any] = {
         "players": [
@@ -99,7 +98,7 @@ def test_equity_api_multiway_ranges_four_way() -> None:
 
     body = r.json()
     assert body.get("ok") is True
-    assert body.get("backend") == "pbots_calc"
+    assert body.get("backend") == "ompeval"
     assert body.get("mode") == "ranges"
     assert body.get("n_players") == 4
 
@@ -135,8 +134,6 @@ def test_equity_api_board_dead_collision_400() -> None:
     assert r.status_code == 400
 
     body = r.json()
-    # FastAPI's default error shape is {"detail": "..."}; we normalized our
-    # own error message in the router.
     detail = str(body.get("detail", "")).lower()
     assert "board" in detail and "dead" in detail
     assert "card" in detail or "cards" in detail

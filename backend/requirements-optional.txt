@@ -1,3 +1,8 @@
-# Optional backends/tools (not required for core engine, CI, or slim dist)
-# Enable range-based equities via pbots_calc:
-pbots_calc>=0.53
+# Optional dependencies for enhanced equity backends & build helpers.
+# These are NOT required for core engine or slim dist.
+
+# Pure-Python/Cython fallback equity backend.
+eval7>=0.1.10
+
+# Header-only; needed to build the OMPEval pybind11 extension.
+pybind11>=2.10

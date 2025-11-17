@@ -4,7 +4,7 @@
 
 .PHONY: api web dev install-backend install-frontend install-optional \
         test test-backend test-frontend lint fmt autoplay docs-examples \
-        equity bench-equity dist dist-clean
+        equity bench-equity build-ompeval dist dist-clean
 
 # Choose the Python and Node entry points (Windows-friendly)
 PY    ?= python
@@ -15,8 +15,8 @@ API_ADDR     ?= 127.0.0.1
 API_PORT     ?= 8000
 UVICORN_OPTS ?= --reload --host $(API_ADDR) --port $(API_PORT)
 
-# Default benchmark policies (can override: POLICIES=auto,pbots)
-POLICIES ?= auto,pokerkit,henry,pbots
+# Default benchmark policies (override with: POLICIES=auto,ompeval,eval7)
+POLICIES ?= auto,ompeval,eval7,pokerkit
 
 ##
 ## Launch the FastAPI backend in development mode
@@ -48,7 +48,7 @@ install-backend:
 install-frontend:
 	$(NODE) --prefix frontend install
 
-# Optional extras (e.g., pbots_calc for range equities) — PowerShell-safe
+# Optional extras (e.g., eval7 + pybind11 for OMPEval build) — PowerShell-safe
 install-optional:
 	@$(PY) - <<'PY'
 import os, sys, subprocess
@@ -57,6 +57,31 @@ if os.path.isfile(p):
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", p])
 else:
     print("No backend/requirements-optional.txt found.")
+PY
+
+##
+## Build OMPEval native extension (cross-platform launcher)
+## - On Linux/macOS: uses scripts/build_ompeval.sh
+## - On Windows: uses scripts/build_ompeval.ps1 (run from PowerShell)
+##
+build-ompeval:
+	@$(PY) - <<'PY'
+import os, sys, subprocess, platform, shutil
+root = os.getcwd()
+sh = os.path.join("scripts", "build_ompeval.sh")
+ps = os.path.join("scripts", "build_ompeval.ps1")
+if platform.system() == "Windows":
+    if not os.path.isfile(ps):
+        print("Missing scripts/build_ompeval.ps1")
+        sys.exit(1)
+    # Use PowerShell to run the script in a Windows-friendly way
+    cmd = ["powershell", "-ExecutionPolicy", "Bypass", "-File", ps]
+else:
+    if not os.path.isfile(sh):
+        print("Missing scripts/build_ompeval.sh")
+        sys.exit(1)
+    cmd = ["bash", sh]
+subprocess.check_call(cmd, cwd=root)
 PY
 
 ##
@@ -165,7 +190,7 @@ PY
 ## Equity benchmark (tiny matrix; CSV output)
 ## Examples:
 ##   make bench-equity
-##   make bench-equity OUT=bench_equity.csv POLICIES=auto,pbots
+##   make bench-equity OUT=bench_equity.csv POLICIES=auto,ompeval,eval7
 ##
 bench-equity:
 	@echo "Running equity benchmark…"

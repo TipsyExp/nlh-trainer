@@ -8,7 +8,7 @@ from backend.services.equity.service import EquityService
 
 
 @pytest.mark.parametrize("exact", [False, True])
-@pytest.mark.parametrize("backend_policy", ["auto", "pokerkit", "henry", "pbots"])
+@pytest.mark.parametrize("backend_policy", ["auto", "pokerkit", "eval7", "ompeval"])
 def test_equity_hu_hands_runs_for_policies(
     backend_policy: str,
     exact: bool,
@@ -19,20 +19,19 @@ def test_equity_hu_hands_runs_for_policies(
 
     - auto:      picks first compatible backend.
     - pokerkit:  forces PokerKit fallback.
-    - henry:     forces Henry placeholder backend.
-    - pbots:     forces pbots_calc backend (skipped if pbots_calc unavailable).
+    - eval7:     forces Eval7 backend (skip if not available).
+    - ompeval:   forces OMPEval backend (skip if not available).
     """
     monkeypatch.setenv("EQUITY_BACKEND_POLICY", backend_policy)
 
     svc = EquityService()
 
-    # If we explicitly request pbots but the backend isn't wired (e.g. pbots_calc
-    # not installed), skip rather than failing the suite.
-    if backend_policy == "pbots":
+    # Skip if a forced backend isn't actually available in this environment.
+    if backend_policy in {"ompeval", "eval7"}:
         backends = getattr(svc, "_backends", [])
-        has_pbots = any(getattr(b, "name", "") == "pbots_calc" for b in backends)
-        if not has_pbots:
-            pytest.skip("pbots_calc backend not available in this environment")
+        has_forced = any(getattr(b, "name", "") == backend_policy for b in backends)
+        if not has_forced:
+            pytest.skip(f"{backend_policy} backend not available in this environment")
 
     res = svc.calc_equity(
         players=[
@@ -51,22 +50,24 @@ def test_equity_hu_hands_runs_for_policies(
         assert 0.0 <= p["equity"] <= 1.0
 
 
-def test_equity_ranges_if_pbots_available(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_equity_ranges_if_backend_supports_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """
-    When pbots_calc is available, ranges should be supported and mode == 'ranges'.
-
-    If pbots_calc (and thus the pbots backend) is not available, the test
-    skips cleanly instead of failing.
+    When a ranges-capable backend is available (ompeval or eval7), ranges should be
+    supported and mode == 'ranges'. Otherwise the test skips.
     """
     monkeypatch.setenv("EQUITY_BACKEND_POLICY", "auto")
 
     svc = EquityService()
 
-    # Detect whether a pbots backend is actually present.
+    # Detect whether any backend supports ranges.
     backends = getattr(svc, "_backends", [])
-    has_pbots = any(getattr(b, "name", "") == "pbots_calc" for b in backends)
-    if not has_pbots:
-        pytest.skip("pbots_calc backend not available in this environment")
+    has_ranges_backend = any(
+        getattr(b, "supports_ranges", None) and b.supports_ranges() for b in backends
+    )
+    if not has_ranges_backend:
+        pytest.skip("No ranges-capable backend available (need ompeval or eval7)")
 
     res = svc.calc_equity(
         players=[

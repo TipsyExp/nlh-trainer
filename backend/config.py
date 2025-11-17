@@ -27,6 +27,22 @@ def _env_bool(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: str) -> int:
+    """Parse an int environment variable with a safe default."""
+    try:
+        return int(os.getenv(name, default).strip())
+    except Exception:
+        return int(default)
+
+
+def _env_float(name: str, default: str) -> float:
+    """Parse a float environment variable with a safe default."""
+    try:
+        return float(os.getenv(name, default).strip())
+    except Exception:
+        return float(default)
+
+
 # ---------------------------------------------------------------------------
 # Core engine / autoplay
 # ---------------------------------------------------------------------------
@@ -39,12 +55,12 @@ HAND_AUTO_ENABLED: bool = _env_bool("HAND_AUTO_ENABLED", "false")
 # Engine / bot configuration
 BOT_MODE: str = os.getenv("BOT_MODE", "heuristic").strip().lower()
 BOT_PROFILE: str = os.getenv("BOT_PROFILE", "CALLCHECK").strip().upper()
-BOT_TIME_BUDGET_MS: int = int(os.getenv("BOT_TIME_BUDGET_MS", "150"))
+BOT_TIME_BUDGET_MS: int = _env_int("BOT_TIME_BUDGET_MS", "150")
 
 # Maximum number of bot actions to apply in a single auto-advance loop.  If
 # exceeded, the backend will raise an error to avoid infinite loops.
 # Use BOT_MAX_STEPS to align constant and environment variable names.
-BOT_MAX_STEPS: int = int(os.getenv("BOT_MAX_STEPS", "100"))
+BOT_MAX_STEPS: int = _env_int("BOT_MAX_STEPS", "100")
 
 # Debug configuration
 ENGINE_DEBUG_HTTP: bool = _env_bool("ENGINE_DEBUG_HTTP", "false")
@@ -68,7 +84,7 @@ PREFLOP_CHART_PATHS: str = os.getenv("PREFLOP_CHART_PATHS", "").strip()
 # the configured villain range is >= this threshold, the advisor will
 # recommend a defend; otherwise it will recommend a fold (for the nodes
 # that use this rule).
-PREFLOP_EQ_DEFEND_THRESH: float = float(os.getenv("PREFLOP_EQ_DEFEND_THRESH", "0.48"))
+PREFLOP_EQ_DEFEND_THRESH: float = _env_float("PREFLOP_EQ_DEFEND_THRESH", "0.48")
 
 # Behaviour when equity fallback cannot run (e.g. no suitable equity backend).
 # When true:
@@ -78,6 +94,35 @@ PREFLOP_EQ_DEFEND_THRESH: float = float(os.getenv("PREFLOP_EQ_DEFEND_THRESH", "0
 #     recommendation (e.g. fold) but still marks source="equity" with a
 #     rationale explaining that fallback was unavailable.
 PREFLOP_FALLBACK_REQUIRED: bool = _env_bool("PREFLOP_FALLBACK_REQUIRED", "true")
+
+
+# ---------------------------------------------------------------------------
+# Equity engine configuration (selection / defaults)
+# ---------------------------------------------------------------------------
+
+# Backend selection policy for the equity service.
+# Values: 'auto', 'ompeval', 'eval7', 'pokerkit'
+# - 'auto' tries ompeval -> eval7 -> pokerkit in that order.
+EQUITY_BACKEND_POLICY: str = os.getenv("EQUITY_BACKEND_POLICY", "auto").strip().lower()
+
+# Default Monte Carlo iterations when a request does not provide `iters`.
+# Keep small enough for CI; callers can override per-request.
+EQUITY_ITERS: int = _env_int("EQUITY_ITERS", "20000")
+
+# Optional global timeout hint (milliseconds) for equity computations.
+# Backends treat this as best-effort; 0 disables timeout.
+EQUITY_TIMEOUT_MS: int = _env_int("EQUITY_TIMEOUT_MS", "0")
+
+# Number of threads for multi-threaded backends (e.g., OMPEval).
+# 0 means "auto" (use hardware concurrency / backend default).
+EQUITY_THREADS: int = _env_int("EQUITY_THREADS", "0")
+
+# Optional Monte Carlo standard error target. If > 0, backends that support
+# progressive sampling may stop early once stderr <= target. 0 disables.
+EQUITY_STDERR_TARGET: float = _env_float("EQUITY_STDERR_TARGET", "0")
+
+# Optional RNG seed for backends that expose seeding. Empty string means unset.
+EQUITY_SEED: str = os.getenv("EQUITY_SEED", "").strip()
 
 
 # ---------------------------------------------------------------------------
