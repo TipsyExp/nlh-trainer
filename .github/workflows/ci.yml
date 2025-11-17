@@ -139,7 +139,6 @@ jobs:
       COACH_ENABLED: "false"
       PYTHONHASHSEED: "0"
       PYTHONPATH: .
-      # Prefer OMPEval when available; service still falls back if build fails
       EQUITY_BACKEND_POLICY: "auto"
     steps:
       - name: Checkout
@@ -174,14 +173,14 @@ jobs:
           if [ -d backend/native/ompeval ]; then
             pip install ./backend/native/ompeval
             python - <<'PY'
-import sys
-try:
-    import ompeval  # noqa:F401
-    print("[ompeval] import OK")
-except Exception as e:
-    print("[ompeval] import FAILED:", e)
-    sys.exit(1)
-PY
+            import sys
+            try:
+                import ompeval  # noqa:F401
+                print("[ompeval] import OK")
+            except Exception as e:
+                print("[ompeval] import FAILED:", e)
+                sys.exit(1)
+            PY
           else
             echo "backend/native/ompeval not found; skipping native build."
           fi
