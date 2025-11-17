@@ -169,18 +169,20 @@ jobs:
           pip install --upgrade scikit-build-core pybind11
 
       - name: Build & install OMPEval native extension
+        shell: bash
         run: |
+          set -euo pipefail
           if [ -d backend/native/ompeval ]; then
             pip install ./backend/native/ompeval
-            python - <<'PY'
-import sys
+            python -c "import sys, importlib
+import traceback
 try:
-    import ompeval  # noqa:F401
-    print("[ompeval] import OK")
+    importlib.import_module('ompeval')
+    print('[ompeval] import OK')
 except Exception as e:
-    print("[ompeval] import FAILED:", e)
-    sys.exit(1)
-PY
+    print('[ompeval] import FAILED:', e)
+    traceback.print_exc()
+    sys.exit(1)"
           else
             echo "backend/native/ompeval not found; skipping native build."
           fi
