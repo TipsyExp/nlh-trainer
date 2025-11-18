@@ -1,17 +1,18 @@
-//frontend/hooks/useDecisionOverlay.ts
-// Hook to fetch and cache preflop coach advice for the guidance overlay.
+// frontend/hooks/useDecisionOverlay.ts
+// Hook to fetch and cache coach advice and equity for the guidance overlay (Phase 3).
 //
-// This hook coordinates the logic required to obtain preflop advice from
-// the backend, dedupe concurrent requests, cache responses by
-// (hand_id, idx) and react to changes in the overlay gate or decision
-// context.  It exposes a structured coach state along with a
-// recommendedAction derived from the returned bucket.  If the overlay
-// is disabled, not on the preflop street, or the hand_id/idx are
-// missing, the hook returns a null state and does not initiate any
-// network requests.
+// This hook orchestrates all network interactions for the guidance overlay.
+// It fetches meta capabilities via useMeta, obtains preflop coach advice
+// from GET /api/coach/preflop and computes equity via POST /api/equity
+// when applicable.  The hook dedupes concurrent calls, caches
+// responses by hand id, decision index, street and input signature, and
+// exposes normalised state for coach, equity and meta.  When the
+// overlay is disabled or the context lacks sufficient information
+// (e.g. unknown hero cards or unsupported range mode) it returns
+// early without issuing requests.
 
 import { useEffect, useState, useMemo } from 'react';
-import { getJson } from '../utils/http';
+import { getJson, postJson } from '../utils/http';
 import {
   getCoach,
   setCoach,
@@ -19,10 +20,21 @@ import {
   setCoachInFlight,
   deleteCoachInFlight,
   type CoachResponse,
+  getEquity,
+  setEquity,
+  getEquityInFlight,
+  setEquityInFlight,
+  deleteEquityInFlight,
+  type EquityRecord,
+  type EquityStatus,
 } from '../utils/overlayCache';
 import { mapCoachToAction } from '../utils/coachMapping';
+import { buildPreflopEquityBody, buildPostflopEquityBody } from '../utils/equityParams';
+import { useMeta } from './useMeta';
 import type { DecisionContext } from '../types/decision';
 import type { CoachAdvice } from '../types/coach';
+import type { EquityResponse } from '../types/equity';
+import type { Meta } from '../types/meta';
 
 // Default client timeout for the coach endpoint (in ms).  This can be
 // overridden at build time via the NEXT_PUBLIC_COACH_CLIENT_TIMEOUT_MS
@@ -33,6 +45,17 @@ const COACH_TIMEOUT_MS = (() => {
   const raw = process.env.NEXT_PUBLIC_COACH_CLIENT_TIMEOUT_MS;
   const n = raw ? parseInt(String(raw), 10) : NaN;
   return !Number.isNaN(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
+})();
+
+// Default client timeout for the equity endpoint (in ms).  Can be
+// overridden via NEXT_PUBLIC_EQUITY_CLIENT_TIMEOUT_MS.  A short
+// timeout prevents long running Monte Carlo calculations from
+// blocking the UI when the backend is slow.
+const DEFAULT_EQUITY_TIMEOUT_MS = 2000;
+const EQUITY_TIMEOUT_MS = (() => {
+  const raw = process.env.NEXT_PUBLIC_EQUITY_CLIENT_TIMEOUT_MS;
+  const n = raw ? parseInt(String(raw), 10) : NaN;
+  return !Number.isNaN(n) && n > 0 ? n : DEFAULT_EQUITY_TIMEOUT_MS;
 })();
 
 // Convert HTTP status codes into normalised coach statuses.  HTTP 501
@@ -58,15 +81,36 @@ export interface UseDecisionOverlayResult {
     error?: string;
   };
   recommendedAction: string | null;
+  equity: {
+    data: EquityResponse | null;
+    loading: boolean;
+    status: EquityStatus;
+    error?: string;
+    /** Origin of villain range for preflop (e.g. chart/default/random). */
+    origin?: string;
+  };
+  meta: {
+    meta: Meta | null;
+    loading: boolean;
+    error?: string;
+  };
 }
 
 export function useDecisionOverlay(
   context: DecisionContext | null,
   overlayEnabled: boolean
 ): UseDecisionOverlayResult {
-  // Store the current response record.  A null value indicates that
-  // loading has not started yet for the current context.
-  const [response, setResponse] = useState<CoachResponse | null>(null);
+  // Fetch meta capabilities once per session.  This hook provides
+  // information about backend support (e.g. range support and max
+  // players) to gate equity calls.  It also exposes its own loading
+  // state so we can defer equity until meta is ready.
+  const metaState = useMeta();
+  // Store the current coach response record.  A null value indicates
+  // that loading has not started yet for the current context.
+  const [coachResponse, setCoachResponse] = useState<CoachResponse | null>(null);
+  // Store the current equity response record.  Similar semantics to
+  // coachResponse: null indicates loading has not begun.
+  const [equityResponse, setEquityResponse] = useState<EquityRecord | null>(null);
 
   useEffect(() => {
     // Determine if we should attempt to fetch advice.  Only fetch when
@@ -79,7 +123,7 @@ export function useDecisionOverlay(
       !!context.handId &&
       typeof context.idx === 'number';
     if (!shouldFetch) {
-      setResponse(null);
+      setCoachResponse(null);
       return;
     }
     const key = `${context.handId}:${context.idx}:preflop`;
@@ -94,14 +138,14 @@ export function useDecisionOverlay(
           /* noop */
         }
       }
-      setResponse(cached);
+      setCoachResponse(cached);
       return;
     }
     // If a request is already in flight for this key, subscribe to it.
     const existing = getCoachInFlight(key);
     if (existing) {
       existing.then((res) => {
-        setResponse(res);
+        setCoachResponse(res);
       });
       return;
     }
@@ -150,32 +194,201 @@ export function useDecisionOverlay(
           setCoach(key, resp);
           return resp;
         }
-      } catch (e: any) {
+       } catch (e: any) {
         // Unexpected errors treat as unavailable.  Do not throw; cache and return.
-        const resp: CoachResponse = {
+         const resp: CoachResponse = {
           data: null,
           status: 'unavailable',
           error: e?.message || 'Coach unavailable',
         };
-        setCoach(key, resp);
-        return resp;
-      } finally {
-        deleteCoachInFlight(key);
-      }
-    })();
-    setCoachInFlight(key, prom);
-    prom.then((res) => {
-      setResponse(res);
-    });
-    return () => {
-      abortController.abort();
-    };
+         setCoach(key, resp);
+         return resp;
+       } finally {
+         deleteCoachInFlight(key);
+       }
+     })();
+     setCoachInFlight(key, prom);
+     prom.then((res) => {
+       setCoachResponse(res);
+     });
+     return () => {
+       abortController.abort();
+     };
     // We intentionally include only the fields that change the fetch key
     // or the gating logic.  Other context properties (heroCards, pot)
     // are not relevant to this hook.
   }, [context?.handId, context?.idx, context?.street, overlayEnabled]);
 
-  // Derive the coach state for the caller.  A null response
+  // Equity fetching effect.  Uses the meta snapshot to decide
+  // whether to attempt preflop or postflop equity calls.  Caches
+  // responses keyed by handId, idx, street and input signature.  When
+  // meta is still loading or overlay is disabled no requests are
+  // initiated.  Skipped scenarios (e.g. missing cards or unsupported
+  // ranges) are negative‑cached to avoid repeated attempts.
+  useEffect(() => {
+    // Always clear equityResponse when overlay disabled or context missing.
+    if (!overlayEnabled || !context || !context.handId || typeof context.idx !== 'number') {
+      setEquityResponse(null);
+      return;
+    }
+    // Wait until meta is loaded; do not fetch equity until we know
+    // capabilities.  When meta is loading leave equityResponse as
+    // null which surfaces a loading state.
+    if (metaState.loading || !metaState.meta) {
+      return;
+    }
+    const street = context.street?.toLowerCase() || '';
+    const meta = metaState.meta;
+    let build;
+    // Decide whether to build preflop or postflop body
+    if (street === 'preflop') {
+      // Only attempt equity preflop if ranges are supported
+      if (!meta.equity.supports_ranges) {
+        const rec: EquityRecord = {
+          data: null,
+          status: 'unsupported',
+          error: 'Ranges unsupported',
+        };
+        setEquityResponse(rec);
+        return;
+      }
+      build = buildPreflopEquityBody(context, {
+        iters: undefined,
+        exact: false,
+      });
+    } else if (street === 'flop' || street === 'turn' || street === 'river') {
+      // Postflop: only when number of players does not exceed maxPlayers
+      build = buildPostflopEquityBody(context, {
+        iters: undefined,
+        exact: false,
+        maxPlayers: meta.equity.max_players,
+      });
+    } else {
+      // For other streets (showdown or unknown) skip equity
+      const rec: EquityRecord = {
+        data: null,
+        status: 'skipped',
+      };
+      setEquityResponse(rec);
+      return;
+    }
+    // If builder provided a reason to skip, cache as skipped and return.
+    if (build.reasonIfSkipped) {
+      const rec: EquityRecord = {
+        data: null,
+        status: 'skipped',
+        error: build.reasonIfSkipped,
+        origin: build.origin,
+      };
+      setEquityResponse(rec);
+      return;
+    }
+    // Build cache key: includes hand_id, idx, street and signature
+    const key = `equity:${context.handId}:${context.idx}:${street}:${build.signature}`;
+    // Check cache first
+    const cachedEq = getEquity(key);
+    if (cachedEq) {
+      // eslint-disable-next-line no-console
+      if (process.env.NEXT_PUBLIC_DEV_TOOLS) {
+        try {
+          console.debug('[equity] cached', key);
+        } catch {
+          /* noop */
+        }
+      }
+      setEquityResponse(cachedEq);
+      return;
+    }
+    // Check in-flight
+    const inflight = getEquityInFlight(key);
+    if (inflight) {
+      inflight.then((res) => {
+        setEquityResponse(res);
+      });
+      return;
+    }
+    // Initiate fetch
+    const abortController = new AbortController();
+    const prom: Promise<EquityRecord> = (async () => {
+      // eslint-disable-next-line no-console
+      if (process.env.NEXT_PUBLIC_DEV_TOOLS) {
+        try {
+          console.debug('[equity] fetch', {
+            key,
+            body: build.body,
+            qs: { hand_id: context.handId, idx: context.idx },
+          });
+        } catch {
+          /* noop */
+        }
+      }
+      try {
+        const res = await postJson(
+          `/api/equity?hand_id=${encodeURIComponent(String(context.handId))}&idx=${context.idx}`,
+          build.body,
+          { timeoutMs: EQUITY_TIMEOUT_MS, signal: abortController.signal }
+        );
+        let status: EquityStatus;
+        if (res.status === 'timeout') {
+          status = 'timeout';
+        } else if (res.ok) {
+          status = 'ok';
+        } else if (res.status === 501) {
+          status = 'disabled';
+        } else if (res.status === 404) {
+          status = 'route-missing';
+        } else if (res.status === 400) {
+          status = 'unsupported';
+        } else {
+          status = 'error';
+        }
+        if (status === 'ok') {
+          const data = res.body as EquityResponse;
+          const rec: EquityRecord = { data, status, origin: build.origin };
+          setEquity(key, rec);
+          return rec;
+        } else {
+          const rec: EquityRecord = {
+            data: null,
+            status,
+            error:
+              status === 'disabled'
+                ? 'Equity disabled'
+                : status === 'route-missing'
+                ? 'Equity route not available'
+                : status === 'unsupported'
+                ? 'Equity unsupported'
+                : status === 'timeout'
+                ? 'Equity timed out'
+                : 'Equity unavailable',
+            origin: build.origin,
+          };
+          setEquity(key, rec);
+          return rec;
+        }
+      } catch (e: any) {
+        const rec: EquityRecord = {
+          data: null,
+          status: 'error',
+          error: e?.message || 'Equity unavailable',
+          origin: build.origin,
+        };
+        setEquity(key, rec);
+        return rec;
+      } finally {
+        deleteEquityInFlight(key);
+      }
+    })();
+    setEquityInFlight(key, prom);
+    prom.then((res) => {
+      setEquityResponse(res);
+    });
+    return () => {
+      abortController.abort();
+    };
+  }, [context?.handId, context?.idx, context?.street, overlayEnabled, metaState.meta, metaState.loading]);
+
+  // Derive the coach state for the caller.  A null coachResponse
   // indicates a loading state.  When the overlay is off or not
   // preflop, we surface a disabled state to the UI.
   const coachState = useMemo(() => {
@@ -189,8 +402,6 @@ export function useDecisionOverlay(
     }
     const isPreflop = context?.street?.toLowerCase() === 'preflop';
     if (!isPreflop) {
-      // Do not fetch on non‑preflop streets; treat as unavailable but
-      // without triggering network.
       return {
         data: null,
         loading: false,
@@ -198,7 +409,7 @@ export function useDecisionOverlay(
         error: 'Preflop only',
       };
     }
-    if (response === null) {
+    if (coachResponse === null) {
       return {
         data: null,
         loading: true,
@@ -206,11 +417,9 @@ export function useDecisionOverlay(
         error: undefined,
       };
     }
-    // Extend loading when status is unavailable but we still want to show
-    // a spinner until the request resolves.
-    if (response.status === 'ok') {
+    if (coachResponse.status === 'ok') {
       return {
-        data: response.data,
+        data: coachResponse.data,
         loading: false,
         status: 'ok' as const,
         error: undefined,
@@ -219,10 +428,10 @@ export function useDecisionOverlay(
     return {
       data: null,
       loading: false,
-      status: response.status as any,
-      error: response.error,
+      status: coachResponse.status as any,
+      error: coachResponse.error,
     };
-  }, [response, overlayEnabled, context?.street]);
+  }, [coachResponse, overlayEnabled, context?.street]);
 
   // Compute a recommended action key for the UI.  This uses the
   // coachMapping helper to map the bucket into a button key.  When no
@@ -241,5 +450,58 @@ export function useDecisionOverlay(
     return mapCoachToAction(bucket, toCall, []);
   }, [coachState, context]);
 
-  return { coach: coachState, recommendedAction };
+  // Derive the equity state for the caller.  When overlay is
+  // disabled or meta is still loading we return a skipped or loading
+  // status.  A null equityResponse indicates that a request is in
+  // flight (loading).
+  const equityState = useMemo(() => {
+    // When overlay is disabled the equity section should not render
+    if (!overlayEnabled) {
+      return {
+        data: null,
+        loading: false,
+        status: 'skipped' as EquityStatus,
+        error: undefined,
+        origin: undefined,
+      };
+    }
+    // If meta is still loading, surface loading state
+    if (metaState.loading) {
+      return {
+        data: null,
+        loading: true,
+        status: 'skipped' as EquityStatus,
+        error: undefined,
+        origin: undefined,
+      };
+    }
+    // If equityResponse is null, treat as loading
+    if (equityResponse === null) {
+      return {
+        data: null,
+        loading: true,
+        status: 'skipped' as EquityStatus,
+        error: undefined,
+        origin: undefined,
+      };
+    }
+    if (equityResponse.status === 'ok') {
+      return {
+        data: equityResponse.data,
+        loading: false,
+        status: 'ok' as EquityStatus,
+        error: undefined,
+        origin: equityResponse.origin,
+      };
+    }
+    return {
+      data: null,
+      loading: false,
+      status: equityResponse.status,
+      error: equityResponse.error,
+      origin: equityResponse.origin,
+    };
+  }, [overlayEnabled, metaState.loading, equityResponse]);
+
+  return { coach: coachState, recommendedAction, equity: equityState, meta: { meta: metaState.meta, loading: metaState.loading, error: metaState.error } };
 }
