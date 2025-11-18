@@ -1,4 +1,11 @@
 // frontend/pages/table.tsx
+// Updated Table page with guidance overlay integration (Phase 1).
+//
+// This page renders the main NLH table UI.  It now includes a right‑side
+// guidance overlay that is gated by build‑time environment variables
+// (NEXT_PUBLIC_DEV_TOOLS and NEXT_PUBLIC_HELP_OVERLAY_ENABLED) and a
+// per‑session toggle persisted in localStorage.  In Phase 1 the overlay is
+// strictly presentational and does not initiate any fetches.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Api } from "../lib/api";
@@ -11,6 +18,11 @@ import type {
 import { CoachPanel } from "../components/CoachPanel";
 import { WaitingOverlay } from "../components/WaitingOverlay";
 import { BoardRow as CommunityBoardRow } from "../components/common/Cards";
+import { globalOverlayGate } from "../utils/overlayFlags";
+import { useHelpOverlayToggle } from "../hooks/useHelpOverlayToggle";
+import { HelpOverlayToggle } from "../components/HelpOverlayToggle";
+import { DecisionHelpOverlay } from "../components/DecisionHelpOverlay";
+import type { DecisionContext } from "../types/decision";
 
 // Gate dev-only /api/hand/auto. Default is false unless explicitly enabled.
 const AUTO_HAND_ENABLED = ["1", "true", "yes", "on"].includes(
@@ -210,6 +222,31 @@ export default function TablePage() {
       ? 0
       : null;
 
+  // ----- Guidance overlay state -----
+  // Read per-session toggle and compute overlayEnabled using global gate.
+  const { enabled: helpEnabled, setEnabled: setHelpEnabled } =
+    useHelpOverlayToggle(handId || undefined);
+  const overlayEnabled = globalOverlayGate && helpEnabled;
+
+  // Build a decision context (not used in phase 1 but passed along).
+  const decisionCtx: DecisionContext = useMemo(
+    () => ({
+      handId,
+      idx: decisionIdx,
+      street: state?.street || null,
+      heroSeat: humanSeat,
+      pot,
+      toCall: allowedCtx?.to_call ?? 0,
+    }),
+    [handId, decisionIdx, state?.street, humanSeat, pot, allowedCtx?.to_call]
+  );
+
+  // Log overlay state changes in dev for diagnostics.
+  useEffect(() => {
+    // eslint-disable-next-line no-console
+    console.debug("[overlay] enabled:", overlayEnabled);
+  }, [overlayEnabled]);
+
   const coachShouldShow =
     coachEnabled &&
     canAct &&
@@ -251,6 +288,10 @@ export default function TablePage() {
     <main className="min-h-screen p-6 bg-gray-50 relative">
       {/* Overlay shown when waiting for bots to act (prod mode). */}
       <WaitingOverlay show={botsAdvancing} message="Waiting for opponents…" />
+
+      {/* Guidance overlay (phase 1: shell only) */}
+      {overlayEnabled && <DecisionHelpOverlay decision={decisionCtx} />}
+
       <div className="max-w-5xl mx-auto grid gap-6">
         <header className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">NLH Trainer — Table</h1>
@@ -268,6 +309,13 @@ export default function TablePage() {
               />
               <span>Coach</span>
             </label>
+            {/* Show guidance toggle only when globally enabled */}
+            {globalOverlayGate && (
+              <HelpOverlayToggle
+                enabled={helpEnabled}
+                setEnabled={setHelpEnabled}
+              />
+            )}
             <button
               onClick={onStartHand}
               className="rounded-xl bg-black text-white px-4 py-2 disabled:opacity-50"
