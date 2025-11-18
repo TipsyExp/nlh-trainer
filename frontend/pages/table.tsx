@@ -1,11 +1,5 @@
 // frontend/pages/table.tsx
-// Updated Table page with guidance overlay integration (Phase 1).
-//
-// This page renders the main NLH table UI.  It now includes a right‑side
-// guidance overlay that is gated by build‑time environment variables
-// (NEXT_PUBLIC_DEV_TOOLS and NEXT_PUBLIC_HELP_OVERLAY_ENABLED) and a
-// per‑session toggle persisted in localStorage.  In Phase 1 the overlay is
-// strictly presentational and does not initiate any fetches.
+// Updated Table page with guidance overlay integration (Phase 3).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Api } from "../lib/api";
@@ -26,7 +20,6 @@ import type { DecisionContext } from "../types/decision";
 import { useDecisionOverlay } from "../hooks/useDecisionOverlay";
 import { mapCoachToAction } from "../utils/coachMapping";
 
-// Gate dev-only /api/hand/auto. Default is false unless explicitly enabled.
 const AUTO_HAND_ENABLED = ["1", "true", "yes", "on"].includes(
   String(process.env.NEXT_PUBLIC_ENABLE_HAND_AUTO || "").toLowerCase()
 );
@@ -127,10 +120,8 @@ export default function TablePage() {
   };
 
   async function pollUntilSettled(humanSeat: number) {
-    // Poll GET /api/hand/state until it's our turn or the hand is over.
-    // Switch to a time-based cap to handle slower solves gracefully.
     const start = Date.now();
-    const maxWaitMs = 30_000; // 30s cap
+    const maxWaitMs = 30_000;
     let bannerSet = false;
 
     try {
@@ -181,8 +172,6 @@ export default function TablePage() {
     try {
       const res = await Api.postAction({ seat: humanSeat, action, amount });
       setState(res.state);
-
-      // Always follow up by polling until it's our turn or the hand is over.
       await pollUntilSettled(humanSeat);
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -191,7 +180,6 @@ export default function TablePage() {
     }
   }
 
-  // Preflop open helpers
   function amountForOpenLabel(label: string): number | undefined {
     const m = label.match(/^(\d+(?:\.\d+)?)x$/);
     if (!m) return undefined;
@@ -199,7 +187,6 @@ export default function TablePage() {
     return Math.round(mult * bb);
   }
 
-  // Prefer typed jam amount when provided by backend; fallback to sentinel
   const typedActions: AllowedAction[] = state?.allowed?.actions ?? [];
   const jamTotal = useMemo(
     () =>
@@ -212,11 +199,9 @@ export default function TablePage() {
     return typeof jamTotal === "number" ? jamTotal : 1_000_000_000;
   }
 
-  // Dynamic verb for any sized action
   const currentSizedVerb = allowedCtx?.to_call === 0 ? "bet" : "raise";
   const sizedLabel = allowedCtx?.to_call === 0 ? "Bet" : "Raise";
 
-  // Decision idx (best-effort)
   const decisionIdx =
     typeof (state as any)?.decision_idx === "number"
       ? (state as any).decision_idx
@@ -225,51 +210,89 @@ export default function TablePage() {
       : null;
 
   // ----- Guidance overlay state -----
-  // Read per-session toggle and compute overlayEnabled using global gate.
   const { enabled: helpEnabled, setEnabled: setHelpEnabled } =
     useHelpOverlayToggle(handId || undefined);
   const overlayEnabled = globalOverlayGate && helpEnabled;
 
-  // Build a decision context (not used in phase 1 but passed along).
+  // Hero hole cards (for equity)
+  const heroCards: string[] = useMemo(() => {
+    const hero = state?.players?.find((p: any) => p.seat === humanSeat);
+    return hero?.hole_cards ? [...hero.hole_cards] : [];
+  }, [state?.players, humanSeat]);
+
+  // Flatten board
+  const boardCards: string[] = useMemo(() => {
+    const flopCards: string[] = state?.board?.flop ?? [];
+    const turnCards: string[] = state?.board?.turn ?? [];
+    const riverCards: string[] = state?.board?.river ?? [];
+    return [...flopCards, ...turnCards, ...riverCards];
+  }, [state?.board]);
+
+  // Known opponent hands
+  const knownHandsBySeat: Record<number, string[]> = useMemo(() => {
+    const map: Record<number, string[]> = {};
+    if (state?.players) {
+      state.players.forEach((p: any) => {
+        if (p.hole_cards && p.hole_cards.length === 2) {
+          if (p.seat !== humanSeat) {
+            map[p.seat] = [...p.hole_cards];
+          }
+        }
+      });
+    }
+    return map;
+  }, [state?.players, humanSeat]);
+
+  const playerCount: number = useMemo(() => state?.players?.length ?? 0, [state?.players]);
+
+  // Build decision context
   const decisionCtx: DecisionContext = useMemo(
     () => ({
       handId,
       idx: decisionIdx,
       street: state?.street || null,
-      heroSeat: humanSeat,
+      heroSeat: humanSeat, // [FIX] use the variable in scope
       pot,
       toCall: allowedCtx?.to_call ?? 0,
+      heroCards,
+      board: boardCards,
+      knownHandsBySeat,
+      playerCount,
     }),
-    [handId, decisionIdx, state?.street, humanSeat, pot, allowedCtx?.to_call]
+    [
+      handId,
+      decisionIdx,
+      state?.street,
+      humanSeat, // [FIX] dependency updated
+      pot,
+      allowedCtx?.to_call,
+      heroCards,
+      boardCards,
+      knownHandsBySeat,
+      playerCount,
+    ]
   );
 
-  // Preflop coach integration (Phase 2)
-  // Fetch advice only when the overlay is enabled and street is preflop.  The
-  // hook caches results and dedupes in-flight calls.  It returns
-  // coach state and a base recommended action.  We refine the
-  // recommended action here using the actual presets available to
-  // highlight the appropriate button.
-  const { coach: coachPreflop } = useDecisionOverlay(decisionCtx, overlayEnabled);
+  // Fetch coach & equity state
+  const { coach, equity, meta } = useDecisionOverlay(decisionCtx, overlayEnabled);
 
-  // Derive allowed buckets & raise presets early so we can use them in memo below
-  const allowedBuckets = useMemo(() => allowedCtx?.allowed_buckets ?? [], [allowedCtx]);
+  // [FIX] Derive allowed buckets & raise presets BEFORE highlightedAction
+  const allowedBuckets = useMemo(
+    () => allowedCtx?.allowed_buckets ?? [],
+    [allowedCtx]
+  );
   const sizedLabels = useMemo(
     () => allowedBuckets.filter((b) => /^\d+(?:\.\d+)?x$/.test(b)),
     [allowedBuckets]
   );
 
-  // Derive the final highlighted action key based on the coach bucket,
-  // current to_call and the available raise presets.  Only update when
-  // the advice is fresh and status is ok.  When mapping fails the
-  // highlighted action is null (no highlight).
+  // Highlight action from coach advice
   const highlightedAction: string | null = useMemo(() => {
-    if (coachPreflop.status !== 'ok' || !coachPreflop.data) return null;
-    // Use allowedCtx.to_call and sizedLabels to map bucket to UI key.
+    if (coach.status !== "ok" || !coach.data) return null;
     const toCall = allowedCtx?.to_call ?? 0;
-    return mapCoachToAction(coachPreflop.data.bucket, toCall, sizedLabels);
-  }, [coachPreflop, allowedCtx, sizedLabels]);
+    return mapCoachToAction(coach.data.bucket, toCall, sizedLabels);
+  }, [coach, allowedCtx, sizedLabels]);
 
-  // Log overlay state changes in dev for diagnostics.
   useEffect(() => {
     // eslint-disable-next-line no-console
     console.debug("[overlay] enabled:", overlayEnabled);
@@ -282,7 +305,6 @@ export default function TablePage() {
     state.street !== "preflop" &&
     decisionIdx !== null;
 
-  // Dev util: copy raw state
   const copyState = async () => {
     if (!state) return;
     try {
@@ -292,7 +314,6 @@ export default function TablePage() {
     }
   };
 
-  // Board extraction using structured board; show latest single turn/river card
   const flop: string[] = state?.board?.flop ?? [];
   const turnArr: string[] = state?.board?.turn ?? [];
   const riverArr: string[] = state?.board?.river ?? [];
@@ -301,25 +322,24 @@ export default function TablePage() {
   const riverCard: string | null =
     riverArr.length > 0 ? riverArr[riverArr.length - 1] : null;
 
-  // Allowed buckets helpers. Only show actions explicitly provided by the server,
-  // with a tiny defensive fallback for Fold when a call is required.
+  // Action visibility
   const showCheck = allowedBuckets.includes("check");
   const showCall = allowedBuckets.includes("call");
-  // Defensive: if server omitted "fold" but to_call > 0, still show Fold.
   const foldListed = allowedBuckets.includes("fold");
   const showFold = foldListed || (!foldListed && (allowedCtx?.to_call ?? 0) > 0);
   const showJam = allowedBuckets.includes("jam");
 
   return (
     <main className="min-h-screen p-6 bg-gray-50 relative">
-      {/* Overlay shown when waiting for bots to act (prod mode). */}
       <WaitingOverlay show={botsAdvancing} message="Waiting for opponents…" />
 
-      {/* Guidance overlay (phase 2: coach preflop integration) */}
+      {/* Guidance overlay (Phase 3: coach + equity integration) */}
       {overlayEnabled && (
         <DecisionHelpOverlay
           decision={decisionCtx}
-          coach={coachPreflop}
+          coach={coach}
+          equity={equity}
+          meta={meta}
         />
       )}
 
@@ -340,7 +360,6 @@ export default function TablePage() {
               />
               <span>Coach</span>
             </label>
-            {/* Show guidance toggle only when globally enabled */}
             {globalOverlayGate && (
               <HelpOverlayToggle
                 enabled={helpEnabled}
@@ -425,13 +444,10 @@ export default function TablePage() {
             {/* Board (full-width) */}
             <div className="rounded-2xl bg-white shadow p-4 space-y-2 md:col-span-3">
               <h2 className="font-semibold">Board</h2>
-
-              {/* [BOARD-LEGEND] — adds a tiny legend above the shared board row */}
               <div className="space-y-1">
                 <div className="text-xs text-gray-500">Flop / Turn / River</div>
                 <CommunityBoardRow flop={flop} turn={turnCard} river={riverCard} />
               </div>
-              {/* [/BOARD-LEGEND] */}
             </div>
           </div>
         )}
@@ -448,12 +464,13 @@ export default function TablePage() {
             </div>
 
             <div className="flex flex-wrap gap-2">
-              {/* Fold */}
               {showFold && (
                 <button
                   onClick={() => postAction("fold")}
                   className={`rounded-xl border px-3 py-2 ${
-                    highlightedAction === 'fold' ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white' : ''
+                    highlightedAction === "fold"
+                      ? "ring-2 ring-blue-500 ring-offset-2 ring-offset-white"
+                      : ""
                   }`}
                   disabled={loading}
                 >
@@ -461,12 +478,13 @@ export default function TablePage() {
                 </button>
               )}
 
-              {/* Check */}
               {showCheck && (
                 <button
-                  onClick={() => postAction('check')}
+                  onClick={() => postAction("check")}
                   className={`rounded-xl border px-3 py-2 ${
-                    highlightedAction === 'check' ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white' : ''
+                    highlightedAction === "check"
+                      ? "ring-2 ring-blue-500 ring-offset-2 ring-offset-white"
+                      : ""
                   }`}
                   disabled={loading}
                 >
@@ -474,12 +492,13 @@ export default function TablePage() {
                 </button>
               )}
 
-              {/* Call */}
               {showCall && (
                 <button
-                  onClick={() => postAction('call')}
+                  onClick={() => postAction("call")}
                   className={`rounded-xl border px-3 py-2 ${
-                    highlightedAction === 'call' ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white' : ''
+                    highlightedAction === "call"
+                      ? "ring-2 ring-blue-500 ring-offset-2 ring-offset-white"
+                      : ""
                   }`}
                   disabled={loading}
                 >
@@ -487,7 +506,6 @@ export default function TablePage() {
                 </button>
               )}
 
-              {/* Quick open/raise sizes (use dynamic verb, from bucket labels) */}
               {sizedLabels.map((label) => {
                 const amt = amountForOpenLabel(label);
                 const isHighlighted = highlightedAction === label;
@@ -496,7 +514,9 @@ export default function TablePage() {
                     key={label}
                     onClick={() => postAction(currentSizedVerb, amt)}
                     className={`rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50 ${
-                      isHighlighted ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white' : ''
+                      isHighlighted
+                        ? "ring-2 ring-blue-500 ring-offset-2 ring-offset-white"
+                        : ""
                     }`}
                     disabled={loading}
                     title={`Total ${amt}`}
@@ -506,12 +526,13 @@ export default function TablePage() {
                 );
               })}
 
-              {/* Jam (use dynamic verb) — prefer typed amount when available */}
               {showJam && (
                 <button
                   onClick={() => postAction(currentSizedVerb, jamAmount())}
                   className={`rounded-xl bg-red-600 text-white px-3 py-2 disabled:opacity-50 ${
-                    highlightedAction === 'jam' ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white' : ''
+                    highlightedAction === "jam"
+                      ? "ring-2 ring-blue-500 ring-offset-2 ring-offset-white"
+                      : ""
                   }`}
                   disabled={loading}
                 >
@@ -520,7 +541,6 @@ export default function TablePage() {
               )}
             </div>
 
-            {/* Custom sized action uses dynamic verb */}
             <CustomSized
               disabled={loading}
               verb={currentSizedVerb}
@@ -529,7 +549,6 @@ export default function TablePage() {
           </div>
         )}
 
-        {/* Coach Panel (postflop, human turn only) */}
         {coachShouldShow && (
           <CoachPanel
             enabled={true}
@@ -539,7 +558,6 @@ export default function TablePage() {
           />
         )}
 
-        {/* Last action panel */}
         {state?.last_action && (
           <div className="rounded-2xl bg-white shadow p-4 space-y-1">
             <h2 className="font-semibold">Last Action</h2>

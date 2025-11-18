@@ -1,4 +1,3 @@
-// frontend/utils/overlayCache.ts
 // Simple in-memory caches for the guidance overlay.
 //
 // The overlay should cache coach responses keyed by hand_id and
@@ -58,4 +57,63 @@ export function deleteCoachInFlight(key: string): void {
 export function clearCoachCaches(): void {
   coachCache.clear();
   coachInFlight.clear();
+}
+
+// -----------------------------------------------------------------------------
+// Equity caching
+//
+// Similar to the coach cache, the equity overlay caches results by
+// (hand_id, idx, street and signature) to avoid duplicate POST calls.  A
+// separate in‑flight map stores active Promises so that concurrent
+// requests share the same network call.  Negative entries are stored
+// alongside successful results so that repeated visits to unsupported
+// or unavailable decisions do not trigger repeated fetches.
+
+import type { EquityResponse } from '../types/equity';
+import type { EquityMeta } from '../types/meta';
+
+export type EquityStatus =
+  | 'ok'
+  | 'skipped'
+  | 'disabled'
+  | 'unsupported'
+  | 'route-missing'
+  | 'timeout'
+  | 'error';
+
+export interface EquityRecord {
+  data: EquityResponse | null;
+  status: EquityStatus;
+  error?: string;
+  /** Optional origin for the villain range (e.g. chart/default/random). */
+  origin?: string;
+}
+
+const equityCache: Map<string, EquityRecord> = new Map();
+const equityInFlight: Map<string, Promise<EquityRecord>> = new Map();
+
+export function getEquity(key: string): EquityRecord | undefined {
+  return equityCache.get(key);
+}
+
+export function setEquity(key: string, value: EquityRecord): void {
+  equityCache.set(key, value);
+}
+
+export function getEquityInFlight(key: string): Promise<EquityRecord> | undefined {
+  return equityInFlight.get(key);
+}
+
+export function setEquityInFlight(key: string, promise: Promise<EquityRecord>): void {
+  equityInFlight.set(key, promise);
+}
+
+export function deleteEquityInFlight(key: string): void {
+  equityInFlight.delete(key);
+}
+
+/** Remove all cached equity values.  Useful for testing. */
+export function clearEquityCaches(): void {
+  equityCache.clear();
+  equityInFlight.clear();
 }
