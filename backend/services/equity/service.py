@@ -188,3 +188,71 @@ class EquityService:
             raise RuntimeError("equity result contained no players")
         hero = result.per_player[0]
         return float(hero.get("equity", 0.0))
+
+    # ------------------------------------------------------------------ #
+    # Capability helper
+    # ------------------------------------------------------------------ #
+
+    def capabilities(self) -> dict:
+        """
+        Return a lightweight snapshot of this service's capabilities.
+
+        This helper selects a backend using the same policy that would be
+        applied to a normal equity calculation (excluding range inputs) and
+        reports its basic characteristics.  The frontend can call this
+        endpoint once to decide how to render UI elements without issuing
+        costly trial equity requests.
+
+        Returns:
+            dict: A dictionary with keys ``backend``, ``supports_ranges``, and
+            ``max_players``.  ``backend`` is the normalized name of the
+            selected backend (e.g. ``"ompeval"``, ``"eval7"``, ``"pokerkit"``).
+            ``supports_ranges`` is a conservative boolean indicating whether
+            range notation is supported.  ``max_players`` reflects the
+            maximum number of players the backend can handle efficiently.
+        """
+        # Choose a backend as we would for a hand-only equity call.  Using
+        # ``wants_ranges=False`` ensures that backends incapable of ranges
+        # aren't inadvertently skipped when the policy forces them.
+        try:
+            backend = self._choose(wants_ranges=False)
+        except Exception:
+            # If no backend is available, report unknown capabilities.
+            return {
+                "backend": "unknown",
+                "supports_ranges": False,
+                "max_players": 0,
+            }
+
+        # Determine the backend name.  Prefer the declared ``name`` attribute;
+        # fall back to the class name without the "Backend" suffix.  Lowercase
+        # for consistency.
+        backend_name = (
+            getattr(backend, "name", None)
+            or backend.__class__.__name__.replace("Backend", "").lower()
+        )
+
+        # Conservatively advertise range support.  Many backends expose
+        # ``supports_ranges()`` but default to False if unimplemented.  If
+        # the method raises, assume ranges are unsupported.
+        supports_ranges = False
+        try:
+            supports_ranges = bool(
+                backend_name in ("ompeval", "eval7", "pokerkit")
+                and getattr(backend, "supports_ranges", lambda: False)()
+            )
+        except Exception:
+            supports_ranges = False
+
+        # Multiway support.  OMPEval supports up to 6 players by default.
+        # Other engines are conservatively limited to 2 (heads-up).  These
+        # values can be refined later if backends evolve.
+        max_players = 2
+        if backend_name == "ompeval":
+            max_players = 6
+
+        return {
+            "backend": backend_name,
+            "supports_ranges": supports_ranges,
+            "max_players": max_players,
+        }

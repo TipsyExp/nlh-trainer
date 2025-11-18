@@ -1,5 +1,6 @@
 # backend/config.py
-"""Centralized configuration for the NLH Trainer backend.
+"""
+Centralized configuration for the NLH Trainer backend.
 
 This module parses relevant environment variables once and exposes
 shared constants for other modules to import.  Parsing is done in a
@@ -145,3 +146,63 @@ LOG_PREFLOP_ADVICE: bool = _env_bool("LOG_PREFLOP_ADVICE", "false")
 LOG_EQUITY_SNAPSHOT_REDACT: bool = _env_bool("LOG_EQUITY_SNAPSHOT_REDACT", "false")
 
 # Expose additional flags here as needed.
+
+
+# ---------------------------------------------------------------------------
+# CORS configuration
+# ---------------------------------------------------------------------------
+
+
+def _csv_env(name: str, default: str = "") -> list[str]:
+    """
+    Parse a comma‑separated environment variable into a list of strings.
+
+    Strips whitespace from each entry and excludes empty strings.
+
+    Args:
+        name: Environment variable to read.
+        default: Default value if the variable is not set.
+
+    Returns:
+        A list of strings.
+    """
+    raw = os.getenv(name, default)
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+class Config:
+    """
+    Configuration snapshot for the backend.
+
+    This class centralizes configuration for runtime options that may be
+    consumed outside of this module.  Instantiating ``Config`` captures
+    environment variables at that moment.
+    """
+
+    def __init__(self) -> None:
+        # Re-expose selected flags from the module namespace for convenience.
+        self.COACH_ENABLED: bool = COACH_ENABLED
+
+        # CORS settings
+        self.CORS_ALLOW_ORIGINS: list[str] = _csv_env(
+            "CORS_ALLOW_ORIGINS", "http://localhost:3000"
+        )
+        self.CORS_ALLOW_CREDENTIALS: bool = (
+            os.getenv("CORS_ALLOW_CREDENTIALS", "false").lower() == "true"
+        )
+        self.CORS_ALLOW_METHODS: list[str] = _csv_env(
+            "CORS_ALLOW_METHODS", "GET,POST,OPTIONS"
+        )
+        self.CORS_ALLOW_HEADERS: list[str] = _csv_env(
+            "CORS_ALLOW_HEADERS", "Authorization,Content-Type"
+        )
+
+
+def get_config() -> Config:
+    """
+    Return a fresh ``Config`` instance with values loaded from environment variables.
+
+    Callers should prefer accessing configuration flags directly from this
+    instance rather than reading environment variables themselves.
+    """
+    return Config()

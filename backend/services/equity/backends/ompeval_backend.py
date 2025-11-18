@@ -11,6 +11,7 @@ Expected native binding: exposes `calc_equity(players, board, dead, iters, exact
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, cast
+
 import importlib
 
 from ..base import Card, EquityResult, PlayerSpec
@@ -18,18 +19,30 @@ from ..base import Card, EquityResult, PlayerSpec
 
 def _load_native() -> tuple[Optional[Any], str]:
     """
-    Try to import a native OMPEval binding. Order:
-      1) backend.native.ompeval (in-repo module)
-      2) ompeval (external wheel / sitepackage)
-    Returns (module_or_none, binding_name).
+    Try to import a native OMPEval binding through the unified shim.
+
+    The shim normalizes import names across historical packages such as
+    ``ompeval`` and ``nlh_ompeval``.  If import fails, returns ``(None, "")``.
+
+    Returns:
+        Tuple[module or None, str]: the imported module and the name attempted.
     """
-    for mod_name in ("backend.native.ompeval", "ompeval"):
-        try:
-            mod = importlib.import_module(mod_name)
-            return mod, mod_name
-        except Exception:
-            continue
-    return None, ""
+    try:
+        # Import via our local shim which re-exports whichever binding is
+        # available.  This avoids scattered try/except imports throughout the
+        # codebase and unifies the import path under ``ompeval``.
+        from .ompeval_bindings import ompeval as mod  # type: ignore
+
+        return mod, "ompeval"
+    except Exception:
+        # Fall back to dynamic discovery of known module names.
+        for mod_name in ("backend.native.ompeval", "ompeval"):
+            try:
+                mod = importlib.import_module(mod_name)
+                return mod, mod_name
+            except Exception:
+                continue
+        return None, ""
 
 
 class OmpevalBackend:
@@ -79,7 +92,7 @@ class OmpevalBackend:
         if len(players) < 2:
             raise ValueError("need at least two players")
         if len(players) > self.MAX_PLAYERS:
-            raise ValueError(f"too many players (>{self.MAX_PLAYERS}) for OMPEval")
+            raise ValueError(f"too many players (> {self.MAX_PLAYERS}) for OMPEval")
 
         mode = _infer_mode(players)
 

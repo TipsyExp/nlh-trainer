@@ -1,9 +1,11 @@
 # backend/main.py
-"""FastAPI application entry point for the NLH trainer backend.
+"""
+FastAPI application entry point for the NLH trainer backend.
 
-Constructs a FastAPI app, configures CORS for local development, and
-registers routers for session management, hand interaction, and data
-export. Root and health endpoints provide simple liveness probes.
+Constructs a FastAPI app, configures CORS for local development and
+production via environment variables, and registers routers for session
+management, hand interaction, data export, equity, and meta capability
+discovery. Root and health endpoints provide simple liveness probes.
 
 Notes:
 
@@ -31,6 +33,7 @@ from backend.config import (
     HAND_AUTO_ENABLED,
     ENGINE_DEBUG_HTTP,
     BOT_MODE as DEFAULT_BOT_MODE,
+    get_config,
 )
 from backend.logger import get_logger  # ensure DB init on startup
 from backend.adapters.engines import get_adapter
@@ -41,6 +44,7 @@ from backend.api.coach import router as coach_router  # coach scaffold (501 by d
 from backend.api.review import router as review_router
 from backend.api.debug import router as debug_router  # conditionally included below
 from backend.api.routes.equity import router as equity_router  # equity helper endpoint
+from backend.api.routes import meta as meta_routes  # meta capabilities endpoint
 
 
 # -------- Lifespan (replaces deprecated @on_event startup) --------
@@ -59,17 +63,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS for local frontend dev
+# CORS configuration driven by environment
+cfg = get_config()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=cfg.CORS_ALLOW_ORIGINS,
+    allow_credentials=cfg.CORS_ALLOW_CREDENTIALS,
+    allow_methods=cfg.CORS_ALLOW_METHODS or ["*"],
+    allow_headers=cfg.CORS_ALLOW_HEADERS or ["*"],
 )
+
 
 # ---------------------------------------------------------------------------
 # Request ID middleware
@@ -155,6 +158,7 @@ app.include_router(export_router, prefix="/api")
 app.include_router(coach_router, prefix="/api")
 app.include_router(review_router, prefix="/api")
 app.include_router(equity_router, prefix="/api")  # /api/equity
+app.include_router(meta_routes.router, prefix="/api")  # /api/meta
 
 
 # Optional: debug endpoints for engine event logs (dev-only)

@@ -225,7 +225,7 @@ def calc_equity(
                 "per_player": result.per_player,
                 "raw": result.raw,
                 "inputs": {
-                    "players": [p.dict() for p in req.players],
+                    "players": [p.model_dump(exclude_none=True) for p in req.players],
                     "board": list(req.board),
                     "dead": list(req.dead),
                 },
