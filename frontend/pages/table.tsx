@@ -23,6 +23,8 @@ import { useHelpOverlayToggle } from "../hooks/useHelpOverlayToggle";
 import { HelpOverlayToggle } from "../components/HelpOverlayToggle";
 import { DecisionHelpOverlay } from "../components/DecisionHelpOverlay";
 import type { DecisionContext } from "../types/decision";
+import { useDecisionOverlay } from "../hooks/useDecisionOverlay";
+import { mapCoachToAction } from "../utils/coachMapping";
 
 // Gate dev-only /api/hand/auto. Default is false unless explicitly enabled.
 const AUTO_HAND_ENABLED = ["1", "true", "yes", "on"].includes(
@@ -241,6 +243,32 @@ export default function TablePage() {
     [handId, decisionIdx, state?.street, humanSeat, pot, allowedCtx?.to_call]
   );
 
+  // Preflop coach integration (Phase 2)
+  // Fetch advice only when the overlay is enabled and street is preflop.  The
+  // hook caches results and dedupes in-flight calls.  It returns
+  // coach state and a base recommended action.  We refine the
+  // recommended action here using the actual presets available to
+  // highlight the appropriate button.
+  const { coach: coachPreflop } = useDecisionOverlay(decisionCtx, overlayEnabled);
+
+  // Derive allowed buckets & raise presets early so we can use them in memo below
+  const allowedBuckets = useMemo(() => allowedCtx?.allowed_buckets ?? [], [allowedCtx]);
+  const sizedLabels = useMemo(
+    () => allowedBuckets.filter((b) => /^\d+(?:\.\d+)?x$/.test(b)),
+    [allowedBuckets]
+  );
+
+  // Derive the final highlighted action key based on the coach bucket,
+  // current to_call and the available raise presets.  Only update when
+  // the advice is fresh and status is ok.  When mapping fails the
+  // highlighted action is null (no highlight).
+  const highlightedAction: string | null = useMemo(() => {
+    if (coachPreflop.status !== 'ok' || !coachPreflop.data) return null;
+    // Use allowedCtx.to_call and sizedLabels to map bucket to UI key.
+    const toCall = allowedCtx?.to_call ?? 0;
+    return mapCoachToAction(coachPreflop.data.bucket, toCall, sizedLabels);
+  }, [coachPreflop, allowedCtx, sizedLabels]);
+
   // Log overlay state changes in dev for diagnostics.
   useEffect(() => {
     // eslint-disable-next-line no-console
@@ -275,13 +303,11 @@ export default function TablePage() {
 
   // Allowed buckets helpers. Only show actions explicitly provided by the server,
   // with a tiny defensive fallback for Fold when a call is required.
-  const allowedBuckets = allowedCtx?.allowed_buckets ?? [];
   const showCheck = allowedBuckets.includes("check");
   const showCall = allowedBuckets.includes("call");
   // Defensive: if server omitted "fold" but to_call > 0, still show Fold.
   const foldListed = allowedBuckets.includes("fold");
   const showFold = foldListed || (!foldListed && (allowedCtx?.to_call ?? 0) > 0);
-  const sizedLabels = allowedBuckets.filter((b) => /^\d+(?:\.\d+)?x$/.test(b));
   const showJam = allowedBuckets.includes("jam");
 
   return (
@@ -289,8 +315,13 @@ export default function TablePage() {
       {/* Overlay shown when waiting for bots to act (prod mode). */}
       <WaitingOverlay show={botsAdvancing} message="Waiting for opponents…" />
 
-      {/* Guidance overlay (phase 1: shell only) */}
-      {overlayEnabled && <DecisionHelpOverlay decision={decisionCtx} />}
+      {/* Guidance overlay (phase 2: coach preflop integration) */}
+      {overlayEnabled && (
+        <DecisionHelpOverlay
+          decision={decisionCtx}
+          coach={coachPreflop}
+        />
+      )}
 
       <div className="max-w-5xl mx-auto grid gap-6">
         <header className="flex items-center justify-between">
@@ -421,7 +452,9 @@ export default function TablePage() {
               {showFold && (
                 <button
                   onClick={() => postAction("fold")}
-                  className="rounded-xl border px-3 py-2"
+                  className={`rounded-xl border px-3 py-2 ${
+                    highlightedAction === 'fold' ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white' : ''
+                  }`}
                   disabled={loading}
                 >
                   Fold
@@ -431,8 +464,10 @@ export default function TablePage() {
               {/* Check */}
               {showCheck && (
                 <button
-                  onClick={() => postAction("check")}
-                  className="rounded-xl border px-3 py-2"
+                  onClick={() => postAction('check')}
+                  className={`rounded-xl border px-3 py-2 ${
+                    highlightedAction === 'check' ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white' : ''
+                  }`}
                   disabled={loading}
                 >
                   Check
@@ -442,8 +477,10 @@ export default function TablePage() {
               {/* Call */}
               {showCall && (
                 <button
-                  onClick={() => postAction("call")}
-                  className="rounded-xl border px-3 py-2"
+                  onClick={() => postAction('call')}
+                  className={`rounded-xl border px-3 py-2 ${
+                    highlightedAction === 'call' ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white' : ''
+                  }`}
                   disabled={loading}
                 >
                   Call {allowedCtx.to_call}
@@ -453,11 +490,14 @@ export default function TablePage() {
               {/* Quick open/raise sizes (use dynamic verb, from bucket labels) */}
               {sizedLabels.map((label) => {
                 const amt = amountForOpenLabel(label);
+                const isHighlighted = highlightedAction === label;
                 return (
                   <button
                     key={label}
                     onClick={() => postAction(currentSizedVerb, amt)}
-                    className="rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50"
+                    className={`rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50 ${
+                      isHighlighted ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white' : ''
+                    }`}
                     disabled={loading}
                     title={`Total ${amt}`}
                   >
@@ -470,7 +510,9 @@ export default function TablePage() {
               {showJam && (
                 <button
                   onClick={() => postAction(currentSizedVerb, jamAmount())}
-                  className="rounded-xl bg-red-600 text-white px-3 py-2 disabled:opacity-50"
+                  className={`rounded-xl bg-red-600 text-white px-3 py-2 disabled:opacity-50 ${
+                    highlightedAction === 'jam' ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white' : ''
+                  }`}
                   disabled={loading}
                 >
                   Jam
