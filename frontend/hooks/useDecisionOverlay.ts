@@ -35,6 +35,7 @@ import type { DecisionContext } from '../types/decision';
 import type { CoachAdvice } from '../types/coach';
 import type { EquityResponse } from '../types/equity';
 import type { Meta } from '../types/meta';
+import { setOverlayTrace, getOverlayTrace } from '../store/overlayDebugStore';
 
 // Default client timeout for the coach endpoint (in ms).  This can be
 // overridden at build time via the NEXT_PUBLIC_COACH_CLIENT_TIMEOUT_MS
@@ -122,6 +123,16 @@ export function useDecisionOverlay(
       context.street?.toLowerCase() === 'preflop' &&
       !!context.handId &&
       typeof context.idx === 'number';
+    // Always update the overlay trace for the current decision.  Reset
+    // calledCoach to false; if we later trigger a network call we
+    // will update this flag to true.  Preserve any existing calledEquity
+    // value via the partial update semantics of setOverlayTrace.
+    setOverlayTrace({
+      handId: context?.handId ?? null,
+      idx: typeof context?.idx === 'number' ? (context?.idx as number) : null,
+      street: context?.street ?? null,
+      calledCoach: false,
+    });
     if (!shouldFetch) {
       setCoachResponse(null);
       return;
@@ -164,6 +175,8 @@ export function useDecisionOverlay(
           /* noop */
         }
       }
+      // Record that a coach request has been made for this decision.
+      setOverlayTrace({ calledCoach: true });
       try {
         const res = await getJson(
           `/api/coach/preflop?hand_id=${encodeURIComponent(
@@ -226,6 +239,16 @@ export function useDecisionOverlay(
   // initiated.  Skipped scenarios (e.g. missing cards or unsupported
   // ranges) are negative‑cached to avoid repeated attempts.
   useEffect(() => {
+    // Always update the overlay trace with the current decision and
+    // reset the equity call flag.  Preserve calledCoach from any
+    // previous update.  We set calledEquity to false here and will
+    // set it to true when a network call is initiated below.
+    setOverlayTrace({
+      handId: context?.handId ?? null,
+      idx: typeof context?.idx === 'number' ? (context?.idx as number) : null,
+      street: context?.street ?? null,
+      calledEquity: false,
+    });
     // Always clear equityResponse when overlay disabled or context missing.
     if (!overlayEnabled || !context || !context.handId || typeof context.idx !== 'number') {
       setEquityResponse(null);
@@ -322,6 +345,8 @@ export function useDecisionOverlay(
           /* noop */
         }
       }
+      // Record that an equity request has been made for this decision.
+      setOverlayTrace({ calledEquity: true });
       try {
         const res = await postJson(
           `/api/equity?hand_id=${encodeURIComponent(String(context.handId))}&idx=${context.idx}`,

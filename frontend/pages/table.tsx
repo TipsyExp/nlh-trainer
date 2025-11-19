@@ -1,5 +1,13 @@
 // frontend/pages/table.tsx
-// Updated Table page with guidance overlay integration (Phase 3).
+// Updated Table page with guidance overlay integration (Phase 4).
+//
+// This page renders the main NLH table UI. It includes a right-side
+// guidance overlay that is gated by build-time environment variables
+// (NEXT_PUBLIC_DEV_TOOLS and NEXT_PUBLIC_HELP_OVERLAY_ENABLED) and a
+// per-session toggle persisted in localStorage. In Phase 4 the overlay
+// fetches preflop coach advice and hero equity from the backend via
+// useDecisionOverlay, and a dev-only SnapshotInspector helps verify
+// snapshot logging.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Api } from "../lib/api";
@@ -19,7 +27,10 @@ import { DecisionHelpOverlay } from "../components/DecisionHelpOverlay";
 import type { DecisionContext } from "../types/decision";
 import { useDecisionOverlay } from "../hooks/useDecisionOverlay";
 import { mapCoachToAction } from "../utils/coachMapping";
+// Dev inspector for snapshot testing (Phase 4). Loaded only when dev tools are enabled.
+import SnapshotInspector from "../dev/SnapshotInspector";
 
+// Gate dev-only /api/hand/auto. Default is false unless explicitly enabled.
 const AUTO_HAND_ENABLED = ["1", "true", "yes", "on"].includes(
   String(process.env.NEXT_PUBLIC_ENABLE_HAND_AUTO || "").toLowerCase()
 );
@@ -60,14 +71,19 @@ export default function TablePage() {
   const bb = useMemo(() => state?.table?.bb ?? 100, [state]);
 
   const pot = useMemo(
-    () => state?.pot_total ?? (state as any)?.pot_after ?? (state as any)?.pot ?? 0,
+    () =>
+      state?.pot_total ??
+      (state as any)?.pot_after ??
+      (state as any)?.pot ??
+      0,
     [state]
   );
 
   // Prefer state.allowed/to_act if present; fallback to legacy actor
   const allowedCtx: AllowedContext | null = useMemo(() => {
     if (!state) return null;
-    if (state.allowed && typeof state.allowed.to_call === "number") return state.allowed;
+    if (state.allowed && typeof state.allowed.to_call === "number")
+      return state.allowed;
     if (actor) {
       return {
         to_call: actor.to_call,
@@ -120,8 +136,10 @@ export default function TablePage() {
   };
 
   async function pollUntilSettled(humanSeat: number) {
+    // Poll GET /api/hand/state until it's our turn or the hand is over.
+    // Switch to a time-based cap to handle slower solves gracefully.
     const start = Date.now();
-    const maxWaitMs = 30_000;
+    const maxWaitMs = 30_000; // 30s cap
     let bannerSet = false;
 
     try {
@@ -172,6 +190,8 @@ export default function TablePage() {
     try {
       const res = await Api.postAction({ seat: humanSeat, action, amount });
       setState(res.state);
+
+      // Always follow up by polling until it's our turn or the hand is over.
       await pollUntilSettled(humanSeat);
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -180,6 +200,7 @@ export default function TablePage() {
     }
   }
 
+  // Preflop open helpers
   function amountForOpenLabel(label: string): number | undefined {
     const m = label.match(/^(\d+(?:\.\d+)?)x$/);
     if (!m) return undefined;
@@ -187,6 +208,7 @@ export default function TablePage() {
     return Math.round(mult * bb);
   }
 
+  // Prefer typed jam amount when provided by backend; fallback to sentinel
   const typedActions: AllowedAction[] = state?.allowed?.actions ?? [];
   const jamTotal = useMemo(
     () =>
@@ -199,9 +221,11 @@ export default function TablePage() {
     return typeof jamTotal === "number" ? jamTotal : 1_000_000_000;
   }
 
+  // Dynamic verb for any sized action
   const currentSizedVerb = allowedCtx?.to_call === 0 ? "bet" : "raise";
   const sizedLabel = allowedCtx?.to_call === 0 ? "Bet" : "Raise";
 
+  // Decision idx (best-effort)
   const decisionIdx =
     typeof (state as any)?.decision_idx === "number"
       ? (state as any).decision_idx
@@ -210,17 +234,18 @@ export default function TablePage() {
       : null;
 
   // ----- Guidance overlay state -----
+  // Read per-session toggle and compute overlayEnabled using global gate.
   const { enabled: helpEnabled, setEnabled: setHelpEnabled } =
     useHelpOverlayToggle(handId || undefined);
   const overlayEnabled = globalOverlayGate && helpEnabled;
 
-  // Hero hole cards (for equity)
+  // Derive hero hole cards for the equity builder.
   const heroCards: string[] = useMemo(() => {
     const hero = state?.players?.find((p: any) => p.seat === humanSeat);
     return hero?.hole_cards ? [...hero.hole_cards] : [];
   }, [state?.players, humanSeat]);
 
-  // Flatten board
+  // Flatten the board across streets for postflop equity requests.
   const boardCards: string[] = useMemo(() => {
     const flopCards: string[] = state?.board?.flop ?? [];
     const turnCards: string[] = state?.board?.turn ?? [];
@@ -228,7 +253,7 @@ export default function TablePage() {
     return [...flopCards, ...turnCards, ...riverCards];
   }, [state?.board]);
 
-  // Known opponent hands
+  // Map of opponent seat -> known hole cards (fully revealed).
   const knownHandsBySeat: Record<number, string[]> = useMemo(() => {
     const map: Record<number, string[]> = {};
     if (state?.players) {
@@ -243,15 +268,19 @@ export default function TablePage() {
     return map;
   }, [state?.players, humanSeat]);
 
-  const playerCount: number = useMemo(() => state?.players?.length ?? 0, [state?.players]);
+  // Number of players (used to gate postflop equity).
+  const playerCount: number = useMemo(
+    () => state?.players?.length ?? 0,
+    [state?.players]
+  );
 
-  // Build decision context
+  // Build a decision context for overlay hooks.
   const decisionCtx: DecisionContext = useMemo(
     () => ({
       handId,
       idx: decisionIdx,
       street: state?.street || null,
-      heroSeat: humanSeat, // [FIX] use the variable in scope
+      heroSeat: humanSeat,
       pot,
       toCall: allowedCtx?.to_call ?? 0,
       heroCards,
@@ -263,7 +292,7 @@ export default function TablePage() {
       handId,
       decisionIdx,
       state?.street,
-      humanSeat, // [FIX] dependency updated
+      humanSeat,
       pot,
       allowedCtx?.to_call,
       heroCards,
@@ -273,10 +302,10 @@ export default function TablePage() {
     ]
   );
 
-  // Fetch coach & equity state
+  // Fetch coach advice and equity.
   const { coach, equity, meta } = useDecisionOverlay(decisionCtx, overlayEnabled);
 
-  // [FIX] Derive allowed buckets & raise presets BEFORE highlightedAction
+  // Derive allowed buckets & raise presets (used by highlight + UI).
   const allowedBuckets = useMemo(
     () => allowedCtx?.allowed_buckets ?? [],
     [allowedCtx]
@@ -286,13 +315,14 @@ export default function TablePage() {
     [allowedBuckets]
   );
 
-  // Highlight action from coach advice
+  // Final highlighted action key based on coach bucket and presets.
   const highlightedAction: string | null = useMemo(() => {
     if (coach.status !== "ok" || !coach.data) return null;
     const toCall = allowedCtx?.to_call ?? 0;
     return mapCoachToAction(coach.data.bucket, toCall, sizedLabels);
   }, [coach, allowedCtx, sizedLabels]);
 
+  // Log overlay state changes in dev for diagnostics.
   useEffect(() => {
     // eslint-disable-next-line no-console
     console.debug("[overlay] enabled:", overlayEnabled);
@@ -305,6 +335,7 @@ export default function TablePage() {
     state.street !== "preflop" &&
     decisionIdx !== null;
 
+  // Dev util: copy raw state
   const copyState = async () => {
     if (!state) return;
     try {
@@ -314,6 +345,7 @@ export default function TablePage() {
     }
   };
 
+  // Board extraction using structured board; show latest single turn/river card
   const flop: string[] = state?.board?.flop ?? [];
   const turnArr: string[] = state?.board?.turn ?? [];
   const riverArr: string[] = state?.board?.river ?? [];
@@ -322,18 +354,21 @@ export default function TablePage() {
   const riverCard: string | null =
     riverArr.length > 0 ? riverArr[riverArr.length - 1] : null;
 
-  // Action visibility
+  // Allowed buckets helpers (use existing allowedBuckets/sizedLabels).
   const showCheck = allowedBuckets.includes("check");
   const showCall = allowedBuckets.includes("call");
+  // Defensive: if server omitted "fold" but to_call > 0, still show Fold.
   const foldListed = allowedBuckets.includes("fold");
-  const showFold = foldListed || (!foldListed && (allowedCtx?.to_call ?? 0) > 0);
+  const showFold =
+    foldListed || (!foldListed && (allowedCtx?.to_call ?? 0) > 0);
   const showJam = allowedBuckets.includes("jam");
 
   return (
     <main className="min-h-screen p-6 bg-gray-50 relative">
+      {/* Overlay shown when waiting for bots to act (prod mode). */}
       <WaitingOverlay show={botsAdvancing} message="Waiting for opponents…" />
 
-      {/* Guidance overlay (Phase 3: coach + equity integration) */}
+      {/* Guidance overlay (Phase 4: coach + equity integration) */}
       {overlayEnabled && (
         <DecisionHelpOverlay
           decision={decisionCtx}
@@ -342,6 +377,9 @@ export default function TablePage() {
           meta={meta}
         />
       )}
+
+      {/* Snapshot inspector (Phase 4). Renders only when dev tools are enabled. */}
+      {DEV_TOOLS && <SnapshotInspector />}
 
       <div className="max-w-5xl mx-auto grid gap-6">
         <header className="flex items-center justify-between">
@@ -360,6 +398,7 @@ export default function TablePage() {
               />
               <span>Coach</span>
             </label>
+            {/* Show guidance toggle only when globally enabled */}
             {globalOverlayGate && (
               <HelpOverlayToggle
                 enabled={helpEnabled}
@@ -393,7 +432,9 @@ export default function TablePage() {
           </div>
         </header>
 
-        {err && <div className="rounded-xl bg-red-50 text-red-700 p-3">{err}</div>}
+        {err && (
+          <div className="rounded-xl bg-red-50 text-red-700 p-3">{err}</div>
+        )}
 
         {/* Snapshot */}
         {state && (
@@ -411,10 +452,16 @@ export default function TablePage() {
                 <div>BB Seat: {state.table.bb_seat}</div>
                 <div>Street: {state.street}</div>
                 <div>Pot: {pot}</div>
-                <div className="text-gray-500 text-xs">Seed: {state.deck_seed}</div>
-                {handId && <div className="text-gray-500 text-xs">Hand: {handId}</div>}
+                <div className="text-gray-500 text-xs">
+                  Seed: {state.deck_seed}
+                </div>
+                {handId && (
+                  <div className="text-gray-500 text-xs">Hand: {handId}</div>
+                )}
                 {typeof decisionIdx === "number" && (
-                  <div className="text-gray-500 text-xs">Decision: {decisionIdx}</div>
+                  <div className="text-gray-500 text-xs">
+                    Decision: {decisionIdx}
+                  </div>
                 )}
               </div>
             </div>
@@ -427,7 +474,9 @@ export default function TablePage() {
                   <div
                     key={p.seat}
                     className={`rounded-xl border p-3 ${
-                      p.seat === humanSeat ? "border-black" : "border-gray-200"
+                      p.seat === humanSeat
+                        ? "border-black"
+                        : "border-gray-200"
                     }`}
                   >
                     <div className="text-sm font-medium">
@@ -444,10 +493,17 @@ export default function TablePage() {
             {/* Board (full-width) */}
             <div className="rounded-2xl bg-white shadow p-4 space-y-2 md:col-span-3">
               <h2 className="font-semibold">Board</h2>
+
+              {/* [BOARD-LEGEND] — adds a tiny legend above the shared board row */}
               <div className="space-y-1">
                 <div className="text-xs text-gray-500">Flop / Turn / River</div>
-                <CommunityBoardRow flop={flop} turn={turnCard} river={riverCard} />
+                <CommunityBoardRow
+                  flop={flop}
+                  turn={turnCard}
+                  river={riverCard}
+                />
               </div>
+              {/* [/BOARD-LEGEND] */}
             </div>
           </div>
         )}
@@ -464,6 +520,7 @@ export default function TablePage() {
             </div>
 
             <div className="flex flex-wrap gap-2">
+              {/* Fold */}
               {showFold && (
                 <button
                   onClick={() => postAction("fold")}
@@ -478,6 +535,7 @@ export default function TablePage() {
                 </button>
               )}
 
+              {/* Check */}
               {showCheck && (
                 <button
                   onClick={() => postAction("check")}
@@ -492,6 +550,7 @@ export default function TablePage() {
                 </button>
               )}
 
+              {/* Call */}
               {showCall && (
                 <button
                   onClick={() => postAction("call")}
@@ -506,6 +565,7 @@ export default function TablePage() {
                 </button>
               )}
 
+              {/* Quick open/raise sizes (use dynamic verb, from bucket labels) */}
               {sizedLabels.map((label) => {
                 const amt = amountForOpenLabel(label);
                 const isHighlighted = highlightedAction === label;
@@ -526,6 +586,7 @@ export default function TablePage() {
                 );
               })}
 
+              {/* Jam (use dynamic verb) — prefer typed amount when available */}
               {showJam && (
                 <button
                   onClick={() => postAction(currentSizedVerb, jamAmount())}
@@ -541,6 +602,7 @@ export default function TablePage() {
               )}
             </div>
 
+            {/* Custom sized action uses dynamic verb */}
             <CustomSized
               disabled={loading}
               verb={currentSizedVerb}
@@ -549,6 +611,7 @@ export default function TablePage() {
           </div>
         )}
 
+        {/* Coach Panel (postflop, human turn only) */}
         {coachShouldShow && (
           <CoachPanel
             enabled={true}
@@ -558,6 +621,7 @@ export default function TablePage() {
           />
         )}
 
+        {/* Last action panel */}
         {state?.last_action && (
           <div className="rounded-2xl bg-white shadow p-4 space-y-1">
             <h2 className="font-semibold">Last Action</h2>
