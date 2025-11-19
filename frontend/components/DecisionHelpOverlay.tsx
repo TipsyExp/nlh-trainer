@@ -1,5 +1,5 @@
 // frontend/components/DecisionHelpOverlay.tsx
-// Presentational overlay for hand guidance (phase 3).
+// Presentational overlay for hand guidance (phase 3, updated in phase 5).
 //
 // This component renders a fixed panel on the right side of the screen (or
 // bottom on small screens) and displays coach advice and equity for the
@@ -11,6 +11,7 @@ import React from 'react';
 import type { DecisionContext } from '../types/decision';
 import { StrategyBar } from './StrategyBar';
 import { StatusChip } from './StatusChip';
+import { HeroEquityBar } from './HeroEquityBar';
 import type { CoachAdvice } from '../types/coach';
 import type { EquityResponse } from '../types/equity';
 import type { EquityStatus } from '../utils/overlayCache';
@@ -67,7 +68,10 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
         </div>
         {/* Coach section depends on coach status */}
         {coach.status === 'loading' && (
-          <div className="text-sm text-gray-600">Loading preflop advice…</div>
+          <div className="space-y-2">
+            <div className="h-4 w-32 bg-gray-100 animate-pulse rounded"></div>
+            <div className="h-3 w-24 bg-gray-100 animate-pulse rounded"></div>
+          </div>
         )}
         {coach.status === 'disabled' && (
           <div className="text-sm text-gray-600">Coach disabled or not configured.</div>
@@ -117,10 +121,13 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
         {equity && (
           <div className="mt-3 border-t pt-3 space-y-2">
             {equity.loading && (
-              <div className="text-sm text-gray-600">Loading equity…</div>
+              <div className="space-y-2">
+                <div className="h-4 w-32 bg-gray-100 animate-pulse rounded"></div>
+                <div className="h-3 w-24 bg-gray-100 animate-pulse rounded"></div>
+              </div>
             )}
             {!equity.loading && equity.status === 'ok' && equity.data && (
-              <div className="space-y-1 text-sm">
+              <div className="space-y-2 text-sm">
                 <div className="flex items-center gap-2">
                   <span className="text-gray-500">Equity:</span>
                   <span className="font-medium">
@@ -132,6 +139,12 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
                     })()}
                   </span>
                 </div>
+                {/* Hero equity bar */}
+                {(() => {
+                  const hero = equity.data.players?.[0];
+                  if (!hero) return null;
+                  return <HeroEquityBar equity={hero.equity} />;
+                })()}
                 <div className="flex items-center gap-2 text-xs">
                   <span className="inline-flex items-center rounded-full px-2 py-0.5 bg-gray-100 text-gray-700">
                     {meta?.meta?.equity.backend ?? equity.data.backend}
@@ -166,9 +179,9 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
             {!equity.loading && equity.status !== 'ok' && equity.status !== 'skipped' && (
               <div className="text-sm text-gray-600">
                 {equity.status === 'disabled' && 'Equity disabled'}
-                {equity.status === 'unsupported' && 'Equity unsupported'}
+                {equity.status === 'unsupported' && 'Equity not available here'}
                 {equity.status === 'route-missing' && 'Equity route not available'}
-                {equity.status === 'timeout' && 'Equity timed out'}
+                {equity.status === 'timeout' && 'Equity timed out (retry?)'}
                 {equity.status === 'error' && 'Equity unavailable'}
               </div>
             )}
