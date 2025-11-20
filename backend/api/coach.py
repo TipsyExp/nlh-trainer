@@ -27,6 +27,35 @@ from backend.config import COACH_ENABLED as CONFIG_COACH_ENABLED
 from backend.services.equity.service import EquityService
 from backend.logger import log_preflop_advice
 
+# NOTE:
+# This module currently exposes two public coaching endpoints:
+#
+#   * GET /api/coach/preflop
+#       - Preflop-only advisor.
+#       - Returns a preflop-specific advice shape:
+#           { source, bucket, rationale, strategy_bar }.
+#       - Internally this is backed by PreflopAdvisorService and charts.
+#
+#   * GET /api/coach/advice
+#       - Solver-backed postflop advisor (and some preflop support), returning
+#         a solver-centric payload:
+#           { recommended_bucket, strategy, ev_map, meta: { status, ... } }.
+#
+# In Milestone M3 the long-term goal is:
+#
+#   * /api/coach/advice becomes the **unified coach endpoint** that returns the
+#     cross-street AdviceV1 payload for all supported spots, as specified in:
+#
+#       - docs/COACH-ADVICE-PAYLOAD.md
+#       - backend/schemas/advice.py   (unified Advice/AdviceStatus types)
+#
+#   * /api/coach/preflop remains as a legacy/compatibility route that effectively
+#     becomes a thin wrapper over the unified advice path for preflop spots.
+#
+# For now, behaviour remains as-is so existing clients keep working; only
+# documentation and comments reference the new unified Advice design.
+
+
 router = APIRouter(tags=["coach"])
 
 
@@ -37,6 +66,10 @@ def _coach_enabled() -> bool:
     Priority:
       1. Explicit COACH_ENABLED environment variable (for tests / runtime overrides).
       2. backend.config.COACH_ENABLED (loaded from .env at startup).
+
+    This helper is used to gate both `/api/coach/preflop` and `/api/coach/advice`.
+    In the unified model, it will also gate any future advice endpoints that
+    return the shared AdviceV1 payload.
     """
     env_val = os.environ.get("COACH_ENABLED")
     if env_val is not None:
@@ -52,6 +85,11 @@ def _get_preflop_service() -> Optional[PreflopAdvisorService]:
     This is intentionally *not* cached so tests that tweak environment
     variables (e.g. PREFLOP_CHART_PATHS) see effects per-request.
     Any construction error is treated as "charts not configured".
+
+    The service currently returns a preflop-only Advice object
+    (backend/coach/preflop/models.py). When advice is exposed via the
+    unified /api/coach/advice route, that internal Advice will be wrapped
+    into the cross-street AdviceV1 payload (see docs/COACH-ADVICE-PAYLOAD.md).
     """
     try:
         return PreflopAdvisorService(equity_service=EquityService())
@@ -81,7 +119,30 @@ def get_preflop_advice(
     Behaviour:
       - 501 if COACH_ENABLED is false.
       - 501 if no charts are configured / loadable.
-      - 200 with advice payload otherwise (source ∈ {"chart","equity"}).
+      - 200 with advice payload otherwise (source ∈ {"chart","equity","rule"}).
+
+    Response shape (legacy, preflop-only):
+
+        {
+          "source": "chart" | "equity" | "rule",
+          "bucket": "2.5x" | "jam" | "fold" | ...,
+          "rationale": "...",
+          "strategy_bar": { [bucketLabel: string]: number }
+        }
+
+    In the unified Advice design (see docs/COACH-ADVICE-PAYLOAD.md), this
+    payload will effectively populate:
+
+      - AdviceV1.meta.street              → "preflop"
+      - AdviceV1.meta.source              → source
+      - AdviceV1.recommendation.bucket    → bucket
+      - AdviceV1.recommendation.strategy_bar
+                                         → strategy_bar (normalised list form)
+      - AdviceV1.rationale                → rationale
+
+    The shape returned by this endpoint itself is kept stable for existing
+    clients; new UI work should prefer `/api/coach/advice` and the unified
+    AdviceV1 payload once that migration is complete.
     """
     if not _coach_enabled():
         return JSONResponse(
@@ -119,6 +180,9 @@ def get_preflop_advice(
     }
 
     # Best-effort snapshot logging (gated by config in backend.logger).
+    # In M3, a unified `coach_advice` snapshot will be added for the
+    # /api/coach/advice route; this legacy preflop snapshot remains
+    # for backwards compatibility.
     try:
         log_preflop_advice(hand_id=str(hand_id), idx=int(idx), advice=payload)
     except Exception:
@@ -133,6 +197,54 @@ def get_preflop_advice(
 # -------------------------
 @router.get("/coach/advice")
 def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
+    """
+    Unified coach endpoint (solver-backed, current shape).
+
+    Current behaviour:
+      - Uses the node builder + TexasSolver integration to construct a
+        solver request for the given (hand_id, idx).
+      - Returns a solver-centric response:
+
+            {
+              "recommended_bucket": "2.5xR",
+              "strategy": { "fold": 0.1, "2.5xR": 0.9, ... },
+              "ev_map": { "fold": 0.0, "2.5xR": 1.23, ... },
+              "meta": {
+                "status": "ok" | "disabled" | "unsupported" | "timeout" | "error",
+                "cached": true | false,
+                "latency_ms": 12.3,
+                "node_key": "..."
+              }
+            }
+
+      - Status codes:
+          * 200 + meta.status="ok" on success.
+          * 501 when the coach is disabled or a spot is unsupported.
+          * 504 when the solver path times out.
+          * 500 on unexpected errors.
+
+    Future behaviour (M3+):
+      - This route will become the primary **unified coach API**, returning
+        the cross-street AdviceV1 payload described in
+        docs/COACH-ADVICE-PAYLOAD.md and defined in backend/schemas/advice.py:
+
+            {
+              "version": 1,
+              "status": "ok" | "disabled" | "unsupported" | "timeout" | "error",
+              "meta": { "street": ..., "n_players": ..., "hero_seat": ..., "source": ... },
+              "recommendation": { "bucket": ..., "strategy_bar": [...] },
+              "equity": { ... },
+              "thresholds": { ... },
+              "rationale": "..."
+            }
+
+      - Preflop advice will be sourced from the preflop advisor; postflop
+        advice will come from solver- or equity-based heuristics.
+
+    For now, no functional change is made: existing clients that consume the
+    solver payload continue to work. New clients that want the universal
+    AdviceV1 shape should treat the current response as transitional.
+    """
     if not _coach_enabled():
         return JSONResponse({"meta": {"status": "disabled"}}, status_code=501)
 
@@ -171,7 +283,8 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
             },
         }
 
-        # Success only: persist snapshot
+        # Success only: persist snapshot (internal dev helper). In M3 this will
+        # be complemented by a unified `coach_advice` export snapshot.
         try:
             from backend.coach.advice_store import write_snapshot
 
@@ -226,6 +339,13 @@ class SolveRequestModel(BaseModel):
 
 @router.post("/coach/test_solve")
 def post_test_solve(req: SolveRequestModel = Body(...)) -> JSONResponse:
+    """
+    Dev-only endpoint to exercise the TexasSolver adapter directly.
+
+    This bypasses the per-hand context builder and unified advice shape and is
+    intended purely for local experimentation and QA. The response shape
+    mirrors the current solver payload used by /api/coach/advice.
+    """
     if not _coach_enabled():
         return JSONResponse({"meta": {"status": "disabled"}}, status_code=501)
 
@@ -289,6 +409,10 @@ def post_ensure_progress() -> JSONResponse:
     the human's turn (or hand ends). Returns the updated state plus the list of
     bot actions taken. If it's already the human's turn, no-ops and returns
     the current state with an empty list.
+
+    This endpoint is orthogonal to the coaching payload shape; it simply
+    coordinates engine progress. It remains unchanged by the unified Advice
+    work outlined in docs/COACH-ADVICE-PAYLOAD.md.
     """
     adapter = get_adapter()
     ss = get_session_state()

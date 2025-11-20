@@ -6,6 +6,16 @@
 // current decision.  It is purely presentational: all network logic is
 // encapsulated in hooks invoked by the parent component.  Consumers
 // supply normalised coach and equity state along with the meta snapshot.
+//
+// Future alignment (M3+):
+// - The UI here is conceptually tied to the universal Advice payload described
+//   in docs/COACH-ADVICE-PAYLOAD.md.
+// - The "Recommended" section corresponds to advice.recommendation.bucket and
+//   advice.recommendation.strategy_bar.
+// - The equity block corresponds to advice.equity.hero / advice.equity.players
+//   plus thresholds and rationale fields.
+// When the backend / hook migrate to GET /api/coach/advice, this component
+// should be able to render that AdviceV1 shape with minimal changes.
 
 import React from 'react';
 import type { DecisionContext } from '../types/decision';
@@ -117,7 +127,7 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
           </div>
         )}
 
-        {/* Equity section */}
+        {/* Equity section (planned to map to advice.equity.* in the unified payload) */}
         {equity && (
           <div className="mt-3 border-t pt-3 space-y-2">
             {equity.loading && (

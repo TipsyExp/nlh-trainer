@@ -1,10 +1,12 @@
+# docs/API-CONTRACT.md
 # API Contract
 
 This document describes the HTTP API exposed by the trainer backend. The
 contract has been updated to reflect recent behavioural changes, including
 total-amount semantics for bet sizing, pre-bot snapshots in responses, unified
-gating via environment variables, and optional equity / preflop coaching
-helpers.
+gating via environment variables, and optional equity / coaching helpers.
+
+For the universal coaching payload shape, see `COACH-ADVICE-PAYLOAD.md`.
 
 ---
 
@@ -79,7 +81,7 @@ Subsequent bot moves are returned separately.
 •	bots_applied – list of auto-applied bot actions after the human move. Each
 entry contains the bot seat, the normalised action and its total amount (if
 applicable).
-•	state – the full game state, described in State Schema.
+•	state – the full game state, described in STATE-SCHEMA.md.
 •	last_action – summary of the human action, including the requested total,
 the actual amount committed, whether snapping occurred, the bucket label and
 the list of allowed buckets at the time.
@@ -123,8 +125,8 @@ response:
 }
 Conventions & notes
 •	Min-raise formula – The minimum raise total is computed as
-current_price + max(bb, last_raise_size). Attempting to raise below this
-threshold yields a 400.
+min_raise_total = current_price + max(bb, last_raise_size)
+•	Attempting to raise below this threshold yields a 400.
 •	Buckets – Allowed bet sizes are published as human-readable labels. When
 to_call is 0 or when opening heads-up as the small blind, open buckets
 are ["2.2x","2.5x","3.0x","jam"]. When facing a bet or raise, the buckets
@@ -138,7 +140,7 @@ the state before any bot actions. Auto-played moves are listed in the
 bots_applied array.
 •	Gating – HAND_AUTO_ENABLED controls exposure of /api/hand/auto and
 whether bots auto-advance after human actions. The initial auto-advance on
-/api/hand/start always occurs when the session's bot_mode is not
+/api/hand/start always occurs when the session’s bot_mode is not
 "none".
 •	Debugging – When ENGINE_DEBUG_HTTP=true structured debug events are
 emitted. See debugging docs.
@@ -162,10 +164,9 @@ ________________________________________
 Equity API
 The equity service is exposed over HTTP via POST /api/equity. It computes
 hand or range equities using the configured backend policy. This endpoint is
-primarily intended for development, testing and preflop advisor research. It
-is not required by the core table flow.
-For background on backends and configuration, see
-EQUITY.md
+primarily intended for development, testing and preflop advisor/postflop coach
+research. It is not required by the core table flow.
+For background on backends and configuration, see EQUITY.md.
 POST /api/equity
 Request body
 {
@@ -240,35 +241,114 @@ Intended for debugging and benchmarking.
 Errors
 Typical error conditions:
 Status	Condition	Example body
-400	Invalid input (malformed cards, duplicate cards across players/board/dead, mixed mode)	{ "detail": "duplicate cards across players/board/dead" }
-400	Requested mode unsupported by any available backend under current policy	{ "detail": "no equity backend available for requested mode" }
+400	Invalid input (malformed cards, duplicate cards, mixed mode)	{ "detail": "duplicate cards across players/board/dead" }
+400	Requested mode unsupported by any available backend/policy	{ "detail": "no equity backend available for requested mode" }
 Backend selection
 The backend used is selected according to the EQUITY_BACKEND_POLICY
 environment variable:
 •	auto – default; tries backends in order (ompeval → eval7 → pokerkit)
-and picks the first compatible one for the request (e.g., ranges/multiway prefer ompeval).
+and picks the first compatible one for the request (e.g., ranges/multiway
+prefer ompeval).
 •	ompeval – force the OMPEval backend (supports ranges + multiway up to 6 players).
 •	eval7 – force the Eval7 backend (pure-Python/Cython; ranges supported; slower).
 •	pokerkit – pure-Python fallback (hands-focused).
 See EQUITY.md for full details.
 ________________________________________
-Preflop coaching API
+Coaching APIs
+The coaching APIs provide guidance on preflop and postflop decisions. All
+modern coaching flows use a single, versioned “Advice” payload (AdviceV1)
+described in COACH-ADVICE-PAYLOAD.md.
+GET /api/coach/advice (universal advice)
+The universal coaching endpoint. Returns a single AdviceV1 object describing
+recommended action, strategy bar, and (when available) equity information for
+a given decision.
+Query parameters
+•	hand_id – required. Identifies the hand for which advice is requested.
+Must correspond to a hand started via /api/hand/start.
+•	idx – required integer (0-based). Decision index within the hand.
+Internally the coach uses these to:
+•	locate the current hand state,
+•	build a shared decision context (street, hero seat, pot, to_call, board, etc.),
+•	route to the appropriate coach (preflop advisor, HU postflop coach, multiway coach, or rule-based stub).
+Successful response (200 OK)
+On success, the endpoint returns a single AdviceV1 object:
+{
+  "version": 1,
+  "status": "ok",
+  "meta": {
+    "street": "preflop",
+    "n_players": 2,
+    "hero_seat": 0,
+    "source": "chart"
+  },
+  "recommendation": {
+    "bucket": "2.5x",
+    "strategy_bar": [
+      { "action": "2.5x", "weight": 1.0 }
+    ]
+  },
+  "equity": null,
+  "thresholds": null,
+  "rationale": "Open 2.5x from BTN per chart."
+}
+Key points:
+•	version – payload version; currently 1.
+•	status – coaching outcome for this decision:
+o	"ok" – advice is actionable.
+o	"disabled" – coach globally off via configuration.
+o	"unsupported" – decision not supported (street, multiway, backend limits, etc.).
+o	"not_found" – hand or decision not found.
+o	"timeout" – solver/equity exceeded configured budget.
+o	"error" – internal error (unexpected).
+•	meta – minimal context (street, active players, hero seat, advice source).
+•	recommendation – primary bucket plus strategy bar (action → weight).
+•	equity – optional, filled when the coach used the equity service.
+•	thresholds – optional; e.g. pot odds, SPR.
+•	rationale – human-readable explanation.
+For the full schema and field-level semantics, see COACH-ADVICE-PAYLOAD.md.
+Street- and mode-specific behaviour (target):
+•	Preflop:
+o	Delegates to the preflop advisor.
+o	Wraps its output into AdviceV1 with meta.source = "chart" | "equity" | "rule".
+o	Equity and thresholds may be left null initially.
+•	Postflop HU:
+o	Uses an equity-based postflop coach (hero hand vs villain range).
+o	Fills equity and thresholds.pot_odds where possible.
+•	Postflop multiway:
+o	Uses multiway coach when enabled + supported by equity backends.
+o	Emits per-seat equities in equity.players when available.
+o	Otherwise returns status="unsupported".
+Status codes
+For normal runtime outcomes, the route should prefer 200 OK and encode
+state in advice.status. HTTP error codes are reserved for exceptional cases.
+Typical HTTP behaviour:
+•	200 – All “normal” outcomes, including:
+o	status="ok" (actionable advice).
+o	status="disabled", status="unsupported", status="not_found",
+status="timeout", status="error".
+•	400 – Bad input (missing hand_id, invalid idx).
+•	501 – Coach globally disabled at the service level (e.g. feature not built
+or gated off entirely).
+Clients should primarily branch on the status field inside AdviceV1.
+Logging
+When unified advice logging is enabled (see LOG_COACH_ADVICE below) and both
+hand_id and idx are supplied, successful calls to /api/coach/advice may
+be logged as coach_advice snapshots and surfaced in JSON exports.
+GET /api/coach/preflop (legacy preflop advisor)
 The preflop advisor provides heads-up preflop guidance using charts plus
 optional equity / rule fallbacks. It is exposed via GET /api/coach/preflop
 and gated by COACH_ENABLED.
-For charts, configuration and decision logic, see
-PREFLOP-ADVISOR.md.
-GET /api/coach/preflop
+For charts, configuration and decision logic, see PREFLOP-ADVISOR.md.
 Query parameters
 •	hand_id – required. Identifies the hand for which advice is requested.
 Must correspond to a hand started via /api/hand/start.
 •	idx – optional integer (default 0). Decision index within the hand.
 Internally the advisor uses these to:
 •	locate the current hand state,
-•	derive the node (e.g. SB open, BB vs SB open),
+•	derive the preflop node (e.g. sb_open, bb_vs_sb_open),
 •	canonicalize the hero hand (e.g. AJo, KTs, JJ).
 Successful response (200 OK)
-On success the endpoint returns a normalized advice object:
+On success the endpoint returns a preflop-only advice object:
 {
   "source": "chart",
   "bucket": "2.5x",
@@ -287,12 +367,20 @@ o	"rule" – from a simple rule fallback when chart/equity are not usable.
 "2.5x", "3.0x", "jam", etc.).
 •	rationale – short human-readable explanation of the advice source and rule.
 •	strategy_bar – map of bucket → weight (float), typically summing to ≈ 1.0.
+Relationship to AdviceV1:
+•	These fields map directly into the universal advice shape:
+o	source → meta.source
+o	bucket → recommendation.bucket
+o	strategy_bar → recommendation.strategy_bar
+o	rationale → rationale
+•	The legacy endpoint does not include equity or thresholds. Clients
+that prefer a single universal shape should call /api/coach/advice and
+treat /api/coach/preflop as a compatibility fallback.
 Errors
 Status	Condition	Example body
 400	Bad input (missing hand_id, invalid idx)	{ "detail": "hand_id is required" }
-404	No advice available (no matching chart row and fallback unavailable)	{ "detail": "no advice for node" }
-501	Coaching disabled or charts unusable (COACH_ENABLED=false, etc.)	{ "detail": "coach disabled" }
-
+404	No advice available (no node, no fallback)	{ "detail": "no advice for node" }
+501	Coaching disabled or charts unusable	{ "detail": "coach disabled" }
 Exact error messages may vary but should remain descriptive.
 Logging
 When LOG_PREFLOP_ADVICE=true, successful advice responses associated with a
@@ -302,7 +390,11 @@ corresponding action (see below).
 ________________________________________
 Export endpoints & snapshots
 The export endpoints expose per-hand and per-session replays, including (when
-enabled) equity and preflop advice snapshots.
+enabled) equity and coaching snapshots.
+Exports are the source of truth for:
+•	What the engine did at each decision.
+•	What equities were computed.
+•	What advice was shown (preflop + all streets).
 GET /api/export/hand/{hand_id}.json
 Returns a JSON document describing a single hand. The exact schema is defined
 in the export module, but at a high level:
@@ -338,19 +430,45 @@ in the export module, but at a high level:
           "call": 0.55,
           "2.5x": 0.30
         }
+      },
+      "coach_advice": {
+        "version": 1,
+        "status": "ok",
+        "meta": {
+          "street": "preflop",
+          "n_players": 2,
+          "hero_seat": 0,
+          "source": "chart"
+        },
+        "recommendation": {
+          "bucket": "2.5x",
+          "strategy_bar": [
+            { "action": "2.5x", "weight": 1.0 }
+          ]
+        },
+        "equity": null,
+        "thresholds": null,
+        "rationale": "Open 2.5x from BTN per chart."
       }
     }
   ]
 }
 Notes:
-•	equity_snapshot and preflop_advice are optional and appear only when:
+•	equity_snapshot, preflop_advice, and coach_advice are all optional and
+appear only when:
 o	The relevant logging flags are enabled (LOG_EQUITY_SNAPSHOT,
-LOG_PREFLOP_ADVICE), and
+LOG_PREFLOP_ADVICE, LOG_COACH_ADVICE), and
 o	The corresponding API calls were made with hand_id/idx in scope.
 •	When logging is disabled, these fields are simply absent.
-The shape of equity_snapshot mirrors the equity API response (possibly
-trimmed/redacted). The shape of preflop_advice mirrors the preflop API
-response.
+•	Shapes:
+o	equity_snapshot mirrors the equity API response (possibly
+trimmed/redacted).
+o	preflop_advice mirrors the legacy preflop API response.
+o	coach_advice embeds the universal AdviceV1 object as returned by
+/api/coach/advice (see COACH-ADVICE-PAYLOAD.md).
+Consumers that want a single all-streets view of advice should prefer
+coach_advice. preflop_advice remains for older tools that only know about
+the legacy preflop endpoint.
 GET /api/export/session/{session_id}.json
 Returns a JSON document describing a session. At a high level:
 {
@@ -369,19 +487,21 @@ Returns a JSON document describing a session. At a high level:
           "amount": 250,
           "...": "...",
           "equity_snapshot": { /* optional, as above */ },
-          "preflop_advice": { /* optional, as above */ }
+          "preflop_advice": { /* optional, as above */ },
+          "coach_advice": { /* optional AdviceV1, as above */ }
         }
       ]
     }
   ]
 }
 Each hand’s actions array follows the same conventions as the single-hand
-export: optional equity_snapshot and preflop_advice objects per action.
+export: optional equity_snapshot, preflop_advice, and coach_advice
+objects per action.
 CSV exports
 CSV exports remain intentionally minimal and stable:
 •	GET /api/export/hand/{hand_id}.csv
 •	GET /api/export/session/{session_id}.csv
-These do not include snapshot-specific columns for equity or preflop
+These do not include snapshot-specific columns for equity or coaching
 advice. They retain the existing schema (action index, actor, action, amount,
 street, etc.) and are not affected by snapshot logging.
 JSON exports are the source of truth for snapshot data.
@@ -394,5 +514,10 @@ hand_id and idx are logged and attached as equity_snapshot.
 omit or abstract sensitive card/range information in production.
 •	LOG_PREFLOP_ADVICE – when true, successful /api/coach/preflop calls
 are logged and attached as preflop_advice.
+•	LOG_COACH_ADVICE – when true, successful /api/coach/advice calls are
+logged and attached as coach_advice (the full AdviceV1 blob). For
+preflop decisions, both coach_advice and preflop_advice may be present
+for the same (hand_id, idx) when both logging flags are enabled.
 All snapshot fields are optional and backwards-compatible: old exports remain
 valid and consumers should treat missing snapshots as “not logged”.
+

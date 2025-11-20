@@ -14,6 +14,10 @@ class ChartMeta:
     sources (JSON/TOML, generated, etc.) can map into this shape without
     friction.
 
+    This metadata feeds into preflop coaching only. When advice is exposed via
+    HTTP, it is wrapped into the unified Advice payload described in
+    docs/COACH-ADVICE-PAYLOAD.md (see also backend/schemas/advice.py).
+
     Attributes:
         format_version: Schema/version of the chart file format (e.g. 1).
         name:           Human-readable name, e.g. "HU 25bb SRP vSB".
@@ -41,6 +45,11 @@ class ChartRow:
     A row describes the recommended action bucket and strategy mix for a given
     abstracted hand and node.
 
+    At runtime, ChartRow instances are converted into a preflop Advice object
+    (defined below). That Advice is, in turn, embedded into the unified
+    AdviceV1 shape used by /api/coach/advice. See docs/COACH-ADVICE-PAYLOAD.md
+    for how preflop-specific fields map into the universal payload.
+
     Attributes:
         hand_key:      Canonical hand identifier, e.g. "AJo", "A5s", "QQ".
         node:          Spot identifier, e.g. "sb_open", "bb_vs_sb_open".
@@ -67,6 +76,10 @@ class PreflopChart:
 
     The chart may also maintain derived indexes for faster lookup by
     (node, hand_key).
+
+    This structure is preflop-only; downstream, its lookups are turned into
+    preflop Advice objects which are then wrapped into the cross-street
+    AdviceV1 payload used by the unified coach API.
     """
 
     meta: ChartMeta
@@ -105,19 +118,37 @@ class PreflopChart:
 @dataclass(frozen=True)
 class Advice:
     """
-    Normalized preflop advice returned by the coach.
+    Normalized preflop advice returned by the preflop coach.
+
+    This is a **preflop-only** structure used internally and by
+    `/api/coach/preflop`. When advice is exposed via the unified
+    `/api/coach/advice` route, it is wrapped into the cross-street AdviceV1
+    payload:
+
+      - meta.street        → "preflop"
+      - meta.source        → this `source`
+      - recommendation.bucket
+                           → this `bucket`
+      - recommendation.strategy_bar
+                           → derived from this `strategy_bar`
+      - rationale          → copied directly
+
+    Additional universal fields (equity, thresholds, status, etc.) are managed
+    by backend/schemas/advice.py and may be null/omitted for pure preflop chart
+    lookups. See docs/COACH-ADVICE-PAYLOAD.md for the full shape.
 
     Attributes:
         source:        One of:
                          - "chart"  → direct lookup from a preflop chart
                          - "equity" → equity-threshold fallback decision
+                         - "rule"   → simple rule-based fallback
         bucket:        Primary recommended bucket, e.g. "2.5x", "jam", "fold".
         rationale:     Human-readable explanation of the recommendation
                        (chart name, node, assumptions, etc.).
         strategy_bar:  Strategy distribution over buckets (bucket -> weight).
     """
 
-    source: Literal["chart", "equity"]
+    source: Literal["chart", "equity", "rule"]
     bucket: str
     rationale: str
     strategy_bar: Dict[str, float]
@@ -128,9 +159,14 @@ class PreflopContext:
     """
     Minimal description of a preflop spot for chart lookup.
 
-    For this mini-milestone we keep it deliberately small. Later we can extend
-    it to include full table configuration, effective stack, rake profile, and
-    precise node identifiers derived from the engine state.
+    For the original preflop advisor bootstrap this was deliberately small.
+    In the current architecture, a richer, shared "decision context" helper
+    (see backend/coach/decision_context.py and docs/STATE-SCHEMA.md) is the
+    canonical way to describe a node across all streets.
+
+    This context is still useful for pure chart lookups and tests, but new
+    code should generally prefer the shared decision context when building
+    AdviceV1 payloads.
 
     Attributes:
         hand_key:        Canonical hand identifier, e.g. "AJo".
