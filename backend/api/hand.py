@@ -17,14 +17,15 @@ runtime flags from ``backend.config``. In particular:
   decision timeouts respectively.
 * ``BOT_PROFILE`` selects the bot policy (CALLCHECK or TAG).
 
-The previous ``ALLOW_DEV_AUTO`` flag has been removed – any auto‑advance
+The previous ``ALLOW_DEV_AUTO`` flag has been removed – any auto-advance
 behaviour is now governed solely by ``HAND_AUTO_ENABLED``.
 """
 
 from __future__ import annotations
 
-import logging
 import concurrent.futures
+import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,26 +35,26 @@ from pydantic import BaseModel
 from backend.adapters.engines import get_adapter
 from backend.api.session import get_session_state
 from backend.logger import get_logger
-from backend.policy.bot_profiles import CallCheckBot, TagBot, BaseBotPolicy
-from backend.policy.rng import bot_rng
 from backend.models import (
-    GameState,
-    TableState,
-    PlayerState,
-    SeatType,
-    PlayerStatus,
     ActionRecord,
-    Street,
     ActionType,
+    GameState,
+    PlayerState,
+    PlayerStatus,
+    SeatType,
+    Street,
+    TableState,
 )
+from backend.policy.bot_profiles import BaseBotPolicy, CallCheckBot, TagBot
+from backend.policy.rng import bot_rng
 
 # Pull configuration from a single source of truth.  These imports expose
 # parsed environment variables as constants.  See backend/config.py for details.
 from backend.config import (
-    HAND_AUTO_ENABLED,
     BOT_MAX_STEPS,
-    BOT_TIME_BUDGET_MS,
     BOT_PROFILE,
+    BOT_TIME_BUDGET_MS,
+    HAND_AUTO_ENABLED,
 )
 
 # NOTE: no prefix here; app/main.py includes this router with prefix="/api".
@@ -67,6 +68,21 @@ log = logging.getLogger(__name__)
 # actions to be logged in order even when bots act between human
 # decisions.
 _ACTION_IDX: Dict[str, int] = {}
+
+
+def _hand_auto_enabled() -> bool:
+    """
+    Determine whether hand auto-advance is enabled.
+
+    Priority:
+      1. Explicit HAND_AUTO_ENABLED environment variable (for tests / runtime overrides).
+      2. backend.config.HAND_AUTO_ENABLED (loaded from .env at startup).
+    """
+    env_val = os.environ.get("HAND_AUTO_ENABLED")
+    if env_val is not None:
+        v = env_val.strip().lower()
+        return v in {"1", "true", "yes", "on"}
+    return bool(HAND_AUTO_ENABLED)
 
 
 def _get_next_db_idx(hand_id: str) -> int:
@@ -690,27 +706,15 @@ def post_action(req: ActionRequest) -> ActionResponse:
     # Persist snapshot immediately after human action
     _persist_snapshot(hand_id)
 
-    # Build the PRE-BOT snapshot to return (so last_action reflects the human's move)
+    # Build the snapshot to return (reflects the human's move).
     state_pre = _to_public_state(human_seat)
 
-    # Auto-play: only auto-advance bots when HAND_AUTO_ENABLED is true and a bot is next.
+    # NOTE:
+    # We intentionally do NOT auto-advance bots here. Callers that want to
+    # advance to the next human decision should use POST /api/hand/auto`,
+    # which is gated by HAND_AUTO_ENABLED via `_hand_auto_enabled()`.
     bots: List[Dict[str, Any]] = []
-    actor_now = adapter.next_actor()
-    should_auto = (
-        HAND_AUTO_ENABLED
-        and getattr(ss, "bot_mode", "heuristic") != "none"
-        and actor_now
-        and int(actor_now.get("seat", -1)) != int(human_seat)
-    )
-    if should_auto:
-        try:
-            bots = _auto_advance_bots(hand_id, human_seat)
-        except RuntimeError as e:
-            raise HTTPException(status_code=500, detail=str(e)) from e
-        # Persist snapshot after bot auto-advance as well (so exports/next GET see bot state)
-        _persist_snapshot(hand_id)
 
-    # Return the pre-bot snapshot (human's action), plus any bots_applied for UI awareness.
     return ActionResponse(ok=True, bots_applied=bots, state=state_pre)
 
 
@@ -720,7 +724,7 @@ def auto_advance() -> ActionResponse:
     Dev helper: advance all bot actions until it's the human's turn (or hand ends).
     Returns the updated state and a list of bot actions applied.
     """
-    if not HAND_AUTO_ENABLED:
+    if not _hand_auto_enabled():
         # Consistent with coach gating, return a clear 501 that the UI can label as "disabled"
         raise HTTPException(status_code=501, detail="hand auto endpoint disabled")
 

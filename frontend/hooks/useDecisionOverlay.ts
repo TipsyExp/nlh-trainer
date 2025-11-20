@@ -1,15 +1,21 @@
 // frontend/hooks/useDecisionOverlay.ts
-// Hook to fetch and cache coach advice and equity for the guidance overlay (Phase 3).
+// Hook to fetch and cache coach advice and equity for the guidance overlay.
 //
-// This hook orchestrates all network interactions for the guidance overlay.
-// It fetches meta capabilities via useMeta, obtains preflop coach advice
-// from GET /api/coach/preflop and computes equity via POST /api/equity
-// when applicable.  The hook dedupes concurrent calls, caches
-// responses by hand id, decision index, street and input signature, and
-// exposes normalised state for coach, equity and meta.  When the
-// overlay is disabled or the context lacks sufficient information
-// (e.g. unknown hero cards or unsupported range mode) it returns
-// early without issuing requests.
+// Current behaviour (M2 / early M3):
+// - Uses GET /api/coach/preflop for preflop-only coach advice.
+// - Uses POST /api/equity for equity (preflop + postflop), gated by /api/meta.
+// - Caches results per (hand_id, idx, street, input signature) and exposes
+//   separate coach and equity slices to the overlay.
+//
+// Planned behaviour (M3+):
+// - Migrate to a single, cross-street AdviceV1 payload from
+//   GET /api/coach/advice, as defined in docs/COACH-ADVICE-PAYLOAD.md.
+// - The hook will then fetch a unified advice object (including equity view)
+//   instead of orchestrating separate coach + equity calls.  This file’s
+//   public return shape is expected to evolve to wrap that AdviceV1 payload.
+//
+// Until that migration, this hook continues to implement the legacy
+// “two-endpoint” flow described above.
 
 import { useEffect, useState, useMemo } from 'react';
 import { getJson, postJson } from '../utils/http';
@@ -61,7 +67,7 @@ const EQUITY_TIMEOUT_MS = (() => {
 
 // Convert HTTP status codes into normalised coach statuses.  HTTP 501
 // becomes 'disabled', 404 becomes 'not_found', timeouts become
-// 'unavailable' and all other non‑200 codes fall back to 'unavailable'.
+// 'unavailable' and all other non-200 codes fall back to 'unavailable'.
 function statusFromResult(res: { ok: boolean; status: number | 'timeout' }):
   | 'ok'
   | 'disabled'
@@ -237,7 +243,7 @@ export function useDecisionOverlay(
   // responses keyed by handId, idx, street and input signature.  When
   // meta is still loading or overlay is disabled no requests are
   // initiated.  Skipped scenarios (e.g. missing cards or unsupported
-  // ranges) are negative‑cached to avoid repeated attempts.
+  // ranges) are negative-cached to avoid repeated attempts.
   useEffect(() => {
     // Always update the overlay trace with the current decision and
     // reset the equity call flag.  Preserve calledCoach from any
@@ -528,5 +534,10 @@ export function useDecisionOverlay(
     };
   }, [overlayEnabled, metaState.loading, equityResponse]);
 
-  return { coach: coachState, recommendedAction, equity: equityState, meta: { meta: metaState.meta, loading: metaState.loading, error: metaState.error } };
+  return {
+    coach: coachState,
+    recommendedAction,
+    equity: equityState,
+    meta: { meta: metaState.meta, loading: metaState.loading, error: metaState.error },
+  };
 }
