@@ -16,6 +16,10 @@ In addition to the bare logger, this module also exposes tiny helpers
 for attaching JSON snapshots (equity / preflop advice) to the per-hand,
 per-decision rows in the log database. These helpers are opt-in and
 controlled via configuration flags in ``backend.config``.
+
+A stub for unified coach advice snapshots (all streets, AdviceV1) is also
+provided via ``log_coach_advice``. It is currently a no-op and will be
+wired to real persistence in a later task.
 """
 
 from __future__ import annotations
@@ -308,10 +312,30 @@ def log_preflop_advice(
         return
 
 
+def log_coach_advice(
+    hand_id: str,
+    idx: int,
+    advice: Mapping[str, Any],
+) -> None:
+    """
+    Placeholder hook for logging unified coach advice (AdviceV1).
+
+    Task 3–4 introduce the postflop coach and unified /api/coach/advice flow.
+    Actual persistence of the AdviceV1 blob into the log database (including
+    schema changes and a dedicated LOG_COACH_ADVICE flag) is deferred to
+    a later task.
+
+    Callers may safely invoke this function; it is currently a no-op.
+    """
+    # Intentional no-op until coach_advice logging is implemented in Task 6.
+    return
+
+
 __all__ = [
     "get_logger",
     "init_logger",
     "reset_logger",
     "log_equity_snapshot",
     "log_preflop_advice",
+    "log_coach_advice",
 ]

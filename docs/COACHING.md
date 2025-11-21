@@ -40,8 +40,8 @@ The detailed field list and semantics live in **`COACH-ADVICE-PAYLOAD.md`**, whi
 > **Important (current state vs target):**
 >
 > - The current `/api/coach/advice` implementation still returns a **solver-centric** payload (with a `meta.status` field and `strategy` / `ev_map`) rather than full `AdviceV1`.
-> - The AdviceV1 model is already defined and will become the wire format for `/api/coach/advice` in a later milestone (M3).
-> - Until that migration, clients should be able to consume the existing solver shape and be tolerant of the future AdviceV1 shape.
+> - The `AdviceV1` model is already defined and is used by internal coach services (e.g. the HU postflop coach) and will become the wire format for `/api/coach/advice` in a later milestone (M3).
+> - Until that migration, clients should be able to consume the existing solver shape and be tolerant of the future `AdviceV1` shape.
 
 ---
 
@@ -78,31 +78,32 @@ The detailed field list and semantics live in **`COACH-ADVICE-PAYLOAD.md`**, whi
 •	Persists a small snapshot via backend.coach.advice_store.write_snapshot (node_key + solver payload).
 •	Does not yet emit AdviceV1Model on the wire.
 •  How it will behave in M3 (target):
-•	The same route will return AdviceV1Model as defined in backend/schemas/advice.py:
+The same route will return AdviceV1Model as defined in backend/schemas/advice.py:
 {
   "version": 1,
   "status": "ok" | "disabled" | "unsupported" | "not_found" | "timeout" | "error",
   "meta": { "street": "...", "n_players": 2, "hero_seat": 0, "source": "..." },
   "recommendation": { "bucket": "...", "strategy_bar": [ ... ] },
-  "equity": { ... },
-  "thresholds": { ... },
+  "equity": { },
+  "thresholds": { },
   "rationale": "..."
 }
 •	
-o	Status will move to the top level (status), with meta.status no longer required.
-o	Street-specific behavior:
+o	status will move to the top level (status), with meta.status no longer required.
+o	Street- and mode-specific behaviour:
 	Preflop:
 	Delegates to the existing preflop advisor (PreflopAdvisorService).
 	Wraps its Advice dataclass into AdviceV1 (meta.source='chart' | 'equity' | 'rule').
 	Postflop HU:
-	Uses solver / equity-based coaches built on the shared decision context.
-	Fills equity and thresholds when available.
+	Uses equity-based postflop coach logic built on the shared decision context (see 3.4 Postflop Coach v1 (HU)).
+	Fills equity and thresholds (e.g. thresholds.pot_odds) when available.
+	Sets meta.source = "equity".
 	Postflop multiway:
 	Uses a multiway coach path when supported.
 	Otherwise returns status='unsupported'.
 •	During migration:
-o	Backend may introduce an internal AdviceV1Model object even before the wire format flips.
-o	Frontend should:
+o	The backend may introduce an internal AdviceV1Model object even before the wire format flips.
+o	The frontend should:
 	Continue to understand the current solver payload with meta.status.
 	Be ready to switch to AdviceV1 (top-level status, meta, recommendation, …) once the endpoint is upgraded.
 When coaching is completely disabled at the service level (e.g. feature gated), the route may return 501 rather than 200 + status='disabled'.
@@ -131,7 +132,7 @@ Backend coaching logic does not work directly on raw engine state. Instead, it u
 •	Module: backend/coach/decision_context.py
 •	Primary entrypoints:
 o	build_decision_context(hand_id, idx) – construct a context for a given decision.
-o	Internal helpers that derive context from the current engine state as exposed by backend.api.hand.get_state and the engine adapter (PokerKitAdapter).
+o	Internal helpers that derive context from the current engine state as exposed by backend.api.hand and the engine adapter.
 3.1 Shape (conceptual)
 The helper produces a normalized context object (a DecisionContext dataclass) with at least:
 •	Hand identity:
@@ -142,7 +143,7 @@ o	street ("preflop" | "flop" | "turn" | "river" | "showdown" | "unknown")
 o	n_players (active players in the pot)
 o	hero_seat
 •	Cards:
-o	hero_hole (hero’s hole cards, when known for the street).
+o	Hero hole cards (hero’s hand, when known for the street).
 o	board (current board cards as a flat 0–5 list).
 •	Betting situation:
 o	pot_total (before the hero acts).
@@ -174,6 +175,63 @@ o	Decision context will then be able to represent any historical decision in a h
 •	Solver integration (backend.coach.node_builder) – constructs SolveRequest objects (TexasSolver) from the same context.
 •	(Later) Logging and exports – may attach serialized decision contexts to snapshots for debugging and offline analysis.
 The goal is that all coaching and solver paths share one truthful view of a decision and avoid duplicating state derivation logic.
+3.4 Postflop Coach v1 (HU, equity-based)
+The first postflop coach implementation is a heads-up, equity-based service that consumes DecisionContext and produces AdviceV1 internally.
+•	Module: backend/coach/postflop/service.py
+•	Scope (v1):
+o	Players: Heads-up only (n_players == 2).
+o	Streets: Flop, turn, river.
+o	Cards:
+	Hero is always a fixed hand (from DecisionContext.hero_hole_cards).
+	Villain is modeled as a range (see backend/coach/postflop/ranges.py).
+•	Source:
+o	Advice produced by this service sets meta.source = "equity".
+•	Inputs (from DecisionContext):
+o	street – must be "flop", "turn" or "river".
+o	hero_seat, n_players, active_seats.
+o	hero_hole_cards – hero’s exact hand.
+o	board – current board cards.
+o	pot_total, to_call, min_raise, allowed_buckets.
+o	Positional anchors (button, sb_seat, bb_seat) for IP/OOP classification where needed.
+•	Equity engine:
+o	Uses EquityService (backend/services/equity/service.py) internally to compute:
+	Hero’s equity vs a villain range on the current board.
+	Backend/mode/iters metadata (mirroring /api/equity but simplified).
+o	The same equity configuration flags (EQUITY_BACKEND_POLICY, EQUITY_ITERS, EQUITY_TIMEOUT_MS, etc.) that affect /api/equity also apply to postflop coach calls.
+•	Decision logic (simplified v1):
+o	Compute pot odds for the relevant decision (typically call vs fold):
+	thresholds.pot_odds ≈ to_call / (pot_total + to_call) when facing a bet and closing the action.
+o	Compare hero equity vs villain range to the pot-odds threshold:
+	If hero equity is well below the threshold → prefer a fold bucket when available.
+	If hero equity is around the threshold → prefer call.
+	If hero equity is well above the threshold and raise buckets exist → introduce a raise bucket (or raise-heavy mix).
+o	When no bet is facing hero (check / bet spots):
+	Use simple hand-strength / draw heuristics to decide between check and a bet bucket.
+•	Output (internal AdviceV1):
+The service returns an AdviceV1Model instance with:
+o	version = 1
+o	status = "ok" for eligible HU postflop spots, or "unsupported" / "error" for others.
+o	meta:
+	street – "flop", "turn" or "river".
+	n_players – normally 2.
+	hero_seat – from DecisionContext.
+	source = "equity".
+o	recommendation:
+	bucket – one of the allowed buckets (e.g. "fold", "call", "check", "2.5xR", "jam").
+	strategy_bar – a small list of { action, weight } entries (often a single pure action in v1).
+o	equity:
+	backend, mode, hero, players, exact, iters as derived from EquityService.
+o	thresholds:
+	pot_odds – required equity to continue given to_call and pot_total.
+	spr – optional stack-to-pot ratio when stacks are available.
+o	rationale:
+	Short, human-readable explanation linking hero equity to pot odds and explaining the recommended action.
+•	Relationship to /api/coach/advice:
+o	At this stage, PostflopCoachService is an internal service with its own unit tests.
+o	The HTTP route /api/coach/advice still returns the legacy solver-centric payload; wiring it up to call PostflopCoachService and emit AdviceV1 on the wire is part of the M3 migration.
+o	When the migration is complete:
+	HU postflop decisions on /api/coach/advice will be served by PostflopCoachService.
+	The overlay will consume a unified AdviceV1 shape for both preflop and postflop.
 ________________________________________
 4. Coach UI (Table Overlay)
 4.1 Location & toggle
@@ -206,13 +264,13 @@ o	In the AdviceV1 payload (target):
 The overlay should be able to render the same UI regardless of street or player count, driven solely by either the current solver payload or the future AdviceV1 payload.
 4.3 Status mapping (UI)
 The overlay interprets coach status as follows.
-Current implementation (meta.status in solver payload)
+Current implementation (meta.status in solver payload):
 •	meta.status === "ok" – advice available; show recommendation / bar / EV.
 •	meta.status === "disabled" – coach off via configuration; show “Coach disabled”.
 •	meta.status === "unsupported" – specific decision not supported; show “Unsupported spot”.
 •	meta.status === "timeout" – solver timed out; show “Timed out”.
 •	meta.status === "error" – internal error; show generic error.
-Target implementation (AdviceV1.status)
+Target implementation (AdviceV1.status):
 •	status === "ok" – advice available and rendered.
 •	status === "disabled" – coach globally off.
 •	status === "unsupported" – spot not supported under current coach policy/backends.
@@ -231,9 +289,9 @@ ________________________________________
 Coaching integrates with logging and exports to make behavior testable and debuggable.
 •	When logging is enabled and /api/coach/advice is called for a given (hand_id, idx):
 o	The current implementation persists a solver snapshot:
-	node key
-	solver payload { recommended_bucket, strategy, ev_map, meta }
-o	In the unified AdviceV1 model, this will evolve into a coach_advice snapshot that stores the full AdviceV1 payload.
+	node key.
+	solver payload { recommended_bucket, strategy, ev_map, meta }.
+o	In the unified AdviceV1 model, this will evolve into a coach_advice snapshot that stores the full AdviceV1 payload (including postflop equity-based advice).
 •	Existing snapshots:
 o	preflop_advice – legacy preflop advisor payload (from /api/coach/preflop).
 o	equity_snapshot – raw equity result from /api/equity.

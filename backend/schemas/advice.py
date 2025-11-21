@@ -170,6 +170,13 @@ class AdviceThresholds(BaseModel):
         ge=0.0,
         description="Stack-to-pot ratio at this decision (hero effective stack / pot).",
     )
+    ev_hint: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional coarse EV classification for the hero's action vs the "
+            "recommended line, e.g. 'big_mistake', 'mistake', 'ok', 'good'."
+        ),
+    )
 
 
 class AdviceV1Model(BaseModel):

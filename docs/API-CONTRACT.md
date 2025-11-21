@@ -582,3 +582,49 @@ dedicated LOG_COACH_ADVICE flag may be added in a future milestone; refer to
 CONFIGURATION.md for the latest configuration surface.
 All snapshot fields are optional and backwards-compatible: old exports remain
 valid and consumers should treat missing snapshots as “not logged”.
+
+#### M3 notes: Postflop coach (HU) and AdviceV1
+
+Once the M3 wiring is complete, `/api/coach/advice` will return the unified `AdviceV1` payload (see `COACH-ADVICE-PAYLOAD.md`) for both **preflop** and **postflop** decisions.
+
+**Behaviour overview (target):**
+
+- **Preflop (any supported spot)**
+  - Advice is backed by the preflop advisor (`PreflopAdvisorService`).
+  - Response is an `AdviceV1` object with:
+    - `meta.street = "preflop"`
+    - `meta.source ∈ {"chart","equity","rule"}` depending on how the recommendation was produced.
+  - The legacy `/api/coach/preflop` endpoint is a specialised view over the same underlying logic.
+
+- **Postflop HU (heads-up, flop/turn/river)**
+  - Advice is backed by the **postflop coach** using `DecisionContext` + `EquityService`.
+  - Response is an `AdviceV1` object with:
+    - `meta.street ∈ {"flop","turn","river"}`
+    - `meta.n_players = 2`
+    - `meta.source = "equity"`
+    - `recommendation.bucket` mapped to one of the engine’s allowed buckets (`fold`, `call`, `check`, bet/raise buckets, etc.).
+    - `recommendation.strategy_bar` describing a (usually simple) mixed strategy.
+    - `equity.hero` and `equity.players` filled from the equity engine.
+    - `thresholds.pot_odds` filled when a call/fold decision is being priced.
+
+- **Multiway postflop (3+ players)**
+  - If a multiway-capable backend and coach configuration are available, the route may return full `AdviceV1` with `meta.n_players > 2` and a `players` equity list.
+  - If multiway coaching is not available or disabled, the route should still respond with `200` and:
+    - `status = "unsupported"`
+    - `meta.street` and `meta.n_players` set appropriately
+    - No `recommendation` / `equity` body, or those fields omitted.
+
+**Status semantics (target):**
+
+- `status = "ok"`  
+  Advice is actionable and includes at least `meta`, `recommendation.bucket` and `rationale`. For HU postflop this implies a valid equity computation was completed or a safe fallback rule was applied.
+
+- `status = "unsupported"`  
+  The route is reachable but cannot provide advice for this spot under current configuration (e.g. multiway coach disabled, no suitable equity backend, or spot outside supported scope).
+
+- `status = "disabled"`  
+  Global coach gate disabled (e.g. `COACH_ENABLED=false`). The route may also return HTTP `501` in this case.
+
+- Other statuses (`"timeout"`, `"not_found"`, `"error"`) follow the general `AdviceV1` contract and apply equally to preflop and postflop.
+
+> **Note:** Preflop and postflop routes share the same `AdviceV1` schema; the main differences are in `meta.street`, `meta.source` and which optional blocks (`equity`, `thresholds`) are populated.
