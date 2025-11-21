@@ -1,4 +1,25 @@
 # backend/coach/node_builder.py
+"""
+Solver node builder for /api/coach/advice.
+
+This module converts a backend "decision" (hand_id, idx) into a
+TexasSolver-compatible SolveRequest. It is intentionally conservative:
+
+  * Only postflop HU spots are currently supported.
+  * Preflop raises UnsupportedSpotError.
+  * Stacks default to a sane placeholder when not available.
+
+The key design change for M3 is that this builder now relies on the shared
+DecisionContext helper instead of re-deriving state from the HTTP layer
+(`/api/hand/state`). All solver-based coaching should ultimately consume
+DecisionContext so that preflop advisor, postflop coach and exports share a
+single understanding of the spot.
+
+See:
+  - backend/coach/decision_context.py
+  - backend/schemas/advice.py
+"""
+
 from __future__ import annotations
 
 from typing import List, Optional, Tuple
@@ -7,131 +28,116 @@ from backend.adapters.solver.texassolver_adapter import (
     SolveRequest,
     UnsupportedSpotError,
 )
-
-# We reuse the server's state assembly to avoid duplicating logic.
-# get_state() is the same function behind GET /api/hand/state and returns:
-#   { "state": {...}, "actor": {...} }  (shape used by the frontend)
-try:
-    # Delayed import so this file doesn't load heavy modules at import-time in CI
-    from backend.api.hand import get_state as _server_get_state  # type: ignore
-except Exception:  # pragma: no cover
-    _server_get_state = None  # type: ignore
+from backend.coach.decision_context import DecisionContext, build_decision_context
 
 
-def _require_server_state() -> dict:
-    if _server_get_state is None:
-        raise UnsupportedSpotError("hand state accessor unavailable")
-    try:
-        data = _server_get_state()
-        if not isinstance(data, dict):
-            raise UnsupportedSpotError("unexpected state payload")
-        return data
-    except Exception as e:
-        # Keep the adapter contract: turn internal issues into "unsupported" for now
-        raise UnsupportedSpotError(f"state unavailable: {e}")
-
-
-def _detect_ip_oop_seats(state: dict) -> Tuple[int, int]:
+def _detect_ip_oop_seats_from_ctx(ctx: DecisionContext) -> Tuple[int, int]:
     """
     Heads-up postflop: Button acts in position (IP); the other is OOP.
+
+    Uses the underlying engine table snapshot from the decision context.
     """
-    table = state.get("table") or {}
-    btn = table.get("button")
-    seats = table.get("seats", 2)
+    raw_state = ctx.raw_state
+    table = getattr(raw_state, "table", None)
+    btn = getattr(table, "button", None) if table is not None else None
+    seats = getattr(table, "seats", None) if table is not None else None
+
     if not isinstance(btn, int):
         raise UnsupportedSpotError("button seat unknown")
 
-    # In HU we expect seats == 2 and seats 0..(seats-1) to exist.
-    # We'll assume seat indexes are 0..N-1 and opponent is the other seat.
+    if not isinstance(seats, int):
+        seats = 2  # conservative HU default if table metadata is incomplete
+
+    # In HU we expect seats == 2 and seat indexes 0..(seats-1).
     if seats != 2:
         raise UnsupportedSpotError("only heads-up supported for coach")
+
     ip_seat = btn
+    # Opponent seat in a 2-handed game: the other index in {0,1}.
     oop_seat = 1 - ip_seat
     return ip_seat, oop_seat
 
 
-def _chip_stack_for_seat(state: dict, seat: int) -> Optional[int]:
+def _chip_stack_for_seat(ctx: DecisionContext, seat: int) -> Optional[int]:
     """
-    Try to read chips-behind for a given seat from the assembled state.
-    Falls back to None if unavailable.
+    Try to read chips-behind for a given seat from the engine snapshot.
+
+    Falls back to None if unavailable; callers should substitute a sane
+    default (e.g. 10000) in that case. This mirrors the previous
+    behaviour that inspected the public state dict.
     """
-    players = state.get("players") or []
-    for p in players:
-        if not isinstance(p, dict):
-            continue
-        if p.get("seat") == seat:
-            # Prefer explicit 'stack' if present; otherwise try a few common keys.
-            for k in ("stack", "chips", "behind"):
-                v = p.get(k)
-                if isinstance(v, int):
-                    return v
+    raw_state = ctx.raw_state
+    players = getattr(raw_state, "players", []) or []
+    if seat < 0 or seat >= len(players):
+        return None
+
+    p = players[seat]
+    keys = ("stack", "chips", "behind")
+
+    if isinstance(p, dict):
+        for k in keys:
+            v = p.get(k)
+            if isinstance(v, int):
+                return v
+    else:
+        for k in keys:
+            v = getattr(p, k, None)
+            if isinstance(v, int):
+                return v
     return None
 
 
-def _board_cards(state: dict) -> List[str]:
+def _flatten_board(ctx: DecisionContext) -> List[str]:
     """
-    Read board cards as ["Ah","Kd","3s"].
+    Return a shallow copy of the board cards.
+
+    DecisionContext.board is already a flat list in flop→turn→river order,
+    but this helper keeps the caller insulated from internal representation.
     """
-    board = state.get("board")
-    if isinstance(board, list) and all(isinstance(x, str) for x in board):
-        return board
-    # Some states nest board under state["community"]
-    comm = state.get("community")
-    if isinstance(comm, dict) and isinstance(comm.get("board"), list):
-        b = comm["board"]
-        if all(isinstance(x, str) for x in b):
-            return b
-    raise UnsupportedSpotError("board not available")
-
-
-def _current_pot(state: dict) -> int:
-    v = state.get("pot_total")
-    if isinstance(v, int):
-        return v
-    # Try alternate spellings if present in your state model
-    for k in ("pot", "pot_chips", "total_pot"):
-        vv = state.get(k)
-        if isinstance(vv, int):
-            return vv
-    # Last resort: 0 (not ideal, but keeps adapter predictable)
-    return 0
+    return list(ctx.board)
 
 
 def build_solve_request_from_hand(hand_id: str, idx: int) -> SolveRequest:
     """
     Build a minimal, deterministic SolveRequest for **postflop HU**.
-    Preflop remains unsupported in Task-17.
 
-    This intentionally uses conservative defaults for ranges & buckets:
-      - spot: "SRP"
-      - bucket_labels: ["50%","100%","jam"]
-      - ranges: simple inline placeholders (updated later in M1)
+    Current scope:
+      - Uses DecisionContext built from the active engine state.
+      - Supports only flop/turn/river streets.
+      - Requires exactly two seats (HU) based on table metadata.
+      - Uses conservative placeholder ranges & buckets.
+
+    Preflop remains unsupported: callers should rely on the preflop advisor
+    rather than the solver path for now.
     """
-    data = _require_server_state()
-    state = data.get("state") or {}
-    if not isinstance(state, dict):
-        raise UnsupportedSpotError("hand state missing")
+    # Build a shared decision context from the engine snapshot. Any failure
+    # to obtain context is treated as "unsupported" to keep the API contract
+    # simple for /api/coach/advice.
+    try:
+        ctx = build_decision_context(hand_id=hand_id, idx=idx)
+    except Exception as e:  # pragma: no cover - mapped to UnsupportedSpotError
+        raise UnsupportedSpotError(f"decision context unavailable: {e}") from e
 
-    street = state.get("street")
+    street = ctx.street
     if street not in ("flop", "turn", "river"):
-        # Task-17 scope: preflop unsupported to avoid ambiguous builder logic here.
+        # Task scope: preflop unsupported to avoid mixing solver and chart logic.
         raise UnsupportedSpotError("preflop not supported")
 
-    board = _board_cards(state)
-    pot = _current_pot(state)
+    board = _flatten_board(ctx)
+    pot = int(ctx.pot_total)
 
     # Seats (IP = button on postflop)
-    ip_seat, oop_seat = _detect_ip_oop_seats(state)
+    ip_seat, oop_seat = _detect_ip_oop_seats_from_ctx(ctx)
 
-    # Stacks behind — if unknown in the public state, fall back to a sane default.
-    ip_stack = _chip_stack_for_seat(state, ip_seat)
-    oop_stack = _chip_stack_for_seat(state, oop_seat)
+    # Stacks behind — if unknown, fall back to a conservative default.
+    ip_stack = _chip_stack_for_seat(ctx, ip_seat)
+    oop_stack = _chip_stack_for_seat(ctx, oop_seat)
     if ip_stack is None or oop_stack is None:
-        # Use a conservative default; engine snaps sizes anyway.
+        # Use a conservative default; the engine will snap bet sizes anyway.
         ip_stack = ip_stack or 10000
         oop_stack = oop_stack or 10000
 
-    # Ranges (placeholder inline for Task-17). Replace with real ranges later in M1.
+    # Ranges (placeholder inline for now; will be wired to real profiles later).
     ip_range = "AA,KK,QQ,JJ,TT,AKs,AQs"
     oop_range = "AA,KK,QQ,JJ,TT,AKs,AQo"
 

@@ -71,8 +71,9 @@ ENGINE_DEBUG_HTTP: bool = _env_bool("ENGINE_DEBUG_HTTP", "false")
 # Coach / preflop advisor configuration
 # ---------------------------------------------------------------------------
 
-# Global coach gate (solver + preflop advisor). When false, coach endpoints
-# respond with HTTP 501.
+# Global coach gate (solver + preflop advisor). When false, both
+# /api/coach/preflop and /api/coach/advice respond with HTTP 501.
+# This flag is the single source of truth for coach availability.
 COACH_ENABLED: bool = _env_bool("COACH_ENABLED", "false")
 
 # Paths to preflop chart JSON files (dev/coach only; ':' or ';' separated).
@@ -90,11 +91,11 @@ PREFLOP_EQ_DEFEND_THRESH: float = _env_float("PREFLOP_EQ_DEFEND_THRESH", "0.48")
 # Behaviour when equity fallback cannot run (e.g. no suitable equity backend).
 # When true:
 #   - chart miss + fallback unavailable -> advisor raises (API returns 501).
-# When false:
+# When false (default):
 #   - chart miss + fallback unavailable -> advisor returns a conservative
 #     recommendation (e.g. fold) but still marks source="equity" with a
 #     rationale explaining that fallback was unavailable.
-PREFLOP_FALLBACK_REQUIRED: bool = _env_bool("PREFLOP_FALLBACK_REQUIRED", "true")
+PREFLOP_FALLBACK_REQUIRED: bool = _env_bool("PREFLOP_FALLBACK_REQUIRED", "false")
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +156,7 @@ LOG_EQUITY_SNAPSHOT_REDACT: bool = _env_bool("LOG_EQUITY_SNAPSHOT_REDACT", "fals
 
 def _csv_env(name: str, default: str = "") -> list[str]:
     """
-    Parse a comma‑separated environment variable into a list of strings.
+    Parse a comma-separated environment variable into a list of strings.
 
     Strips whitespace from each entry and excludes empty strings.
 

@@ -1,21 +1,32 @@
 # backend/coach/preflop/service.py
+"""
+Preflop advisor service (chart-first with optional equity fallback).
+
+This module is preflop-only.  It returns a local `Advice` dataclass that is used
+by `/api/coach/preflop`.  In the unified coaching model, that Advice is wrapped
+into the cross-street AdviceV1 payload defined in `backend/schemas/advice.py`
+and documented in `docs/COACH-ADVICE-PAYLOAD.md`.
+"""
+
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, List, Optional, Sequence, Any
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence
+
+from backend.services.equity.base import PlayerSpec
 
 from .charts import load_charts_from_paths
 from .models import Advice, PreflopChart, PreflopContext
 from .ranges import (
     NODE_BB_VS_SB_OPEN,
-    NODE_SB_OPEN,
     NODE_HU_GENERIC,
+    NODE_SB_OPEN,
     get_default_villain_range,
     hero_hand_key_to_range,
 )
-from backend.services.equity.base import PlayerSpec
 
 if TYPE_CHECKING:  # pragma: no cover - type-checking only
+    from backend.coach.decision_context import DecisionContext
     from backend.services.equity.service import EquityService
 
 
@@ -152,6 +163,10 @@ class PreflopAdvisorService:
           - RuntimeError if no charts are configured.
           - RuntimeError if chart miss + fallback_required and equity is unavailable.
           - ValueError if chart is empty.
+
+        In the unified coaching flow, the Advice produced here will be wrapped
+        into AdviceV1 by the /api/coach/advice route, with additional meta and
+        (optionally) equity/threshold fields supplied by higher layers.
         """
         if not self._charts:
             raise RuntimeError(
@@ -160,6 +175,108 @@ class PreflopAdvisorService:
             )
 
         ctx = self._build_context(hand_id=hand_id, idx=idx)
+        return self._advise_for_context(ctx=ctx, hand_id=hand_id, idx=idx)
+
+    def get_advice_for_decision(self, decision: "DecisionContext") -> Advice:
+        """
+        Variant of get_advice that starts from a shared DecisionContext.
+
+        This is intended for the unified /api/coach/advice flow, where the
+        per-decision state (street, hero seat, hand key, node, etc.) has
+        already been assembled by backend/coach/decision_context.py.
+
+        For now this method is preflop-only: it expects decision.street to be
+        'preflop' (or absent/unknown) and will raise ValueError otherwise.
+        """
+        if not self._charts:
+            raise RuntimeError(
+                "preflop coach charts not configured "
+                "(PREFLOP_CHART_PATHS is empty or files failed to load)"
+            )
+
+        street = getattr(decision, "street", None)
+        if street is not None and street != "preflop":
+            raise ValueError(
+                f"PreflopAdvisorService can only handle preflop decisions (got {street!r})"
+            )
+
+        hand_id = getattr(decision, "hand_id", None) or "H?"
+        idx = getattr(decision, "idx", None)
+        if idx is None:
+            idx = 0
+
+        ctx = self._build_context_from_decision(decision)
+        return self._advise_for_context(ctx=ctx, hand_id=str(hand_id), idx=int(idx))
+
+    # ------------------------------------------------------------------ #
+    # Internals (override / monkeypatch-friendly)
+    # ------------------------------------------------------------------ #
+
+    def _build_context(self, hand_id: str, idx: int) -> PreflopContext:  # noqa: ARG002
+        """
+        Derive a minimal PreflopContext from (hand_id, idx).
+
+        For this mini-milestone we keep it deliberately light and largely
+        independent of engine internals:
+
+          - Provide empty hand/node so selection falls back to the first
+            chart/row by default.
+          - Tests are free to monkeypatch this to a richer context.
+
+        In M3, this hook may be replaced or backed by the shared
+        decision-context helper (backend/coach/decision_context.py), so that
+        preflop advice, postflop advice and solver integrations all read the
+        same per-decision state derived from (hand_id, idx).
+        """
+        return PreflopContext(
+            hand_key="",
+            node="",
+            stack_bb=None,
+            hero_position=None,
+            villain_position=None,
+        )
+
+    def _build_context_from_decision(
+        self, decision: "DecisionContext"
+    ) -> PreflopContext:
+        """
+        Bridge a shared DecisionContext into a PreflopContext.
+
+        This keeps the chart layer decoupled from the full engine state while
+        still allowing unified decision context to drive preflop advice.
+
+        Missing attributes on `decision` are treated conservatively and will
+        fall back to the same behaviour as `_build_context`.
+        """
+        hand_key = (
+            getattr(decision, "hero_hand_key", None)
+            or getattr(decision, "hand_key", None)
+            or ""
+        )
+        node = getattr(decision, "node", None) or ""
+        stack_bb = getattr(decision, "stack_bb", None)
+        hero_pos = getattr(decision, "hero_position", None)
+        villain_pos = getattr(decision, "villain_position", None)
+
+        return PreflopContext(
+            hand_key=hand_key,
+            node=node,
+            stack_bb=stack_bb,
+            hero_position=hero_pos,
+            villain_position=villain_pos,
+        )
+
+    def _advise_for_context(
+        self,
+        ctx: PreflopContext,
+        hand_id: str,
+        idx: int,
+    ) -> Advice:
+        """
+        Core advice resolution given a PreflopContext.
+
+        Shared by get_advice(...) and get_advice_for_decision(...).
+        """
         chart = self._select_chart(ctx, self._charts)
 
         row = None
@@ -218,26 +335,6 @@ class PreflopAdvisorService:
             bucket=getattr(row, "bucket"),
             rationale=rationale,
             strategy_bar=getattr(row, "strategy_bar"),
-        )
-
-    # ------------------------------------------------------------------ #
-    # Internals (override / monkeypatch-friendly)
-    # ------------------------------------------------------------------ #
-
-    def _build_context(self, hand_id: str, idx: int) -> PreflopContext:
-        """
-        Derive a minimal PreflopContext from (hand_id, idx).
-
-        For this mini-milestone, keep it very light:
-          - Provide empty hand/node so selection falls back to the first chart/row.
-          - Tests are free to monkeypatch this to a richer context.
-        """
-        return PreflopContext(
-            hand_key="",
-            node="",
-            stack_bb=None,
-            hero_position=None,
-            villain_position=None,
         )
 
     def _select_chart(

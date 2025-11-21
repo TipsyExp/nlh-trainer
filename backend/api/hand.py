@@ -19,6 +19,13 @@ runtime flags from ``backend.config``. In particular:
 
 The previous ``ALLOW_DEV_AUTO`` flag has been removed – any auto-advance
 behaviour is now governed solely by ``HAND_AUTO_ENABLED``.
+
+The public state shape returned by this module (see ``StateResponse`` and
+``_to_public_state``) is the reference JSON described in
+``docs/STATE-SCHEMA.md``. The unified coaching flow builds its internal
+per-decision representation from the underlying engine/DB state via
+``backend.coach.decision_context``; the API surface here is what the
+frontend consumes.
 """
 
 from __future__ import annotations
@@ -179,6 +186,13 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
       - On showdown, reveal all hole cards.
       - Board flows straight from engine snapshot.
       - Include actor/allowed context derived from engine.next_actor().
+
+    The shape returned here is what GET /api/hand/state exposes and is the
+    reference "public state" documented in docs/STATE-SCHEMA.md. The unified
+    coaching helper (backend.coach.decision_context) derives its own internal
+    DecisionContext from the underlying engine/DB state rather than this
+    redacted view, but many field semantics (street, pot_total, allowed) are
+    intentionally aligned.
     """
     adapter = get_adapter()
     s = adapter.state()

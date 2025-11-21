@@ -10,6 +10,8 @@ import re
 import subprocess
 import tempfile
 
+from backend.config import COACH_ENABLED as CONFIG_COACH_ENABLED
+
 
 class CoachDisabledError(RuntimeError):
     """Raised when COACH is off or the solver path is not configured."""
@@ -29,6 +31,11 @@ class AdvicePayload(TypedDict):
 class SolveRequest:
     """
     Canonical minimal inputs we need to call the solver.
+
+    This represents a single postflop decision node (currently HU only).  It is
+    constructed upstream (e.g. from a DecisionContext + engine state) and
+    passed through caching / node-key helpers before reaching this adapter.
+
     NOTE: We'll gradually expand this as our canonical node grows.
     """
 
@@ -43,9 +50,24 @@ class SolveRequest:
     spot: str = "SRP"  # "SRP" | "3BP" (limited scope for Task-16)
 
 
+def _solver_enabled() -> bool:
+    """
+    Check whether the solver is globally enabled.
+
+    Priority:
+      1. Explicit COACH_ENABLED environment variable (for tests / runtime overrides).
+      2. backend.config.COACH_ENABLED (loaded from .env at startup).
+    """
+    env_val = os.environ.get("COACH_ENABLED")
+    if env_val is not None:
+        v = env_val.strip().lower()
+        return v in {"1", "true", "yes", "on"}
+    return bool(CONFIG_COACH_ENABLED)
+
+
 def _require_solver_enabled() -> Path:
-    if os.getenv("COACH_ENABLED", "false").lower() != "true":
-        raise CoachDisabledError("COACH_ENABLED is not true")
+    if not _solver_enabled():
+        raise CoachDisabledError("solver disabled by COACH_ENABLED flag")
 
     raw = os.getenv("TEXASSOLVER_PATH")
     if not raw:
@@ -116,7 +138,8 @@ class TexasSolverAdapter:
     - Reads the emitted JSON file and maps it into AdvicePayload.
 
     For Task-16 in CI: this adapter is present but effectively NO-OP unless:
-      COACH_ENABLED=true AND TEXASSOLVER_PATH is an absolute executable path.
+      COACH_ENABLED=true (according to the central config/env rules) AND
+      TEXASSOLVER_PATH is an absolute executable path.
 
     Parsing is intentionally robust to multiple JSON shapes.
     """

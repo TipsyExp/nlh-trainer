@@ -1,4 +1,28 @@
 # backend/tests/test_coach_api.py
+"""
+Tests for the /api/coach/advice endpoint.
+
+These currently exercise the solver-backed payload:
+
+    {
+      "recommended_bucket": "...",
+      "strategy": { ... },
+      "ev_map": { ... },
+      "meta": {
+        "status": "...",
+        "cached": bool,
+        "latency_ms": float,
+        "node_key": "..."
+      }
+    }
+
+In Milestone M3 the implementation of /api/coach/advice will migrate towards
+the unified AdviceV1 schema defined in backend/schemas/advice.py and documented
+in docs/COACH-ADVICE-PAYLOAD.md.  Until that wiring is complete, these tests
+remain focused on the existing solver contract (status codes, caching, and
+snapshot behaviour).
+"""
+
 from __future__ import annotations
 
 from typing import Any, Dict
