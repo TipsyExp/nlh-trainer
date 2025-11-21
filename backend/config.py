@@ -68,10 +68,10 @@ ENGINE_DEBUG_HTTP: bool = _env_bool("ENGINE_DEBUG_HTTP", "false")
 
 
 # ---------------------------------------------------------------------------
-# Coach / preflop advisor configuration
+# Coach / advisor configuration
 # ---------------------------------------------------------------------------
 
-# Global coach gate (solver + preflop advisor). When false, both
+# Global coach gate (solver + preflop + postflop). When false, both
 # /api/coach/preflop and /api/coach/advice respond with HTTP 501.
 # This flag is the single source of truth for coach availability.
 COACH_ENABLED: bool = _env_bool("COACH_ENABLED", "false")
@@ -96,6 +96,24 @@ PREFLOP_EQ_DEFEND_THRESH: float = _env_float("PREFLOP_EQ_DEFEND_THRESH", "0.48")
 #     recommendation (e.g. fold) but still marks source="equity" with a
 #     rationale explaining that fallback was unavailable.
 PREFLOP_FALLBACK_REQUIRED: bool = _env_bool("PREFLOP_FALLBACK_REQUIRED", "false")
+
+# Postflop coach (HU / multiway equity-based coach) configuration.
+# This controls the postflop path used by /api/coach/advice.
+POSTFLOP_COACH_ENABLED: bool = _env_bool("POSTFLOP_COACH_ENABLED", "true")
+
+# Default Monte Carlo iterations for postflop coach equity calls when not
+# overridden by internal heuristics.
+POSTFLOP_COACH_ITERS: int = _env_int("POSTFLOP_COACH_ITERS", "20000")
+
+# Optional soft timeout (milliseconds) for postflop coach equity calls.
+# 0 disables the dedicated postflop timeout (backends may still use their
+# own defaults or the global EQUITY_TIMEOUT_MS).
+POSTFLOP_COACH_TIMEOUT_MS: int = _env_int("POSTFLOP_COACH_TIMEOUT_MS", "0")
+
+# Default villain profile / range family used by the postflop coach.
+# For example: "TAG", "CALLCHECK", etc. Interpretation is owned by
+# backend/coach/postflop/ranges.py.
+POSTFLOP_COACH_PROFILE: str = os.getenv("POSTFLOP_COACH_PROFILE", "TAG").strip().upper()
 
 
 # ---------------------------------------------------------------------------

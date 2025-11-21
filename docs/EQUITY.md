@@ -469,3 +469,29 @@ exact mode for small boards.
 •	Player limit
 o	OMPEval supports up to 6 players. For larger tables, reduce the player
 count or fall back to simpler analyses.
+
+## M3 notes: EquityService usage in the postflop coach
+
+In addition to the public `/api/equity` endpoint, `EquityService` is also used
+**internally** by the coaching stack:
+
+- **Postflop coach (HU, flop/turn/river)**
+  - The coach builds a `DecisionContext` for a given `(hand_id, idx)` and constructs:
+    - Hero as a **fixed hand** (from `DecisionContext.hero_hole_cards`).
+    - Villain as a **range string** (using presets in `backend/coach/postflop/ranges.py`).
+  - It then calls `EquityService.calc_equity(...)` (or a small helper) to obtain:
+    - `backend` (e.g. `"ompeval"`),
+    - `mode` (`"hands"` or `"ranges"`),
+    - per-player equities, which are mapped into the `AdviceV1.equity` block.
+
+- **Configuration knobs**
+  - The same configuration flags that affect `/api/equity` also apply to the coach’s internal equity calls, for example:
+    - `EQUITY_BACKEND_POLICY` – backend selection (`auto`, `ompeval`, `eval7`, `pokerkit`).
+    - `EQUITY_ITERS` – default Monte Carlo iteration count when the coach does not specify one.
+    - `EQUITY_TIMEOUT_MS` – soft timeout hint; exceeded budgets should lead to `status="timeout"` or `status="unsupported"` in `AdviceV1` rather than crashing.
+  - Additional postflop-specific flags (e.g. `POSTFLOP_COACH_ENABLED`, per-street iteration budgets) may further constrain whether the coach uses equity or falls back to simple rules.
+
+This means that changing equity-related configuration can impact both:
+
+1. Direct `/api/equity` responses, and  
+2. The quality and availability of postflop advice returned by `/api/coach/advice` (for spots where the coach relies on hero-vs-range equity).

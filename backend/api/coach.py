@@ -21,42 +21,33 @@ from backend.adapters.solver.texassolver_adapter import (
     CoachDisabledError,
     UnsupportedSpotError,
 )
-from backend.coach.texassolver_cache import resolve_with_cache
 from backend.coach.preflop.service import PreflopAdvisorService
+from backend.coach import decision_context as _decision_context
+from backend.coach.postflop import service as _postflop_service
+from backend.schemas.advice import (
+    AdviceMeta,
+    AdviceRecommendation,
+    AdviceV1,
+    StrategyPart,
+)
+
 from backend.config import COACH_ENABLED as CONFIG_COACH_ENABLED
 from backend.services.equity.service import EquityService
 from backend.logger import log_preflop_advice
 
-# NOTE:
-# This module currently exposes two public coaching endpoints:
-#
-#   * GET /api/coach/preflop
-#       - Preflop-only advisor.
-#       - Returns a preflop-specific advice shape:
-#           { source, bucket, rationale, strategy_bar }.
-#       - Internally this is backed by PreflopAdvisorService and charts.
-#
-#   * GET /api/coach/advice
-#       - Solver-backed postflop advisor (and some preflop support), returning
-#         a solver-centric payload:
-#           { recommended_bucket, strategy, ev_map, meta: { status, ... } }.
-#
-# In Milestone M3 the long-term goal is:
-#
-#   * /api/coach/advice becomes the **unified coach endpoint** that returns the
-#     cross-street AdviceV1 payload for all supported spots, as specified in:
-#
-#       - docs/COACH-ADVICE-PAYLOAD.md
-#       - backend/schemas/advice.py   (unified Advice/AdviceStatus types)
-#
-#   * /api/coach/preflop remains as a legacy/compatibility route that effectively
-#     becomes a thin wrapper over the unified advice path for preflop spots.
-#
-# For now, behaviour remains as-is so existing clients keep working; only
-# documentation and comments reference the new unified Advice design.
-
-
 router = APIRouter(tags=["coach"])
+
+StreetLiteral = Literal["preflop", "flop", "turn", "river", "showdown", "unknown"]
+
+
+def _normalize_street(value: str) -> StreetLiteral:
+    """
+    Normalize arbitrary street strings into the AdviceMeta street literal set.
+    """
+    s = value.lower()
+    if s in ("preflop", "flop", "turn", "river", "showdown", "unknown"):
+        return cast(StreetLiteral, s)
+    return "unknown"
 
 
 def _coach_enabled() -> bool:
@@ -68,8 +59,6 @@ def _coach_enabled() -> bool:
       2. backend.config.COACH_ENABLED (loaded from .env at startup).
 
     This helper is used to gate both `/api/coach/preflop` and `/api/coach/advice`.
-    In the unified model, it will also gate any future advice endpoints that
-    return the shared AdviceV1 payload.
     """
     env_val = os.environ.get("COACH_ENABLED")
     if env_val is not None:
@@ -85,11 +74,6 @@ def _get_preflop_service() -> Optional[PreflopAdvisorService]:
     This is intentionally *not* cached so tests that tweak environment
     variables (e.g. PREFLOP_CHART_PATHS) see effects per-request.
     Any construction error is treated as "charts not configured".
-
-    The service currently returns a preflop-only Advice object
-    (backend/coach/preflop/models.py). When advice is exposed via the
-    unified /api/coach/advice route, that internal Advice will be wrapped
-    into the cross-street AdviceV1 payload (see docs/COACH-ADVICE-PAYLOAD.md).
     """
     try:
         return PreflopAdvisorService(equity_service=EquityService())
@@ -130,19 +114,8 @@ def get_preflop_advice(
           "strategy_bar": { [bucketLabel: string]: number }
         }
 
-    In the unified Advice design (see docs/COACH-ADVICE-PAYLOAD.md), this
-    payload will effectively populate:
-
-      - AdviceV1.meta.street              → "preflop"
-      - AdviceV1.meta.source              → source
-      - AdviceV1.recommendation.bucket    → bucket
-      - AdviceV1.recommendation.strategy_bar
-                                         → strategy_bar (normalised list form)
-      - AdviceV1.rationale                → rationale
-
-    The shape returned by this endpoint itself is kept stable for existing
-    clients; new UI work should prefer `/api/coach/advice` and the unified
-    AdviceV1 payload once that migration is complete.
+    New UI work should prefer `/api/coach/advice` and the unified Advice
+    payload; this route is retained for compatibility.
     """
     if not _coach_enabled():
         return JSONResponse(
@@ -180,9 +153,6 @@ def get_preflop_advice(
     }
 
     # Best-effort snapshot logging (gated by config in backend.logger).
-    # In M3, a unified `coach_advice` snapshot will be added for the
-    # /api/coach/advice route; this legacy preflop snapshot remains
-    # for backwards compatibility.
     try:
         log_preflop_advice(hand_id=str(hand_id), idx=int(idx), advice=payload)
     except Exception:
@@ -198,125 +168,216 @@ def get_preflop_advice(
 @router.get("/coach/advice")
 def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
     """
-    Unified coach endpoint (solver-backed, current shape).
+    Unified coach endpoint (AdviceV1).
 
-    Current behaviour:
-      - Uses the node builder + TexasSolver integration to construct a
-        solver request for the given (hand_id, idx).
-      - Returns a solver-centric response:
+    Behaviour:
 
-            {
-              "recommended_bucket": "2.5xR",
-              "strategy": { "fold": 0.1, "2.5xR": 0.9, ... },
-              "ev_map": { "fold": 0.0, "2.5xR": 1.23, ... },
-              "meta": {
-                "status": "ok" | "disabled" | "unsupported" | "timeout" | "error",
-                "cached": true | false,
-                "latency_ms": 12.3,
-                "node_key": "..."
-              }
-            }
+      * When COACH_ENABLED is false:
+          - Returns 501 with status="disabled".
 
-      - Status codes:
-          * 200 + meta.status="ok" on success.
-          * 501 when the coach is disabled or a spot is unsupported.
-          * 504 when the solver path times out.
-          * 500 on unexpected errors.
+      * When a valid decision context can be built:
+          - Preflop:
+              - Delegates to the preflop advisor and wraps its output into
+                AdviceV1 (source ∈ {"chart","equity","rule"}).
+          - Postflop HU (flop/turn/river, n_players == 2):
+              - Delegates to the HU postflop coach (equity-based).
+          - Other spots (multiway / unsupported):
+              - Returns AdviceV1 with status="unsupported".
 
-    Future behaviour (M3+):
-      - This route will become the primary **unified coach API**, returning
-        the cross-street AdviceV1 payload described in
-        docs/COACH-ADVICE-PAYLOAD.md and defined in backend/schemas/advice.py:
-
-            {
-              "version": 1,
-              "status": "ok" | "disabled" | "unsupported" | "timeout" | "error",
-              "meta": { "street": ..., "n_players": ..., "hero_seat": ..., "source": ... },
-              "recommendation": { "bucket": ..., "strategy_bar": [...] },
-              "equity": { ... },
-              "thresholds": { ... },
-              "rationale": "..."
-            }
-
-      - Preflop advice will be sourced from the preflop advisor; postflop
-        advice will come from solver- or equity-based heuristics.
-
-    For now, no functional change is made: existing clients that consume the
-    solver payload continue to work. New clients that want the universal
-    AdviceV1 shape should treat the current response as transitional.
+      * When the decision context cannot be resolved:
+          - Returns 400 with status="not_found" for hand/index mismatches.
+          - Returns 500 with status="error" for unexpected failures.
     """
     if not _coach_enabled():
-        return JSONResponse({"meta": {"status": "disabled"}}, status_code=501)
+        advice = AdviceV1(
+            version=1,
+            status="disabled",
+            meta=AdviceMeta(
+                street="unknown",
+                n_players=0,
+                hero_seat=0,
+                source="rule",
+            ),
+            recommendation=None,
+            equity=None,
+            thresholds=None,
+            rationale="Coach is disabled by configuration.",
+        )
+        return JSONResponse(advice.model_dump(), status_code=501)
 
-    # Build canonical node (stub / may raise UnsupportedSpotError)
+    # Build a shared decision context. Errors here are treated as input
+    # / state issues rather than 500s.
     try:
-        from backend.coach.node_builder import build_solve_request_from_hand
+        ctx = _decision_context.build_decision_context(hand_id=hand_id, idx=idx)
+    except ValueError as e:
+        advice = AdviceV1(
+            version=1,
+            status="not_found",
+            meta=AdviceMeta(
+                street="unknown",
+                n_players=0,
+                hero_seat=0,
+                source="rule",
+            ),
+            recommendation=None,
+            equity=None,
+            thresholds=None,
+            rationale=f"Decision context not found: {e}",
+        )
+        return JSONResponse(advice.model_dump(), status_code=400)
+    except RuntimeError as e:
+        advice = AdviceV1(
+            version=1,
+            status="not_found",
+            meta=AdviceMeta(
+                street="unknown",
+                n_players=0,
+                hero_seat=0,
+                source="rule",
+            ),
+            recommendation=None,
+            equity=None,
+            thresholds=None,
+            rationale=f"No active hand in progress: {e}",
+        )
+        return JSONResponse(advice.model_dump(), status_code=400)
+    except Exception as e:
+        advice = AdviceV1(
+            version=1,
+            status="error",
+            meta=AdviceMeta(
+                street="unknown",
+                n_players=0,
+                hero_seat=0,
+                source="rule",
+            ),
+            recommendation=None,
+            equity=None,
+            thresholds=None,
+            rationale=f"Failed to build decision context: {e}",
+        )
+        return JSONResponse(advice.model_dump(), status_code=500)
 
-        node_req = build_solve_request_from_hand(hand_id, idx)
-    except UnsupportedSpotError as e:
-        msg = str(e).lower()
-        if "timed out" in msg or "timeout" in msg:
-            return JSONResponse({"meta": {"status": "timeout"}}, status_code=504)
-        return JSONResponse({"meta": {"status": "unsupported"}}, status_code=501)
-    except Exception:
-        return JSONResponse({"meta": {"status": "error"}}, status_code=500)
+    street = ctx.street.lower()
 
-    started = time.perf_counter()
-    try:
-        advice_payload, cached, node_key = resolve_with_cache(node_req)
-        latency_ms = (time.perf_counter() - started) * 1000.0
-
-        # Pull fields safely with fallbacks
-        recommended_bucket = cast(str, advice_payload.get("recommended_bucket", ""))
-        strategy = cast(Dict[str, float], advice_payload.get("strategy", {}))
-        ev_map = cast(Dict[str, float], advice_payload.get("ev_map", {}))
-
-        payload: Dict[str, Any] = {
-            "recommended_bucket": recommended_bucket,
-            "strategy": strategy,
-            "ev_map": ev_map,
-            "meta": {
-                "status": "ok",
-                "cached": bool(cached),
-                "latency_ms": round(latency_ms, 3),
-                "node_key": node_key,
-            },
-        }
-
-        # Success only: persist snapshot (internal dev helper). In M3 this will
-        # be complemented by a unified `coach_advice` export snapshot.
-        try:
-            from backend.coach.advice_store import write_snapshot
-
-            write_snapshot(hand_id, idx, node_key=node_key, advice_json=payload)
-        except Exception:
-            # Never fail the request on snapshot errors
-            pass
-
-        # tiny structured log
-        try:
-            top = recommended_bucket or "-"
-            ck = "true" if cached else "false"
-            nk = (node_key or "")[:12]
-            print(
-                f"coach_advice hand={hand_id} idx={idx} status=ok "
-                f"latency_ms={payload['meta']['latency_ms']} top={top} "
-                f"cached={ck} node_key={nk}"
+    # Preflop: delegate to existing preflop advisor and wrap into AdviceV1.
+    if street == "preflop":
+        svc = _get_preflop_service()
+        if svc is None or not svc.has_charts:
+            advice = AdviceV1(
+                version=1,
+                status="unsupported",
+                meta=AdviceMeta(
+                    street="preflop",
+                    n_players=ctx.n_players,
+                    hero_seat=ctx.hero_seat,
+                    source="rule",
+                ),
+                recommendation=None,
+                equity=None,
+                thresholds=None,
+                rationale="Preflop coach charts are not configured.",
             )
-        except Exception:
-            pass
+            return JSONResponse(advice.model_dump(), status_code=200)
 
-        return JSONResponse(payload, status_code=200)
+        try:
+            pre = svc.get_advice(hand_id=hand_id, idx=idx)
+        except LookupError as e:
+            advice = AdviceV1(
+                version=1,
+                status="not_found",
+                meta=AdviceMeta(
+                    street="preflop",
+                    n_players=ctx.n_players,
+                    hero_seat=ctx.hero_seat,
+                    source="rule",
+                ),
+                recommendation=None,
+                equity=None,
+                thresholds=None,
+                rationale=str(e),
+            )
+            return JSONResponse(advice.model_dump(), status_code=200)
+        except ValueError as e:
+            advice = AdviceV1(
+                version=1,
+                status="error",
+                meta=AdviceMeta(
+                    street="preflop",
+                    n_players=ctx.n_players,
+                    hero_seat=ctx.hero_seat,
+                    source="rule",
+                ),
+                recommendation=None,
+                equity=None,
+                thresholds=None,
+                rationale=f"Preflop coach input error: {e}",
+            )
+            return JSONResponse(advice.model_dump(), status_code=200)
+        except Exception as e:
+            advice = AdviceV1(
+                version=1,
+                status="error",
+                meta=AdviceMeta(
+                    street="preflop",
+                    n_players=ctx.n_players,
+                    hero_seat=ctx.hero_seat,
+                    source="rule",
+                ),
+                recommendation=None,
+                equity=None,
+                thresholds=None,
+                rationale=f"Preflop coach failure: {e}",
+            )
+            return JSONResponse(advice.model_dump(), status_code=200)
 
-    except CoachDisabledError:
-        return JSONResponse({"meta": {"status": "disabled"}}, status_code=501)
-    except UnsupportedSpotError as e:
-        msg = str(e).lower()
-        if "timed out" in msg or "timeout" in msg:
-            return JSONResponse({"meta": {"status": "timeout"}}, status_code=504)
-        return JSONResponse({"meta": {"status": "unsupported"}}, status_code=501)
-    except Exception:
-        return JSONResponse({"meta": {"status": "error"}}, status_code=500)
+        strategy_bar_list = [
+            StrategyPart(action=action, weight=float(weight))
+            for action, weight in pre.strategy_bar.items()
+        ]
+
+        advice = AdviceV1(
+            version=1,
+            status="ok",
+            meta=AdviceMeta(
+                street="preflop",
+                n_players=ctx.n_players,
+                hero_seat=ctx.hero_seat,
+                source=pre.source,
+            ),
+            recommendation=AdviceRecommendation(
+                bucket=pre.bucket,
+                strategy_bar=strategy_bar_list,
+            ),
+            equity=None,
+            thresholds=None,
+            rationale=pre.rationale,
+        )
+        return JSONResponse(advice.model_dump(), status_code=200)
+
+    # Postflop HU: delegate to postflop coach v1.
+    if street in {"flop", "turn", "river"} and ctx.n_players == 2:
+        advice = _postflop_service.get_postflop_advice(ctx)
+        # Postflop coach v1 always returns a well-formed AdviceV1. The status
+        # field indicates whether the spot was actually supported.
+        return JSONResponse(advice.model_dump(), status_code=200)
+
+    # Everything else (multiway, unknown street, etc.) is currently unsupported.
+    advice = AdviceV1(
+        version=1,
+        status="unsupported",
+        meta=AdviceMeta(
+            street=_normalize_street(street),
+            n_players=ctx.n_players,
+            hero_seat=ctx.hero_seat,
+            source="rule",
+        ),
+        recommendation=None,
+        equity=None,
+        thresholds=None,
+        rationale="Coach does not yet support this spot.",
+    )
+    return JSONResponse(advice.model_dump(), status_code=200)
 
 
 # -------------------------
@@ -344,7 +405,7 @@ def post_test_solve(req: SolveRequestModel = Body(...)) -> JSONResponse:
 
     This bypasses the per-hand context builder and unified advice shape and is
     intended purely for local experimentation and QA. The response shape
-    mirrors the current solver payload used by /api/coach/advice.
+    mirrors the current solver payload used historically by /api/coach/advice.
     """
     if not _coach_enabled():
         return JSONResponse({"meta": {"status": "disabled"}}, status_code=501)
@@ -366,12 +427,12 @@ def post_test_solve(req: SolveRequestModel = Body(...)) -> JSONResponse:
                 spot=req.spot,
             )
         )
-        advice = cast(Dict[str, Any], advice_raw)  # mypy: treat as plain dict
+        advice = dict(advice_raw)  # type: ignore[arg-type]
         latency_ms = (time.perf_counter() - started) * 1000.0
 
-        recommended_bucket = cast(str, advice.get("recommended_bucket", ""))
-        strategy = cast(Dict[str, float], advice.get("strategy", {}))
-        ev_map = cast(Dict[str, float], advice.get("ev_map", {}))
+        recommended_bucket = advice.get("recommended_bucket", "")
+        strategy = advice.get("strategy", {})
+        ev_map = advice.get("ev_map", {})
 
         payload: Dict[str, Any] = {
             "recommended_bucket": recommended_bucket,
@@ -411,8 +472,7 @@ def post_ensure_progress() -> JSONResponse:
     the current state with an empty list.
 
     This endpoint is orthogonal to the coaching payload shape; it simply
-    coordinates engine progress. It remains unchanged by the unified Advice
-    work outlined in docs/COACH-ADVICE-PAYLOAD.md.
+    coordinates engine progress.
     """
     adapter = get_adapter()
     ss = get_session_state()

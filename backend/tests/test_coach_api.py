@@ -1,26 +1,16 @@
 # backend/tests/test_coach_api.py
 """
-Tests for the /api/coach/advice endpoint.
+Tests for the /api/coach/advice endpoint (AdviceV1 contract).
 
-These currently exercise the solver-backed payload:
+These tests focus on:
 
-    {
-      "recommended_bucket": "...",
-      "strategy": { ... },
-      "ev_map": { ... },
-      "meta": {
-        "status": "...",
-        "cached": bool,
-        "latency_ms": float,
-        "node_key": "..."
-      }
-    }
+    * COACH_ENABLED gating.
+    * Preflop path wiring (wraps preflop advisor into AdviceV1).
+    * Postflop HU wiring (delegates to postflop coach v1).
 
-In Milestone M3 the implementation of /api/coach/advice will migrate towards
-the unified AdviceV1 schema defined in backend/schemas/advice.py and documented
-in docs/COACH-ADVICE-PAYLOAD.md.  Until that wiring is complete, these tests
-remain focused on the existing solver contract (status codes, caching, and
-snapshot behaviour).
+The exact internals of preflop/postflop coaches are tested elsewhere; here
+we mostly verify that /api/coach/advice returns a well-formed AdviceV1 and
+routes to the correct helper based on the decision context.
 """
 
 from __future__ import annotations
@@ -30,173 +20,160 @@ from typing import Any, Dict
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.coach.decision_context import DecisionContext
+from backend.schemas.advice import (
+    AdviceMeta,
+    AdviceRecommendation,
+    AdviceV1,
+    StrategyPart,
+)
 from backend.main import app
 
 
-def test_advice_disabled(monkeypatch) -> None:
+def _make_ctx(**overrides: Any) -> DecisionContext:
+    """Minimal helper for constructing a DecisionContext in tests."""
+    base: Dict[str, Any] = {
+        "hand_id": "H1",
+        "idx": 0,
+        "street": "preflop",
+        "hero_seat": 0,
+        "n_players": 2,
+        "active_seats": [0, 1],
+        "board": [],
+        "pot_total": 150,
+        "to_call": 50,
+        "min_raise": 150,
+        "allowed_buckets": ["fold", "call", "2.5x"],
+        "deck_seed": None,
+        "hero_hole_cards": ["As", "Kh"],
+        "button": 0,
+        "sb_seat": 0,
+        "bb_seat": 1,
+        "terminal": False,
+        "last_action": None,
+        "raw_state": {},
+    }
+    base.update(overrides)
+    return DecisionContext(**base)
+
+
+def test_advice_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When COACH_ENABLED=false, /coach/advice returns 501 + status='disabled'."""
     monkeypatch.setenv("COACH_ENABLED", "false")
     client = TestClient(app)
+
     r = client.get("/api/coach/advice", params={"hand_id": "H1", "idx": 0})
     assert r.status_code == 501
+
     body = r.json()
-    assert isinstance(body, dict)
-    # New contract prefers meta.status="disabled"; keep backward tolerance if shape changes again
-    if "meta" in body:
-        assert body["meta"].get("status") == "disabled"
-    else:
-        assert "disabled" in str(body.get("detail", "")).lower()
+    assert body.get("status") == "disabled"
+    assert "meta" in body
 
 
-def test_advice_enabled_stub(monkeypatch) -> None:
-    # With COACH_ENABLED=true and current builder,
-    # the route returns 501 with meta.status in {"unsupported","timeout","error"} at preflop.
+def test_preflop_unsupported_when_service_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    If preflop advisor is unavailable (no charts, etc.), the endpoint should
+    still return AdviceV1 with status='unsupported' rather than erroring.
+    """
     monkeypatch.setenv("COACH_ENABLED", "true")
+
+    # Stub the decision-context builder to return a preflop context.
+    pre_ctx = _make_ctx(street="preflop")
+
+    def fake_build_decision_context(
+        hand_id: str, idx: int
+    ) -> DecisionContext:  # noqa: ANN001
+        return pre_ctx
+
+    monkeypatch.setattr(
+        "backend.coach.decision_context.build_decision_context",
+        fake_build_decision_context,
+        raising=True,
+    )
+
+    # Force _get_preflop_service() to return None.
+    monkeypatch.setattr(
+        "backend.api.coach._get_preflop_service",
+        lambda: None,
+        raising=True,
+    )
+
     client = TestClient(app)
     r = client.get("/api/coach/advice", params={"hand_id": "H1", "idx": 0})
-    assert r.status_code == 501
+    assert r.status_code == 200
+
     body = r.json()
-    # Accept the new contract; older "not available" detail is no longer used.
-    assert body.get("meta", {}).get("status") in {"unsupported", "timeout", "error"}
+    assert body["status"] == "unsupported"
+    assert body["meta"]["street"] == "preflop"
+    assert body["meta"]["n_players"] == 2
+    assert body["meta"]["hero_seat"] == 0
 
 
-# ---------------- Task-18 API integration checks (mocked builder + adapter) ----------------
+def test_postflop_delegates_to_postflop_coach(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    For HU flop/turn/river, /coach/advice should delegate to the postflop
+    coach and surface its AdviceV1 payload unchanged (except for JSON
+    serialization).
+    """
+    monkeypatch.setenv("COACH_ENABLED", "true")
 
-
-def _dummy_req():
-    from backend.adapters.solver.texassolver_adapter import SolveRequest
-
-    return SolveRequest(
+    flop_ctx = _make_ctx(
         street="flop",
         board=["Ah", "Kd", "3s"],
-        pot=120,
-        ip_stack=240,
-        oop_stack=240,
-        ip_range="AA,AKs",
-        oop_range="KK,QQ",
-        bucket_labels=["TOP", "MID", "LOW"],
-        spot="SRP",
+        pot_total=100,
+        to_call=50,
     )
 
-
-def test_advice_cached_and_node_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("COACH_ENABLED", "true")
-
-    # Mock node builder to avoid UnsupportedSpotError
-    dummy = _dummy_req()
-
-    def fake_build(hand_id: str, idx: int):  # noqa: ANN001
-        return dummy
+    def fake_build_decision_context(
+        hand_id: str, idx: int
+    ) -> DecisionContext:  # noqa: ANN001
+        assert hand_id == "H1"
+        assert idx == 0
+        return flop_ctx
 
     monkeypatch.setattr(
-        "backend.coach.node_builder.build_solve_request_from_hand",
-        fake_build,
+        "backend.coach.decision_context.build_decision_context",
+        fake_build_decision_context,
         raising=True,
     )
 
-    # Mock adapter.solve and count calls
-    calls = {"n": 0}
-
-    def fake_solve(self, req):  # noqa: ANN001
-        calls["n"] += 1
-        return {"recommended_bucket": "T", "strategy": {"T": 1.0}, "ev_map": {"T": 0.0}}
-
-    monkeypatch.setattr(
-        "backend.adapters.solver.texassolver_adapter.TexasSolverAdapter.solve",
-        fake_solve,
-        raising=True,
+    # Prepare a stub AdviceV1 that the postflop coach will "return".
+    stub_advice = AdviceV1(
+        status="ok",
+        meta=AdviceMeta(
+            street="flop",
+            n_players=2,
+            hero_seat=0,
+            source="equity",
+        ),
+        recommendation=AdviceRecommendation(
+            bucket="call",
+            strategy_bar=[StrategyPart(action="call", weight=1.0)],
+        ),
+        equity=None,
+        thresholds=None,
+        rationale="stub postflop advice",
     )
 
-    # Ensure the cache is clean for this node
-    from backend.coach.node_key import make_node_key_from_solve_request
-    from backend.logger import get_logger
-    from backend.coach.cache import ensure_tables
-
-    nk = make_node_key_from_solve_request(dummy)
-    conn = get_logger().conn
-
-    # Ensure table exists before manipulating it
-    ensure_tables(conn)
-
-    conn.execute("DELETE FROM solver_cache WHERE node_key = ?", (nk,))
-    conn.commit()
-
-    client = TestClient(app)
-
-    r1 = client.get("/api/coach/advice", params={"hand_id": "HX", "idx": 42})
-    assert r1.status_code == 200
-    b1 = r1.json()
-    assert b1["meta"]["cached"] is False
-    assert isinstance(b1["meta"]["node_key"], str) and len(b1["meta"]["node_key"]) == 64
-
-    r2 = client.get("/api/coach/advice", params={"hand_id": "HX", "idx": 42})
-    assert r2.status_code == 200
-    b2 = r2.json()
-    assert b2["meta"]["cached"] is True
-    assert b2["meta"]["node_key"] == b1["meta"]["node_key"]
-
-    # Adapter should have been called only once due to cache hit
-    assert calls["n"] == 1
-
-
-def test_advice_snapshot_includes_node_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("COACH_ENABLED", "true")
-
-    # Mock builder
-    dummy = _dummy_req()
-
-    def fake_build(hand_id: str, idx: int):  # noqa: ANN001
-        return dummy
+    def fake_get_postflop_advice(ctx: DecisionContext) -> AdviceV1:  # noqa: ANN001
+        # Ensure we actually received the flop context.
+        assert ctx.street == "flop"
+        return stub_advice
 
     monkeypatch.setattr(
-        "backend.coach.node_builder.build_solve_request_from_hand",
-        fake_build,
-        raising=True,
-    )
-
-    # Mock adapter
-    def fake_solve(self, req):  # noqa: ANN001
-        return {"recommended_bucket": "A", "strategy": {"A": 1.0}, "ev_map": {"A": 0.0}}
-
-    monkeypatch.setattr(
-        "backend.adapters.solver.texassolver_adapter.TexasSolverAdapter.solve",
-        fake_solve,
-        raising=True,
-    )
-
-    # Capture snapshot calls
-    recorded: Dict[str, Any] = {}
-
-    def fake_write_snapshot(hand_id, idx, node_key, advice_json):  # noqa: ANN001
-        recorded["node_key"] = node_key
-        recorded["advice_json"] = advice_json
-
-    monkeypatch.setattr(
-        "backend.coach.advice_store.write_snapshot",
-        fake_write_snapshot,
+        "backend.coach.postflop.service.get_postflop_advice",
+        fake_get_postflop_advice,
         raising=True,
     )
 
     client = TestClient(app)
-    r = client.get("/api/coach/advice", params={"hand_id": "HY", "idx": 7})
+    r = client.get("/api/coach/advice", params={"hand_id": "H1", "idx": 0})
     assert r.status_code == 200
+
     body = r.json()
-
-    assert isinstance(recorded.get("node_key"), str)
-    assert recorded["node_key"] == body["meta"]["node_key"]
-
-
-# The following remain as placeholders for future full integration with real solver
-@pytest.mark.skip(
-    reason="Enable after wiring GET /coach/advice to node_builder + adapter"
-)
-def test_advice_unsupported(monkeypatch) -> None: ...
-
-
-@pytest.mark.skip(
-    reason="Enable after wiring GET /coach/advice to node_builder + adapter"
-)
-def test_advice_timeout(monkeypatch) -> None: ...
-
-
-@pytest.mark.skip(reason="Enable after wiring GET /coach/advice + advice_store")
-def test_advice_success_snapshot(monkeypatch) -> None: ...
+    assert body["status"] == "ok"
+    assert body["meta"]["street"] == "flop"
+    assert body["recommendation"]["bucket"] == "call"
+    assert body["rationale"] == "stub postflop advice"
