@@ -3,7 +3,7 @@
 Postflop villain range presets for the coach.
 
 This module defines a small set of *coarse* villain profiles that the
-postflop coach can use when constructing equity queries.  It is
+postflop coach can use when constructing equity queries. It is
 intentionally conservative and simple:
 
   * Profiles are identified by a short name (e.g. "TAG").
@@ -21,14 +21,20 @@ Current scope for M3 / Task 3:
 
   * Only HU ranges are defined.
   * Only a single default profile ("TAG") is provided.
-  * Multiway / node-specific profiles are deferred to Task 4.
 
-The postflop coach service is expected to:
+Task 4 extends usage of this module so that:
+
+  * HU helper functions remain the primary API for heads-up spots.
+  * Shared utilities (street normalisation, generic fallback ranges) can be
+    reused by multiway profile helpers defined in sibling modules.
+
+The postflop coach service (HU or multiway) is expected to:
 
   * Decide which profile to use (typically from configuration).
   * Decide which role ("ip" vs "oop") applies to the villain at a given
     decision.
-  * Call `get_hu_villain_range(...)` to obtain a range string.
+  * Call `get_hu_villain_range(...)` or a multiway profile helper to obtain
+    a range string.
 
 This file deliberately avoids importing DecisionContext or config modules
 to keep dependencies simple and testable.
@@ -40,15 +46,21 @@ from typing import Dict, List, Literal
 
 Role = Literal["ip", "oop"]
 ProfileName = Literal["TAG"]
+StreetKey = Literal["flop", "turn", "river"]
 
 DEFAULT_PROFILE_NAME: ProfileName = "TAG"
 
+# Generic semi-tight default used as a last-resort fallback for unknown
+# (street, role, profile) combinations.
+GENERIC_SEMITIGHT_DEFAULT_RANGE = "22+,A2s+,K9s+,QTs+,JTs,ATo+,KQo"
+
 
 # ---------------------------------------------------------------------------
-# Internal profile definitions
+# Internal profile definitions (HU, TAG-ish)
+# ---------------------------------------------------------------------------
 #
 # These are deliberately coarse "TAG-ish" ranges intended as a starting
-# point, not a final strategy model.  They can be tuned independently of
+# point, not a final strategy model. They can be tuned independently of
 # coach logic as we gather data.
 #
 # Semantics:
@@ -61,7 +73,7 @@ DEFAULT_PROFILE_NAME: ProfileName = "TAG"
 #   - Commas separate components.
 #
 
-_HU_TAG_RANGES: Dict[str, Dict[Role, str]] = {
+_HU_TAG_RANGES: Dict[StreetKey, Dict[Role, str]] = {
     # Generic "got here by playing a reasonable preflop strategy" range.
     "flop": {
         "ip": ("22+,A2s+,K9s+,Q9s+,J9s+,T9s,98s,87s," "ATo+,KJo+,QJo"),
@@ -78,6 +90,23 @@ _HU_TAG_RANGES: Dict[str, Dict[Role, str]] = {
         "oop": ("88+,ATs+,KTs+,QTs+,JTs," "AQo+,KQo"),
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Shared utilities
+# ---------------------------------------------------------------------------
+
+
+def normalize_street_key(street: str) -> StreetKey:
+    """
+    Normalise an arbitrary street string into the internal StreetKey type.
+
+    Unknown values are mapped to "flop" as a safe default.
+    """
+    s = street.lower().strip()
+    if s in ("flop", "turn", "river"):
+        return s  # type: ignore[return-value]
+    return "flop"
 
 
 # ---------------------------------------------------------------------------
@@ -107,8 +136,8 @@ def get_hu_villain_range(
 
     Args:
         street:
-            Current street name; case-insensitive.  Expected values are
-            "flop", "turn", or "river".  Unknown streets fall back to
+            Current street name; case-insensitive. Expected values are
+            "flop", "turn", or "river". Unknown streets fall back to
             "flop".
 
         role:
@@ -117,7 +146,7 @@ def get_hu_villain_range(
               - "oop" – out of position
 
         profile:
-            Name of the villain profile.  Currently only "TAG" is
+            Name of the villain profile. Currently only "TAG" is
             defined; other values are treated as "TAG" for now.
 
     Returns:
@@ -129,12 +158,10 @@ def get_hu_villain_range(
         - If a particular (street, role) mapping is missing, falls back
           to the "flop" range for that role; if that is also missing,
           returns a generic semi-tight default:
-              "22+,A2s+,K9s+,QTs+,JTs,ATo+,KQo".
+              GENERIC_SEMITIGHT_DEFAULT_RANGE.
     """
     # Normalise inputs
-    street_norm = street.lower().strip()
-    if street_norm not in _HU_TAG_RANGES:
-        street_norm = "flop"
+    street_key: StreetKey = normalize_street_key(street)
 
     role_norm: Role = "ip" if role == "ip" else "oop"
 
@@ -147,7 +174,7 @@ def get_hu_villain_range(
     ranges = _HU_TAG_RANGES
 
     # Try exact (street, role)
-    by_street = ranges.get(street_norm, {})
+    by_street = ranges.get(street_key, {})
     value = by_street.get(role_norm)
     if value:
         return value
@@ -158,7 +185,7 @@ def get_hu_villain_range(
         return flop_value
 
     # Last resort: semi-tight default
-    return "22+,A2s+,K9s+,QTs+,JTs,ATo+,KQo"
+    return GENERIC_SEMITIGHT_DEFAULT_RANGE
 
 
 def get_default_villain_range(street: str, role: Role = "oop") -> str:
@@ -176,6 +203,10 @@ def get_default_villain_range(street: str, role: Role = "oop") -> str:
     It lets the coach depend on a minimal, profile-agnostic API while
     still keeping the richer profile-based helper available for future
     configuration work.
+
+    Multiway helpers in sibling modules may also use this as a generic
+    "reasonable villain" range when they don't have seat-specific
+    profiles available.
     """
     return get_hu_villain_range(street=street, role=role, profile=DEFAULT_PROFILE_NAME)
 
@@ -184,6 +215,9 @@ __all__ = [
     "DEFAULT_PROFILE_NAME",
     "ProfileName",
     "Role",
+    "StreetKey",
+    "GENERIC_SEMITIGHT_DEFAULT_RANGE",
+    "normalize_street_key",
     "available_profiles",
     "get_hu_villain_range",
     "get_default_villain_range",

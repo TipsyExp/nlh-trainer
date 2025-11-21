@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .base import Card, EquityBackend, EquityResult, PlayerSpec
 from .backends.ompeval_backend import OmpevalBackend
@@ -188,6 +188,116 @@ class EquityService:
             raise RuntimeError("equity result contained no players")
         hero = result.per_player[0]
         return float(hero.get("equity", 0.0))
+
+    def multiway_equity_for_coach(
+        self,
+        *,
+        hero_seat: int,
+        hero_hand: Tuple[Card, Card],
+        villain_ranges: Dict[int, str],
+        board: Sequence[Card] = (),
+        dead: Sequence[Card] = (),
+        iters: Optional[int] = None,
+        exact: bool = False,
+        timeout_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Convenience helper: multiway hero-vs-ranges equity tailored for coach use.
+
+        This helper is designed for postflop multiway coaching. It:
+
+          * Builds a players array from hero + villain ranges.
+          * Calls `calc_equity` with a ranges-capable backend.
+          * Returns a simplified structure that can be mapped directly onto
+            AdviceV1.equity.{hero,players,vs_field}.
+
+        Args:
+            hero_seat:
+                Logical hero seat index (as per DecisionContext.hero_seat).
+
+            hero_hand:
+                Hero's exact two-card hand as (Card, Card).
+
+            villain_ranges:
+                Mapping from villain seat index -> range string. Seats should be
+                consistent with the DecisionContext.active_seats set; hero_seat
+                must **not** be in this mapping.
+
+            board, dead, iters, exact, timeout_ms:
+                Passed through to the underlying equity engine.
+
+        Returns:
+            dict with keys:
+                - "hero_seat": int
+                - "hero_equity": float
+                - "players_equity": List[{"seat": int, "equity": float}]
+                - "vs_field_equity": float
+
+        Raises:
+            RuntimeError if no suitable backend is available or if the result
+            shape is inconsistent.
+        """
+        if hero_seat in villain_ranges:
+            raise ValueError("hero_seat must not appear in villain_ranges")
+
+        # Stable ordering of seats so we can reconstruct seat↔result mapping.
+        seats: List[int] = sorted({int(hero_seat), *[int(s) for s in villain_ranges]})
+
+        players: List[PlayerSpec] = []
+        hero_index: Optional[int] = None
+
+        for seat in seats:
+            if seat == int(hero_seat):
+                players.append(PlayerSpec(hand=hero_hand))
+                hero_index = len(players) - 1
+            else:
+                rng = villain_ranges.get(seat)
+                if rng is None:
+                    raise ValueError(f"missing range for villain seat {seat}")
+                players.append(PlayerSpec(range=rng))
+
+        if hero_index is None:
+            raise RuntimeError("internal error: hero_index not set in multiway build")
+
+        try:
+            result = self.calc_equity(
+                players=players,
+                board=board,
+                dead=dead,
+                iters=iters,
+                exact=exact,
+                timeout_ms=timeout_ms,
+            )
+        except Exception as e:  # pragma: no cover - defensive mapping
+            # Wrap backend errors in a clearer message so coach logic can map
+            # them to status='unsupported' or similar.
+            raise RuntimeError(f"multiway ranges equity unavailable: {e}") from e
+
+        per = result.per_player or []
+        if len(per) != len(seats):
+            raise RuntimeError(
+                "equity result length mismatch in multiway_equity_for_coach: "
+                f"expected {len(seats)}, got {len(per)}"
+            )
+
+        # Extract hero equity from the known hero_index.
+        hero_entry = per[hero_index]
+        hero_equity = float(hero_entry.get("equity", 0.0))
+
+        players_equity: List[Dict[str, float]] = []
+        for seat, rec in zip(seats, per):
+            eq = float(rec.get("equity", 0.0))
+            players_equity.append({"seat": int(seat), "equity": eq})
+
+        # In standard equity engines, hero equity is already vs "the field".
+        vs_field_equity = hero_equity
+
+        return {
+            "hero_seat": int(hero_seat),
+            "hero_equity": hero_equity,
+            "players_equity": players_equity,
+            "vs_field_equity": vs_field_equity,
+        }
 
     # ------------------------------------------------------------------ #
     # Capability helper

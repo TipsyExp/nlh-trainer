@@ -30,7 +30,6 @@ from backend.schemas.advice import (
     AdviceV1,
     StrategyPart,
 )
-
 from backend.config import COACH_ENABLED as CONFIG_COACH_ENABLED
 from backend.services.equity.service import EquityService
 from backend.logger import log_preflop_advice
@@ -179,9 +178,9 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
           - Preflop:
               - Delegates to the preflop advisor and wraps its output into
                 AdviceV1 (source ∈ {"chart","equity","rule"}).
-          - Postflop HU (flop/turn/river, n_players == 2):
-              - Delegates to the HU postflop coach (equity-based).
-          - Other spots (multiway / unsupported):
+          - Postflop (flop/turn/river, HU + multiway):
+              - Delegates to the postflop coach v1 (equity-based).
+          - Other spots:
               - Returns AdviceV1 with status="unsupported".
 
       * When the decision context cannot be resolved:
@@ -355,14 +354,14 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
         )
         return JSONResponse(advice.model_dump(), status_code=200)
 
-    # Postflop HU: delegate to postflop coach v1.
-    if street in {"flop", "turn", "river"} and ctx.n_players == 2:
+    # Postflop (HU + multiway): delegate to postflop coach v1.
+    if street in {"flop", "turn", "river"}:
         advice = _postflop_service.get_postflop_advice(ctx)
         # Postflop coach v1 always returns a well-formed AdviceV1. The status
         # field indicates whether the spot was actually supported.
         return JSONResponse(advice.model_dump(), status_code=200)
 
-    # Everything else (multiway, unknown street, etc.) is currently unsupported.
+    # Everything else (unknown street, showdown, etc.) is currently unsupported.
     advice = AdviceV1(
         version=1,
         status="unsupported",
