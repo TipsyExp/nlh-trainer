@@ -1,45 +1,7 @@
 # backend/coach/decision_context.py
-"""
-Shared decision-context helper for coaching.
-
-This module provides a single, reusable representation of a decision given a
-(hand_id, idx) pair. It is the backend counterpart to the public `state`
-schema described in docs/STATE-SCHEMA.md and is intended to be consumed by:
-
-  * /api/coach/advice           (unified coach endpoint)
-  * preflop advisor integration
-  * postflop coach logic (HU + multiway)
-  * solver node builder(s)
-  * future logging / export helpers
-
-The long-term contract is:
-
-  DecisionContext(
-    hand_id, idx,
-    street, hero_seat, n_players, active_seats,
-    board, pot_total,
-    to_call, min_raise, allowed_buckets,
-    deck_seed,
-    hero_hole_cards, button, sb_seat, bb_seat,
-    terminal, last_action, raw_state
-  )
-
-Current implementation (Task 2.2):
-
-  * `build_decision_context_from_state(...)` builds a context from a public
-    state dict shaped like /api/hand/state["state"].
-  * `build_decision_context(...)` derives context from the **current** engine
-    snapshot via `backend.adapters.engines.get_adapter().state()`, validating
-    that the requested hand_id matches the engine's active hand.
-
-The `idx` field is carried through but not yet used to replay historical
-decisions from the log DB. Future work will extend this helper so that
-(hand_id, idx) reconstructs the exact pre-action state from the action log.
-"""
-
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from backend.adapters.engines import get_adapter
@@ -129,6 +91,22 @@ class DecisionContext:
 
             Provided as an escape hatch for advanced consumers; treat as
             read-only.
+
+        seat_stacks:
+            Best-effort mapping of seat index → stack behind in chips at this
+            decision. This is derived from the players array when available.
+            Intended for multiway equity / SPR heuristics.
+
+        seat_committed:
+            Best-effort mapping of seat index → total chips committed so far
+            in the hand (or on the current street, depending on engine
+            semantics). Also derived from the players array.
+
+        hero_stack:
+            Convenience view of `seat_stacks[hero_seat]` when known.
+
+        hero_committed:
+            Convenience view of `seat_committed[hero_seat]` when known.
     """
 
     hand_id: str
@@ -157,6 +135,12 @@ class DecisionContext:
     last_action: Optional[Dict[str, Any]]
 
     raw_state: Any
+
+    # Multiway / stack context (best-effort, optional)
+    seat_stacks: Dict[int, int] = field(default_factory=dict)
+    seat_committed: Dict[int, int] = field(default_factory=dict)
+    hero_stack: Optional[int] = None
+    hero_committed: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +242,45 @@ def _extract_hero_hole_cards_from_players(
     return out or None
 
 
+def _extract_stacks_and_committed_from_players(
+    players: Any,
+) -> tuple[Dict[int, int], Dict[int, int]]:
+    """
+    Best-effort extraction of per-seat stack / committed information.
+
+    This looks for common fields on each player entry:
+
+        * 'stack'
+        * 'committed'
+
+    on either dict-like entries or engine player objects. Values are coerced
+    to ints when numeric. Missing or non-numeric fields are ignored.
+
+    Returns:
+        (seat_stacks, seat_committed) where each is a mapping seat -> int.
+    """
+    seat_stacks: Dict[int, int] = {}
+    seat_committed: Dict[int, int] = {}
+
+    if not isinstance(players, list):
+        return seat_stacks, seat_committed
+
+    for idx, p in enumerate(players):
+        if isinstance(p, dict):
+            stack_val = p.get("stack")
+            committed_val = p.get("committed")
+        else:
+            stack_val = getattr(p, "stack", None)
+            committed_val = getattr(p, "committed", None)
+
+        if isinstance(stack_val, (int, float)):
+            seat_stacks[idx] = int(stack_val)
+        if isinstance(committed_val, (int, float)):
+            seat_committed[idx] = int(committed_val)
+
+    return seat_stacks, seat_committed
+
+
 def _normalize_last_action(la: Any) -> Optional[Dict[str, Any]]:
     """
     Normalise a last_action payload into a dict or None.
@@ -347,7 +370,11 @@ def build_decision_context_from_state(
     active_seats = _infer_active_seats_from_players(players)
     n_players = len(active_seats)
 
-    hero_cards = _extract_hero_hole_cards_from_players(players, int(hero_seat))
+    # Per-seat stack / committed information (best-effort)
+    seat_stacks, seat_committed = _extract_stacks_and_committed_from_players(players)
+
+    hero_seat_int = int(hero_seat)
+    hero_cards = _extract_hero_hole_cards_from_players(players, hero_seat_int)
 
     button = int(table.get("button", 0) or 0)
     sb_seat = int(table.get("sb_seat", 0) or 0)
@@ -359,11 +386,14 @@ def build_decision_context_from_state(
 
     last_action = _normalize_last_action(state.get("last_action"))
 
+    hero_stack = seat_stacks.get(hero_seat_int)
+    hero_committed = seat_committed.get(hero_seat_int)
+
     return DecisionContext(
         hand_id=str(hand_id),
         idx=int(idx),
         street=street,
-        hero_seat=int(hero_seat),
+        hero_seat=hero_seat_int,
         n_players=n_players,
         active_seats=active_seats,
         board=board,
@@ -379,6 +409,10 @@ def build_decision_context_from_state(
         terminal=terminal,
         last_action=last_action,
         raw_state=state,
+        seat_stacks=seat_stacks,
+        seat_committed=seat_committed,
+        hero_stack=hero_stack,
+        hero_committed=hero_committed,
     )
 
 
@@ -471,7 +505,11 @@ def build_decision_context(hand_id: str, idx: int) -> DecisionContext:
     active_seats = _infer_active_seats_from_players(players)
     n_players = len(active_seats)
 
-    hero_cards = _extract_hero_hole_cards_from_players(players, int(hero_seat))
+    # Per-seat stack / committed information (best-effort)
+    seat_stacks, seat_committed = _extract_stacks_and_committed_from_players(players)
+
+    hero_seat_int = int(hero_seat)
+    hero_cards = _extract_hero_hole_cards_from_players(players, hero_seat_int)
 
     button = int(getattr(table, "button", 0) if table is not None else 0)
     sb_seat = int(getattr(table, "sb_seat", 0) if table is not None else 0)
@@ -479,11 +517,14 @@ def build_decision_context(hand_id: str, idx: int) -> DecisionContext:
 
     last_action = _normalize_last_action(getattr(state, "last_action", None))
 
+    hero_stack = seat_stacks.get(hero_seat_int)
+    hero_committed = seat_committed.get(hero_seat_int)
+
     return DecisionContext(
         hand_id=hand_id_str,
         idx=int(idx),
         street=street,
-        hero_seat=int(hero_seat),
+        hero_seat=hero_seat_int,
         n_players=n_players,
         active_seats=active_seats,
         board=board,
@@ -499,4 +540,8 @@ def build_decision_context(hand_id: str, idx: int) -> DecisionContext:
         terminal=terminal,
         last_action=last_action,
         raw_state=state,
+        seat_stacks=seat_stacks,
+        seat_committed=seat_committed,
+        hero_stack=hero_stack,
+        hero_committed=hero_committed,
     )

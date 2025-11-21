@@ -99,6 +99,10 @@ PREFLOP_FALLBACK_REQUIRED: bool = _env_bool("PREFLOP_FALLBACK_REQUIRED", "false"
 
 # Postflop coach (HU / multiway equity-based coach) configuration.
 # This controls the postflop path used by /api/coach/advice.
+
+# Global postflop coach gate. When false, /api/coach/advice will never
+# attempt equity-based postflop advice and will instead return status
+# "unsupported" for all postflop spots.
 POSTFLOP_COACH_ENABLED: bool = _env_bool("POSTFLOP_COACH_ENABLED", "true")
 
 # Default Monte Carlo iterations for postflop coach equity calls when not
@@ -114,6 +118,34 @@ POSTFLOP_COACH_TIMEOUT_MS: int = _env_int("POSTFLOP_COACH_TIMEOUT_MS", "0")
 # For example: "TAG", "CALLCHECK", etc. Interpretation is owned by
 # backend/coach/postflop/ranges.py.
 POSTFLOP_COACH_PROFILE: str = os.getenv("POSTFLOP_COACH_PROFILE", "TAG").strip().upper()
+
+# Multiway-specific toggles for the postflop coach. When disabled, the coach
+# will treat multiway spots as unsupported even if the underlying equity
+# backend can handle them.
+POSTFLOP_COACH_MULTIWAY_ENABLED: bool = _env_bool(
+    "POSTFLOP_COACH_MULTIWAY_ENABLED",
+    "true",
+)
+
+# Default iterations / timeout for multiway equity calls, overridable per
+# request. Defaults are slightly higher than HU due to slower convergence.
+POSTFLOP_COACH_MULTIWAY_ITERS: int = _env_int(
+    "POSTFLOP_COACH_MULTIWAY_ITERS",
+    "30000",
+)
+
+# Policy for selecting / constraining backends in multiway coach calls.
+# For now this is informational; the coach primarily relies on
+# EQUITY_BACKEND_POLICY but this allows future overrides such as
+# "ompeval_only" or "disabled".
+POSTFLOP_COACH_MULTIWAY_POLICY: str = (
+    os.getenv(
+        "POSTFLOP_COACH_MULTIWAY_POLICY",
+        "auto",
+    )
+    .strip()
+    .lower()
+)
 
 
 # ---------------------------------------------------------------------------

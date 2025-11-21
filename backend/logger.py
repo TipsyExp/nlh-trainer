@@ -18,8 +18,9 @@ per-decision rows in the log database. These helpers are opt-in and
 controlled via configuration flags in ``backend.config``.
 
 A stub for unified coach advice snapshots (all streets, AdviceV1) is also
-provided via ``log_coach_advice``. It is currently a no-op and will be
-wired to real persistence in a later task.
+provided via ``log_coach_advice``. It currently behaves as a no-op; later
+tasks will wire it to persist the full AdviceV1 payload, including HU and
+multiway fields such as ``meta.n_players`` and ``equity.players``.
 """
 
 from __future__ import annotations
@@ -320,10 +321,16 @@ def log_coach_advice(
     """
     Placeholder hook for logging unified coach advice (AdviceV1).
 
-    Task 3–4 introduce the postflop coach and unified /api/coach/advice flow.
-    Actual persistence of the AdviceV1 blob into the log database (including
-    schema changes and a dedicated LOG_COACH_ADVICE flag) is deferred to
-    a later task.
+    The ``advice`` mapping is expected to be a serialized AdviceV1 payload,
+    which naturally supports both heads-up and multiway decisions via:
+
+      * ``meta.n_players`` – number of active players in the pot.
+      * ``equity.players`` – optional per-seat equity records.
+      * ``equity.vs_field`` – optional hero-vs-field aggregate.
+
+    Task 3–4 introduce the postflop coach and multiway-aware advice. Actual
+    persistence of this blob into the log database (including schema changes
+    and a dedicated LOG_COACH_ADVICE flag) is deferred to a later task.
 
     Callers may safely invoke this function; it is currently a no-op.
     """
