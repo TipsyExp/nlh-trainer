@@ -19,7 +19,7 @@ class StrategyPart(BaseModel):
     Single segment of a strategy distribution.
 
     Each entry represents an action label and the fraction of time that action
-    should be taken in this spot.  The trainer frontend maps these into
+    should be taken in this spot. The trainer frontend maps these into
     percentage widths for the strategy bar.
     """
 
@@ -70,7 +70,7 @@ class AdviceRecommendation(BaseModel):
     """
     Recommended action and optional strategy distribution.
 
-    The 'bucket' identifies the primary recommendation.  The optional
+    The 'bucket' identifies the primary recommendation. The optional
     'strategy_bar' provides a more detailed mixed strategy that can be rendered
     as a bar chart on the frontend.
     """
@@ -177,17 +177,17 @@ class AdviceV1Model(BaseModel):
     Canonical shape for coach advice responses (version 1).
 
     This model backs the /api/coach/advice endpoint and any snapshots attached
-    to exports.  All-streets, all-player-counts advice should conform to this
+    to exports. All-streets, all-player-counts advice should conform to this
     schema, with optional blocks omitted when not applicable.
 
     See docs/COACH-ADVICE-PAYLOAD.md for the narrative specification.
     """
 
     # Use Literal[1] to make the version effectively constant while keeping
-    # mypy and pydantic happy.
+    # type checkers and pydantic happy.
     version: Literal[1] = Field(
         1,
-        description="Advice payload version.  Current version is 1.",
+        description="Advice payload version. Current version is 1.",
     )
     status: AdviceStatus = Field(
         ...,
@@ -220,3 +220,7 @@ class AdviceV1Model(BaseModel):
     class Config:
         # Be tolerant of extra fields from older/newer backends.
         extra = "ignore"
+
+
+# Backwards-friendly alias: most callers should import AdviceV1.
+AdviceV1 = AdviceV1Model

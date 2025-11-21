@@ -1,4 +1,5 @@
-﻿"""
+﻿# backend/adapters/engines/pokerkit_adapter.py
+"""
 Minimal PokerKit-like engine adapter.
 
 This module provides a very lightweight No-Limit Hold'em engine that
@@ -14,6 +15,15 @@ actions and state transitions.  Each event includes a wall-clock
 timestamp, a sequence counter, request correlation ID (if set via
 middleware), a cheap state hash, deltas vs the previous event, and
 boolean invariants to assist with troubleshooting.
+
+The core public surface used by the rest of the backend is:
+
+  * ``state()`` – returns a lightweight snapshot used by the hand API and
+    by the unified coaching decision-context helper
+    (see ``backend.coach.decision_context``).
+  * ``next_actor()`` – returns the current actor plus pricing and
+    ``allowed_buckets``; this is consumed by the hand API, bot policies and
+    the decision-context helper when building per-decision coaching state.
 """
 
 from __future__ import annotations
@@ -82,7 +92,20 @@ DEBUG_EVENTS_ENABLED = os.getenv("ENGINE_DEBUG_HTTP", "0").lower() in (
 
 
 class PokerKitAdapter:
-    """A minimal poker engine for testing with debug instrumentation."""
+    """A minimal poker engine for testing with debug instrumentation.
+
+    This adapter is the concrete engine behind:
+
+      * the hand API (``backend.api.hand``), which exposes public state to
+        the frontend, and
+      * the unified coaching flow, via the decision-context helper
+        (``backend.coach.decision_context``), which derives a per-decision
+        context from ``state()`` and ``next_actor()``.
+
+    Any future engines should provide a compatible ``state()`` snapshot and
+    ``next_actor()`` contract so they can be dropped in without changing
+    higher layers.
+    """
 
     # --- Class-level annotations for mypy ---
     _preflop_sb_called: bool
@@ -633,6 +656,24 @@ class PokerKitAdapter:
         return f"H{self.hand_id}"
 
     def next_actor(self) -> Optional[Dict[str, Any]]:
+        """Return the current actor and pricing info.
+
+        The returned mapping is the canonical source for:
+
+          * ``seat``         – seat index of the actor,
+          * ``to_call``      – chips required to call,
+          * ``min_raise``    – minimum total commitment to make a legal raise,
+          * ``allowed_buckets`` – abstract bet/raise labels (e.g. '2.5xR', 'jam').
+
+        This shape is used by:
+
+          * the hand API (for public state + bot policies), and
+          * the unified coaching decision-context helper when it builds
+            a DecisionContext from the live engine state.
+
+        When no actor is due (e.g. after showdown), an empty mapping is
+        returned and callers should treat that as "no action".
+        """
         # Return an empty mapping when no actor is due, so callers can safely do .get(...)
         if self._next_to_act is None:
             return {}
@@ -885,6 +926,23 @@ class PokerKitAdapter:
         raise ValueError(f"unknown action: {action}")
 
     def state(self) -> _GameSnap:
+        """Return a lightweight snapshot of the current game state.
+
+        This snapshot is intentionally small but stable:
+
+          * table: seats / blinds / button / blind seats
+          * players: public hole cards (raw; redaction is handled by the API)
+          * street: 'preflop' | 'flop' | 'turn' | 'river' | 'showdown'
+          * deck_seed: deterministic seed identifier
+          * pot_total: sum of committed chips
+          * last_action: minimal metadata for the last engine action
+          * board: dict with 'flop'/'turn'/'river' arrays
+
+        The hand API uses this to build the public state JSON returned to the
+        frontend, and the decision-context helper uses the same snapshot as
+        the source of street/board/pot/deck_seed when constructing an internal
+        DecisionContext for coaching.
+        """
         tbl = _TableSnap(
             seats=self.seats,
             sb=self.sb,
