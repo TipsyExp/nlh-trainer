@@ -3,8 +3,8 @@
 //
 // This component renders a fixed panel on the right side of the screen (or
 // bottom on small screens) and displays coach advice and equity for the
-// current decision.  It is purely presentational: all network logic is
-// encapsulated in hooks invoked by the parent component.  Consumers
+// current decision. It is purely presentational: all network logic is
+// encapsulated in hooks invoked by the parent component. Consumers
 // supply normalised coach and equity state along with the meta snapshot.
 //
 // Future alignment (M3+):
@@ -56,11 +56,13 @@ export interface DecisionHelpOverlayProps {
 /**
  * Guidance overlay for preflop advice and (in later phases) equity.
  *
- * This component hooks into the decision context and overlay gate to
- * fetch coach advice, render recommended actions and display a status
- * indicator.  It does not itself perform any network calls; those are
- * encapsulated in the useDecisionOverlay hook.  When advice is not
- * available a friendly message is shown.  The overlay should mount
+ * This component consumes the normalised state provided by
+ * useDecisionOverlay and renders:
+ *   - coach source + recommended bucket + strategy bar
+ *   - hero equity summary derived from /api/equity
+ *
+ * It does not itself perform any network calls. When advice is not
+ * available a friendly message is shown. The overlay should mount
  * only when the overlayEnabled prop is true.
  */
 export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionHelpOverlayProps) {
@@ -76,22 +78,27 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
           {/* Status badge summarises the current coach state */}
           <StatusChip status={coach.status} />
         </div>
+
         {/* Coach section depends on coach status */}
         {coach.status === 'loading' && (
           <div className="space-y-2">
-            <div className="h-4 w-32 bg-gray-100 animate-pulse rounded"></div>
-            <div className="h-3 w-24 bg-gray-100 animate-pulse rounded"></div>
+            <div className="h-4 w-32 bg-gray-100 animate-pulse rounded" />
+            <div className="h-3 w-24 bg-gray-100 animate-pulse rounded" />
           </div>
         )}
+
         {coach.status === 'disabled' && (
           <div className="text-sm text-gray-600">Coach disabled or not configured.</div>
         )}
+
         {coach.status === 'not_found' && (
           <div className="text-sm text-gray-600">Coach route not available.</div>
         )}
+
         {coach.status === 'unavailable' && (
           <div className="text-sm text-gray-600">Coach unavailable.</div>
         )}
+
         {coach.status === 'ok' && coach.data && (
           <div className="space-y-3 text-sm">
             {/* Source badge and recommended line */}
@@ -107,6 +114,7 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
                 {coach.data.bucket.replace(/_/g, ' ')}
               </span>
             </div>
+
             {/* Strategy bar if provided */}
             {coach.data.strategy_bar && coach.data.strategy_bar.length > 0 && (
               <div className="space-y-1">
@@ -121,6 +129,7 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
                 </div>
               </div>
             )}
+
             {coach.data.rationale && (
               <div className="text-xs text-gray-500">{coach.data.rationale}</div>
             )}
@@ -132,10 +141,11 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
           <div className="mt-3 border-t pt-3 space-y-2">
             {equity.loading && (
               <div className="space-y-2">
-                <div className="h-4 w-32 bg-gray-100 animate-pulse rounded"></div>
-                <div className="h-3 w-24 bg-gray-100 animate-pulse rounded"></div>
+                <div className="h-4 w-32 bg-gray-100 animate-pulse rounded" />
+                <div className="h-3 w-24 bg-gray-100 animate-pulse rounded" />
               </div>
             )}
+
             {!equity.loading && equity.status === 'ok' && equity.data && (
               <div className="space-y-2 text-sm">
                 <div className="flex items-center gap-2">
@@ -149,12 +159,14 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
                     })()}
                   </span>
                 </div>
+
                 {/* Hero equity bar */}
                 {(() => {
                   const hero = equity.data.players?.[0];
                   if (!hero) return null;
                   return <HeroEquityBar equity={hero.equity} />;
                 })()}
+
                 <div className="flex items-center gap-2 text-xs">
                   <span className="inline-flex items-center rounded-full px-2 py-0.5 bg-gray-100 text-gray-700">
                     {meta?.meta?.equity.backend ?? equity.data.backend}
@@ -163,6 +175,7 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
                     {equity.data.mode}
                   </span>
                 </div>
+
                 {(() => {
                   if (equity.data.mode === 'ranges') {
                     return (
@@ -186,6 +199,7 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
                 })()}
               </div>
             )}
+
             {!equity.loading && equity.status !== 'ok' && equity.status !== 'skipped' && (
               <div className="text-sm text-gray-600">
                 {equity.status === 'disabled' && 'Equity disabled'}

@@ -1,17 +1,18 @@
+// frontend/utils/overlayCache.ts
 // Simple in-memory caches for the guidance overlay.
 //
 // The overlay should cache coach responses keyed by hand_id and
 // decision index to avoid duplicate requests when the user re-renders
-// or revisits the same decision.  It also maintains an in-flight map
+// or revisits the same decision. It also maintains an in-flight map
 // so that concurrent requests for the same key can share a single
-// promise rather than producing parallel network traffic.  Negative
+// promise rather than producing parallel network traffic. Negative
 // cache entries are stored alongside positive ones to avoid repeated
 // calls for disabled or missing endpoints.
 
 import type { CoachAdvice } from '../types/coach';
 
 /**
- * Enumerated statuses for coach responses.  `ok` indicates a normal
+ * Enumerated statuses for coach responses. `ok` indicates a normal
  * result; `disabled` corresponds to HTTP 501 from the backend,
  * `not_found` corresponds to HTTP 404, and `unavailable` denotes
  * timeouts or other network failures.
@@ -19,10 +20,10 @@ import type { CoachAdvice } from '../types/coach';
 export type CoachStatus = 'ok' | 'disabled' | 'not_found' | 'unavailable';
 
 /**
- * A normalised response record used internally by the overlay.  When
- * `status` is `ok` the `data` field contains the coach advice.  For
+ * A normalised response record used internally by the overlay. When
+ * `status` is `ok` the `data` field contains the coach advice. For
  * other statuses `data` will be null and `error` may contain a
- * user‑friendly message.
+ * user-friendly message.
  */
 export interface CoachResponse {
   data: CoachAdvice | null;
@@ -53,7 +54,7 @@ export function deleteCoachInFlight(key: string): void {
   coachInFlight.delete(key);
 }
 
-/** Remove all cached values.  Primarily used for testing. */
+/** Remove all cached coach values. Primarily used for testing. */
 export function clearCoachCaches(): void {
   coachCache.clear();
   coachInFlight.clear();
@@ -63,14 +64,13 @@ export function clearCoachCaches(): void {
 // Equity caching
 //
 // Similar to the coach cache, the equity overlay caches results by
-// (hand_id, idx, street and signature) to avoid duplicate POST calls.  A
-// separate in‑flight map stores active Promises so that concurrent
-// requests share the same network call.  Negative entries are stored
+// (hand_id, idx, street and signature) to avoid duplicate POST calls. A
+// separate in-flight map stores active Promises so that concurrent
+// requests share the same network call. Negative entries are stored
 // alongside successful results so that repeated visits to unsupported
 // or unavailable decisions do not trigger repeated fetches.
 
 import type { EquityResponse } from '../types/equity';
-import type { EquityMeta } from '../types/meta';
 
 export type EquityStatus =
   | 'ok'
@@ -112,7 +112,7 @@ export function deleteEquityInFlight(key: string): void {
   equityInFlight.delete(key);
 }
 
-/** Remove all cached equity values.  Useful for testing. */
+/** Remove all cached equity values. Useful for testing. */
 export function clearEquityCaches(): void {
   equityCache.clear();
   equityInFlight.clear();

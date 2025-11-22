@@ -1,11 +1,16 @@
 // Lightweight HTTP helper with timeout and abort support.
 //
 // This module wraps the native fetch API to provide a unified way to
-// perform GET requests with an optional timeout and the ability to abort
-// via a caller-provided signal.  The helper returns a tuple with
-// metadata about the response rather than throwing on HTTP errors,
-// allowing callers to categorise error states (e.g. 501 vs 404 vs
-// timeout) without catching exceptions.
+// perform JSON GET/POST requests with an optional timeout and the
+// ability to abort via a caller-provided signal. The helper returns a
+// tuple with metadata about the response rather than throwing on HTTP
+// errors, allowing callers to categorise error states (e.g. 501 vs 404
+// vs timeout) without catching exceptions.
+//
+// Typical callers include:
+//   - GET /api/meta                      (capabilities)
+//   - GET /api/coach/advice?hand_id=... (unified coach advice)
+//   - POST /api/equity                  (equity calculations)
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_BASE ?? '').replace(/\/$/, '') || '';
 
@@ -19,13 +24,13 @@ export interface JsonResponse {
 
 /**
  * Perform a JSON POST request against the backend API with optional
- * timeout and abort signalling.  The returned object always
- * contains `ok`, `status` and `body` fields regardless of HTTP success.
- * When the request is aborted due to timeout or an external abort
- * signal the status is set to `'timeout'`.
+ * timeout and abort signalling. The returned object always contains
+ * `ok`, `status` and `body` fields regardless of HTTP success. When the
+ * request is aborted due to timeout or an external abort signal the
+ * status is set to `'timeout'`.
  *
- * @param path Relative path beginning with '/' (e.g. '/api/equity?hand_id=1&idx=0').
- * @param body JSON‑serialisable payload to send in the request body.
+ * @param path Relative path beginning with '/' (e.g. '/api/equity').
+ * @param body JSON-serialisable payload to send in the request body.
  * @param opts Optional timeout in milliseconds and AbortSignal from caller.
  */
 export async function postJson(
@@ -91,12 +96,12 @@ export async function postJson(
 
 /**
  * Perform a JSON GET request against the backend API with optional
- * timeout and abort signalling.  The returned object always contains
- * `ok`, `status` and `body` fields regardless of HTTP success.  When
+ * timeout and abort signalling. The returned object always contains
+ * `ok`, `status` and `body` fields regardless of HTTP success. When
  * the request is aborted due to timeout or an external abort signal
  * the status is set to `'timeout'`.
  *
- * @param path Relative path beginning with '/' (e.g. '/api/coach/preflop?hand_id=1&idx=0').
+ * @param path Relative path beginning with '/' (e.g. '/api/meta' or '/api/coach/advice?hand_id=H1&idx=0').
  * @param opts Optional timeout in milliseconds and AbortSignal from caller.
  */
 export async function getJson(

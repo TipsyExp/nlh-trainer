@@ -1,16 +1,16 @@
 // frontend/store/overlayDebugStore.ts
-// Simple in‑memory store to trace overlay calls during Phase 4.
+// Simple in-memory store to trace overlay calls during the help overlay phases.
 //
-// Snapshot‑aware testing requires the frontend to know whether the
+// Snapshot-aware testing requires the frontend to know whether the
 // overlay invoked the coach and equity endpoints for the current
-// decision.  This module stores the most recent call information so
-// that a dev inspector can display it.  It uses a basic publish/
+// decision. This module stores the most recent call information so
+// that a dev inspector can display it. It uses a basic publish/
 // subscribe pattern to notify subscribers when the trace changes.
 
 export interface OverlayTrace {
   /** The current hand identifier. */
   handId: string | null;
-  /** The zero‑based decision index. */
+  /** The zero-based decision index. */
   idx: number | null;
   /** Current street (preflop/flop/turn/river/showdown/unknown). */
   street: string | null;
@@ -33,7 +33,7 @@ let trace: OverlayTrace = {
 const listeners: Array<(t: OverlayTrace) => void> = [];
 
 /**
- * Get the current overlay trace.  Returns a shallow copy to prevent
+ * Get the current overlay trace. Returns a shallow copy to prevent
  * accidental mutation.
  */
 export function getOverlayTrace(): OverlayTrace {
@@ -41,8 +41,8 @@ export function getOverlayTrace(): OverlayTrace {
 }
 
 /**
- * Set the current overlay trace.  Notifies all subscribers with the
- * updated trace.  Partial updates are merged into the existing trace.
+ * Set the current overlay trace. Notifies all subscribers with the
+ * updated trace. Partial updates are merged into the existing trace.
  *
  * @param newTrace Partial or full trace to assign.
  */
@@ -58,9 +58,9 @@ export function setOverlayTrace(newTrace: Partial<OverlayTrace>): void {
 }
 
 /**
- * Subscribe to trace updates.  The callback will be invoked
+ * Subscribe to trace updates. The callback will be invoked
  * immediately with the current trace and subsequently whenever
- * setOverlayTrace is called.  Returns an unsubscribe function.
+ * setOverlayTrace is called. Returns an unsubscribe function.
  */
 export function subscribeOverlayTrace(fn: (t: OverlayTrace) => void): () => void {
   listeners.push(fn);
@@ -73,7 +73,7 @@ export function subscribeOverlayTrace(fn: (t: OverlayTrace) => void): () => void
 }
 
 /**
- * Reset the overlay trace to its initial state.  Intended for tests.
+ * Reset the overlay trace to its initial state. Intended for tests.
  */
 export function resetOverlayTrace(): void {
   trace = {
