@@ -9,33 +9,33 @@
 // useDecisionOverlay, and a dev-only SnapshotInspector helps verify
 // snapshot logging.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Api } from "../lib/api";
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Api } from '../lib/api';
 import type {
   AllowedContext,
   HandState,
   Actor,
   AllowedAction,
-} from "../lib/types/hand";
-import { CoachPanel } from "../components/CoachPanel";
-import { WaitingOverlay } from "../components/WaitingOverlay";
-import { BoardRow as CommunityBoardRow } from "../components/common/Cards";
-import { globalOverlayGate } from "../utils/overlayFlags";
-import { useHelpOverlayToggle } from "../hooks/useHelpOverlayToggle";
-import { HelpOverlayToggle } from "../components/HelpOverlayToggle";
-import { DecisionHelpOverlay } from "../components/DecisionHelpOverlay";
-import type { DecisionContext } from "../types/decision";
-import { useDecisionOverlay } from "../hooks/useDecisionOverlay";
-import { mapCoachToAction } from "../utils/coachMapping";
+} from '../lib/types/hand';
+import { CoachPanel } from '../components/CoachPanel';
+import { WaitingOverlay } from '../components/WaitingOverlay';
+import { BoardRow as CommunityBoardRow } from '../components/common/Cards';
+import { globalOverlayGate } from '../utils/overlayFlags';
+import { useHelpOverlayToggle } from '../hooks/useHelpOverlayToggle';
+import { HelpOverlayToggle } from '../components/HelpOverlayToggle';
+import { DecisionHelpOverlay } from '../components/DecisionHelpOverlay';
+import type { DecisionContext } from '../types/decision';
+import { useDecisionOverlay } from '../hooks/useDecisionOverlay';
+import { mapCoachToAction } from '../utils/coachMapping';
 // Dev inspector for snapshot testing (Phase 4). Loaded only when dev tools are enabled.
-import SnapshotInspector from "../dev/SnapshotInspector";
+import SnapshotInspector from '../dev/SnapshotInspector';
 
 // Gate dev-only /api/hand/auto. Default is false unless explicitly enabled.
-const AUTO_HAND_ENABLED = ["1", "true", "yes", "on"].includes(
-  String(process.env.NEXT_PUBLIC_ENABLE_HAND_AUTO || "").toLowerCase()
+const AUTO_HAND_ENABLED = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.NEXT_PUBLIC_ENABLE_HAND_AUTO || '').toLowerCase()
 );
-const DEV_TOOLS = ["1", "true", "yes", "on"].includes(
-  String(process.env.NEXT_PUBLIC_DEV_TOOLS || "").toLowerCase()
+const DEV_TOOLS = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.NEXT_PUBLIC_DEV_TOOLS || '').toLowerCase()
 );
 
 const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
@@ -47,25 +47,25 @@ export default function TablePage() {
   const [err, setErr] = useState<string | null>(null);
   const [botsAdvancing, setBotsAdvancing] = useState(false);
 
-  const COACH_TOGGLE_KEY = "coachEnabled";
-  const HUMAN_SEAT_KEY = "humanSeat";
+  const COACH_TOGGLE_KEY = 'coachEnabled';
+  const HUMAN_SEAT_KEY = 'humanSeat';
 
   const [coachEnabled, setCoachEnabled] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
+    if (typeof window === 'undefined') return false;
     const raw = localStorage.getItem(COACH_TOGGLE_KEY);
-    return raw === "1";
+    return raw === '1';
   });
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      localStorage.setItem(COACH_TOGGLE_KEY, coachEnabled ? "1" : "0");
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(COACH_TOGGLE_KEY, coachEnabled ? '1' : '0');
     }
   }, [coachEnabled]);
 
   const [handId, setHandId] = useState<string | null>(null);
 
   const humanSeat =
-    typeof window !== "undefined"
-      ? parseInt(localStorage.getItem(HUMAN_SEAT_KEY) || "0", 10)
+    typeof window !== 'undefined'
+      ? parseInt(localStorage.getItem(HUMAN_SEAT_KEY) || '0', 10)
       : 0;
 
   const bb = useMemo(() => state?.table?.bb ?? 100, [state]);
@@ -82,7 +82,7 @@ export default function TablePage() {
   // Prefer state.allowed/to_act if present; fallback to legacy actor
   const allowedCtx: AllowedContext | null = useMemo(() => {
     if (!state) return null;
-    if (state.allowed && typeof state.allowed.to_call === "number")
+    if (state.allowed && typeof state.allowed.to_call === 'number')
       return state.allowed;
     if (actor) {
       return {
@@ -156,7 +156,7 @@ export default function TablePage() {
         if (sid) setHandId(String(sid));
 
         const nextSeat = snap?.state?.to_act ?? snap?.actor?.seat ?? null;
-        const finished = snap?.state?.street === "showdown";
+        const finished = snap?.state?.street === 'showdown';
         const heroTurn = nextSeat === humanSeat;
 
         if (!finished && !heroTurn && !bannerSet) {
@@ -213,21 +213,21 @@ export default function TablePage() {
   const jamTotal = useMemo(
     () =>
       typedActions.find(
-        (a) => a.type === "jam" && typeof a.amount === "number"
+        (a) => a.type === 'jam' && typeof a.amount === 'number'
       )?.amount,
     [typedActions]
   );
   function jamAmount(): number {
-    return typeof jamTotal === "number" ? jamTotal : 1_000_000_000;
+    return typeof jamTotal === 'number' ? jamTotal : 1_000_000_000;
   }
 
   // Dynamic verb for any sized action
-  const currentSizedVerb = allowedCtx?.to_call === 0 ? "bet" : "raise";
-  const sizedLabel = allowedCtx?.to_call === 0 ? "Bet" : "Raise";
+  const currentSizedVerb = allowedCtx?.to_call === 0 ? 'bet' : 'raise';
+  const sizedLabel = allowedCtx?.to_call === 0 ? 'Bet' : 'Raise';
 
   // Decision idx (best-effort)
   const decisionIdx =
-    typeof (state as any)?.decision_idx === "number"
+    typeof (state as any)?.decision_idx === 'number'
       ? (state as any).decision_idx
       : canAct
       ? 0
@@ -317,22 +317,23 @@ export default function TablePage() {
 
   // Final highlighted action key based on coach bucket and presets.
   const highlightedAction: string | null = useMemo(() => {
-    if (coach.status !== "ok" || !coach.data) return null;
+    if (coach.status !== 'ok' || !coach.data) return null;
     const toCall = allowedCtx?.to_call ?? 0;
     return mapCoachToAction(coach.data.bucket, toCall, sizedLabels);
   }, [coach, allowedCtx, sizedLabels]);
 
   // Log overlay state changes in dev for diagnostics.
   useEffect(() => {
+    if (!DEV_TOOLS) return;
     // eslint-disable-next-line no-console
-    console.debug("[overlay] enabled:", overlayEnabled);
+    console.debug('[overlay] enabled:', overlayEnabled);
   }, [overlayEnabled]);
 
   const coachShouldShow =
     coachEnabled &&
     canAct &&
     state &&
-    state.street !== "preflop" &&
+    state.street !== 'preflop' &&
     decisionIdx !== null;
 
   // Dev util: copy raw state
@@ -355,13 +356,13 @@ export default function TablePage() {
     riverArr.length > 0 ? riverArr[riverArr.length - 1] : null;
 
   // Allowed buckets helpers (use existing allowedBuckets/sizedLabels).
-  const showCheck = allowedBuckets.includes("check");
-  const showCall = allowedBuckets.includes("call");
+  const showCheck = allowedBuckets.includes('check');
+  const showCall = allowedBuckets.includes('call');
   // Defensive: if server omitted "fold" but to_call > 0, still show Fold.
-  const foldListed = allowedBuckets.includes("fold");
+  const foldListed = allowedBuckets.includes('fold');
   const showFold =
     foldListed || (!foldListed && (allowedCtx?.to_call ?? 0) > 0);
-  const showJam = allowedBuckets.includes("jam");
+  const showJam = allowedBuckets.includes('jam');
 
   return (
     <main className="min-h-screen p-6 bg-gray-50 relative">
@@ -410,7 +411,7 @@ export default function TablePage() {
               className="rounded-xl bg-black text-white px-4 py-2 disabled:opacity-50"
               disabled={loading}
             >
-              {loading ? "Working…" : "Start Hand"}
+              {loading ? 'Working…' : 'Start Hand'}
             </button>
             <button
               onClick={refresh}
@@ -458,7 +459,7 @@ export default function TablePage() {
                 {handId && (
                   <div className="text-gray-500 text-xs">Hand: {handId}</div>
                 )}
-                {typeof decisionIdx === "number" && (
+                {typeof decisionIdx === 'number' && (
                   <div className="text-gray-500 text-xs">
                     Decision: {decisionIdx}
                   </div>
@@ -475,12 +476,12 @@ export default function TablePage() {
                     key={p.seat}
                     className={`rounded-xl border p-3 ${
                       p.seat === humanSeat
-                        ? "border-black"
-                        : "border-gray-200"
+                        ? 'border-black'
+                        : 'border-gray-200'
                     }`}
                   >
                     <div className="text-sm font-medium">
-                      Seat {p.seat} {p.seat === humanSeat && "(You)"}
+                      Seat {p.seat} {p.seat === humanSeat && '(You)'}
                     </div>
                     <div className="text-sm text-gray-700">
                       Hand: {p.hole_cards[0]} {p.hole_cards[1]}
@@ -515,7 +516,7 @@ export default function TablePage() {
             <div className="text-sm text-gray-700">
               <div>To call: {allowedCtx.to_call}</div>
               <div className="text-xs text-gray-500">
-                Allowed: {allowedBuckets.join(", ")}
+                Allowed: {allowedBuckets.join(', ')}
               </div>
             </div>
 
@@ -523,11 +524,11 @@ export default function TablePage() {
               {/* Fold */}
               {showFold && (
                 <button
-                  onClick={() => postAction("fold")}
+                  onClick={() => postAction('fold')}
                   className={`rounded-xl border px-3 py-2 ${
-                    highlightedAction === "fold"
-                      ? "ring-2 ring-blue-500 ring-offset-2 ring-offset-white"
-                      : ""
+                    highlightedAction === 'fold'
+                      ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white'
+                      : ''
                   }`}
                   disabled={loading}
                 >
@@ -538,11 +539,11 @@ export default function TablePage() {
               {/* Check */}
               {showCheck && (
                 <button
-                  onClick={() => postAction("check")}
+                  onClick={() => postAction('check')}
                   className={`rounded-xl border px-3 py-2 ${
-                    highlightedAction === "check"
-                      ? "ring-2 ring-blue-500 ring-offset-2 ring-offset-white"
-                      : ""
+                    highlightedAction === 'check'
+                      ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white'
+                      : ''
                   }`}
                   disabled={loading}
                 >
@@ -553,11 +554,11 @@ export default function TablePage() {
               {/* Call */}
               {showCall && (
                 <button
-                  onClick={() => postAction("call")}
+                  onClick={() => postAction('call')}
                   className={`rounded-xl border px-3 py-2 ${
-                    highlightedAction === "call"
-                      ? "ring-2 ring-blue-500 ring-offset-2 ring-offset-white"
-                      : ""
+                    highlightedAction === 'call'
+                      ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white'
+                      : ''
                   }`}
                   disabled={loading}
                 >
@@ -575,8 +576,8 @@ export default function TablePage() {
                     onClick={() => postAction(currentSizedVerb, amt)}
                     className={`rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50 ${
                       isHighlighted
-                        ? "ring-2 ring-blue-500 ring-offset-2 ring-offset-white"
-                        : ""
+                        ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white'
+                        : ''
                     }`}
                     disabled={loading}
                     title={`Total ${amt}`}
@@ -591,9 +592,9 @@ export default function TablePage() {
                 <button
                   onClick={() => postAction(currentSizedVerb, jamAmount())}
                   className={`rounded-xl bg-red-600 text-white px-3 py-2 disabled:opacity-50 ${
-                    highlightedAction === "jam"
-                      ? "ring-2 ring-blue-500 ring-offset-2 ring-offset-white"
-                      : ""
+                    highlightedAction === 'jam'
+                      ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white'
+                      : ''
                   }`}
                   disabled={loading}
                 >
@@ -641,10 +642,10 @@ function CustomSized({
   onSubmit,
 }: {
   disabled?: boolean;
-  verb: "bet" | "raise";
+  verb: 'bet' | 'raise';
   onSubmit: (amount: number) => void;
 }) {
-  const [val, setVal] = useState<string>("");
+  const [val, setVal] = useState<string>('');
 
   return (
     <form
@@ -668,7 +669,7 @@ function CustomSized({
         className="rounded-xl border px-3 py-2 disabled:opacity-50"
         disabled={disabled}
       >
-        {verb === "bet" ? "Bet" : "Raise"} (custom)
+        {verb === 'bet' ? 'Bet' : 'Raise'} (custom)
       </button>
     </form>
   );

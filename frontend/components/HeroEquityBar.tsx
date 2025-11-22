@@ -4,8 +4,9 @@
 // Displays a horizontal bar where the blue portion corresponds to the
 // hero's equity and the grey portion corresponds to the remainder.
 // The component is intentionally minimal to avoid cluttering the
-// guidance overlay.  It should be hidden on very small screens to
-// preserve space.
+// guidance overlay. It can be driven either by the standalone equity
+// endpoint (EquityResponse.players[hero].equity) or by the unified
+// AdviceV1 payload (advice.equity.hero).
 
 import React from 'react';
 
