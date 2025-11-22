@@ -7,6 +7,7 @@ These tests focus on:
     * COACH_ENABLED gating.
     * Preflop path wiring (wraps preflop advisor into AdviceV1).
     * Postflop HU wiring (delegates to postflop coach v1).
+    * Basic logging hook for unified coach advice snapshots.
 
 The exact internals of preflop/postflop coaches are tested elsewhere; here
 we mostly verify that /api/coach/advice returns a well-formed AdviceV1 and
@@ -111,7 +112,9 @@ def test_preflop_unsupported_when_service_missing(
     assert body["meta"]["hero_seat"] == 0
 
 
-def test_postflop_delegates_to_postflop_coach(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_postflop_delegates_to_postflop_coach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """
     For HU flop/turn/river, /coach/advice should delegate to the postflop
     coach and surface its AdviceV1 payload unchanged (except for JSON
@@ -141,6 +144,7 @@ def test_postflop_delegates_to_postflop_coach(monkeypatch: pytest.MonkeyPatch) -
 
     # Prepare a stub AdviceV1 that the postflop coach will "return".
     stub_advice = AdviceV1(
+        version=1,
         status="ok",
         meta=AdviceMeta(
             street="flop",
@@ -177,3 +181,88 @@ def test_postflop_delegates_to_postflop_coach(monkeypatch: pytest.MonkeyPatch) -
     assert body["meta"]["street"] == "flop"
     assert body["recommendation"]["bucket"] == "call"
     assert body["rationale"] == "stub postflop advice"
+
+
+def test_preflop_logs_unified_advice_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Successful preflop advice should be logged via log_coach_advice with the
+    same AdviceV1 payload that is returned to the client.
+    """
+    monkeypatch.setenv("COACH_ENABLED", "true")
+
+    # Preflop decision context.
+    pre_ctx = _make_ctx(street="preflop")
+
+    def fake_build_decision_context(
+        hand_id: str, idx: int
+    ) -> DecisionContext:  # noqa: ANN001
+        assert hand_id == "H1"
+        assert idx == 0
+        return pre_ctx
+
+    monkeypatch.setattr(
+        "backend.coach.decision_context.build_decision_context",
+        fake_build_decision_context,
+        raising=True,
+    )
+
+    # Stub preflop service + advice.
+    class StubPreflopAdvice:
+        def __init__(self) -> None:
+            self.source = "chart"
+            self.bucket = "2.5x"
+            self.rationale = "stub preflop advice"
+            self.strategy_bar = {"2.5x": 1.0}
+
+    class StubPreflopService:
+        has_charts = True
+
+        def get_advice(
+            self, hand_id: str, idx: int
+        ) -> StubPreflopAdvice:  # noqa: ANN001
+            assert hand_id == "H1"
+            assert idx == 0
+            return StubPreflopAdvice()
+
+    monkeypatch.setattr(
+        "backend.api.coach._get_preflop_service",
+        lambda: StubPreflopService(),
+        raising=True,
+    )
+
+    # Capture log_coach_advice calls.
+    captured: Dict[str, Any] = {}
+
+    def fake_log_coach_advice(
+        hand_id: str, idx: int, advice: Dict[str, Any]
+    ) -> None:  # noqa: ANN001
+        captured["hand_id"] = hand_id
+        captured["idx"] = idx
+        captured["advice"] = advice
+
+    monkeypatch.setattr(
+        "backend.api.coach.log_coach_advice",
+        fake_log_coach_advice,
+        raising=True,
+    )
+
+    client = TestClient(app)
+    r = client.get("/api/coach/advice", params={"hand_id": "H1", "idx": 0})
+    assert r.status_code == 200
+
+    body = r.json()
+    # Sanity-check AdviceV1 shape.
+    assert body["status"] == "ok"
+    assert body["meta"]["street"] == "preflop"
+    assert body["meta"]["hero_seat"] == 0
+    assert body["recommendation"]["bucket"] == "2.5x"
+    assert body["rationale"] == "stub preflop advice"
+
+    # Logging side effects: we logged the same payload we returned.
+    assert captured["hand_id"] == "H1"
+    assert captured["idx"] == 0
+    assert isinstance(captured["advice"], dict)
+    # Logged advice should match the JSON payload (unified snapshot).
+    assert captured["advice"] == body

@@ -8,12 +8,16 @@
 // decision and to fetch the exported snapshots. It is gated by
 // NEXT_PUBLIC_DEV_TOOLS and should not appear in production builds.
 //
-// Forward-compatibility note:
-// ---------------------------
-// In later milestones the backend will attach a unified coach_advice
-// snapshot (AdviceV1) alongside the existing preflop_advice and
-// equity_snapshot fields. This inspector is prepared to detect that
-// optional coach_advice field when present, without depending on it.
+// Snapshot types note:
+// --------------------
+// The backend now attaches three optional per-action snapshot fields
+// in the JSON export:
+//   - preflop_advice  (legacy preflop-only advice)
+//   - coach_advice    (unified AdviceV1 from /api/coach/advice, all streets)
+//   - equity_snapshot (equity results from /api/equity)
+// This inspector simply detects whether those fields are present for
+// the current (hand_id, idx) pair and surfaces booleans; it does not
+// depend on their internal structure.
 
 import { useEffect, useState } from 'react';
 import { getOverlayTrace, subscribeOverlayTrace } from '../store/overlayDebugStore';
@@ -93,14 +97,16 @@ export default function SnapshotInspector() {
     | null = null;
 
   if (exportRes && typeof trace.idx === 'number') {
-    const decisions: any = (exportRes as any).decisions;
-    if (Array.isArray(decisions)) {
-      const d: any = decisions.find((x: any) => x && x.idx === trace.idx);
+    // Prefer the canonical "actions" array, but tolerate older "decisions"
+    // naming if present for transitional backends.
+    const actions: any =
+      (exportRes as any).actions ?? (exportRes as any).decisions;
+
+    if (Array.isArray(actions)) {
+      const d: any = actions.find((x: any) => x && x.idx === trace.idx);
       if (d) {
         decisionSnapshot = {
           hasPreflopAdvice: typeof d.preflop_advice !== 'undefined',
-          // Forward-compatible: will light up once backend starts logging
-          // unified AdviceV1 under coach_advice.
           hasCoachAdvice: typeof d.coach_advice !== 'undefined',
           hasEquity: typeof d.equity_snapshot !== 'undefined',
         };

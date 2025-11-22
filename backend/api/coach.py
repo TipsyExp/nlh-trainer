@@ -32,7 +32,7 @@ from backend.schemas.advice import (
 )
 from backend.config import COACH_ENABLED as CONFIG_COACH_ENABLED
 from backend.services.equity.service import EquityService
-from backend.logger import log_preflop_advice
+from backend.logger import log_preflop_advice, log_coach_advice
 
 router = APIRouter(tags=["coach"])
 
@@ -187,6 +187,24 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
           - Returns 400 with status="not_found" for hand/index mismatches.
           - Returns 500 with status="error" for unexpected failures.
     """
+
+    def _respond_with_logging(advice: AdviceV1, status_code: int) -> JSONResponse:
+        """
+        Wrap AdviceV1 into a JSONResponse and best-effort log it as a
+        coach_advice snapshot. Logging is gated by LOG_COACH_ADVICE inside
+        backend.logger and never affects the HTTP response.
+        """
+        try:
+            log_coach_advice(
+                hand_id=str(hand_id),
+                idx=int(idx),
+                advice=advice.model_dump(),
+            )
+        except Exception:
+            # Logging must never affect primary control flow.
+            pass
+        return JSONResponse(advice.model_dump(), status_code=status_code)
+
     if not _coach_enabled():
         advice = AdviceV1(
             version=1,
@@ -202,7 +220,7 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
             thresholds=None,
             rationale="Coach is disabled by configuration.",
         )
-        return JSONResponse(advice.model_dump(), status_code=501)
+        return _respond_with_logging(advice, status_code=501)
 
     # Build a shared decision context. Errors here are treated as input
     # / state issues rather than 500s.
@@ -223,7 +241,7 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
             thresholds=None,
             rationale=f"Decision context not found: {e}",
         )
-        return JSONResponse(advice.model_dump(), status_code=400)
+        return _respond_with_logging(advice, status_code=400)
     except RuntimeError as e:
         advice = AdviceV1(
             version=1,
@@ -239,7 +257,7 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
             thresholds=None,
             rationale=f"No active hand in progress: {e}",
         )
-        return JSONResponse(advice.model_dump(), status_code=400)
+        return _respond_with_logging(advice, status_code=400)
     except Exception as e:
         advice = AdviceV1(
             version=1,
@@ -255,7 +273,7 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
             thresholds=None,
             rationale=f"Failed to build decision context: {e}",
         )
-        return JSONResponse(advice.model_dump(), status_code=500)
+        return _respond_with_logging(advice, status_code=500)
 
     street = ctx.street.lower()
 
@@ -277,7 +295,7 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
                 thresholds=None,
                 rationale="Preflop coach charts are not configured.",
             )
-            return JSONResponse(advice.model_dump(), status_code=200)
+            return _respond_with_logging(advice, status_code=200)
 
         try:
             pre = svc.get_advice(hand_id=hand_id, idx=idx)
@@ -296,7 +314,7 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
                 thresholds=None,
                 rationale=str(e),
             )
-            return JSONResponse(advice.model_dump(), status_code=200)
+            return _respond_with_logging(advice, status_code=200)
         except ValueError as e:
             advice = AdviceV1(
                 version=1,
@@ -312,7 +330,7 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
                 thresholds=None,
                 rationale=f"Preflop coach input error: {e}",
             )
-            return JSONResponse(advice.model_dump(), status_code=200)
+            return _respond_with_logging(advice, status_code=200)
         except Exception as e:
             advice = AdviceV1(
                 version=1,
@@ -328,7 +346,7 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
                 thresholds=None,
                 rationale=f"Preflop coach failure: {e}",
             )
-            return JSONResponse(advice.model_dump(), status_code=200)
+            return _respond_with_logging(advice, status_code=200)
 
         strategy_bar_list = [
             StrategyPart(action=action, weight=float(weight))
@@ -352,14 +370,14 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
             thresholds=None,
             rationale=pre.rationale,
         )
-        return JSONResponse(advice.model_dump(), status_code=200)
+        return _respond_with_logging(advice, status_code=200)
 
     # Postflop (HU + multiway): delegate to postflop coach v1.
     if street in {"flop", "turn", "river"}:
         advice = _postflop_service.get_postflop_advice(ctx)
         # Postflop coach v1 always returns a well-formed AdviceV1. The status
         # field indicates whether the spot was actually supported.
-        return JSONResponse(advice.model_dump(), status_code=200)
+        return _respond_with_logging(advice, status_code=200)
 
     # Everything else (unknown street, showdown, etc.) is currently unsupported.
     advice = AdviceV1(
@@ -376,7 +394,7 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
         thresholds=None,
         rationale="Coach does not yet support this spot.",
     )
-    return JSONResponse(advice.model_dump(), status_code=200)
+    return _respond_with_logging(advice, status_code=200)
 
 
 # -------------------------

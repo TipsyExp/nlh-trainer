@@ -1,4 +1,3 @@
-# docs/RUNBOOK.md
 # Runbook
 
 This runbook shows how to run and interact with the trainer backend. It reflects
@@ -23,8 +22,8 @@ python -m pip install -r backend/requirements-optional.txt
 # Run the API (hot reload for dev)
 uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 Configure behaviour via environment variables (recommended in a .env). See
-docs/CONFIGURATION.md
-
+docs/CONFIGURATION.md.
+________________________________________
 2) Create a session
 Use /api/session to define table params (seats, blinds, stacks, bot mode/profile, etc.).
 curl -X POST http://127.0.0.1:8000/api/session \
@@ -75,7 +74,7 @@ Include X-Request-ID in API calls to correlate client requests with engine
 transitions.
 ________________________________________
 7) Equity & coaching
-Equity service
+7.1 Equity service
 Computes exact or Monte Carlo (MC) equities for hands and, where supported,
 ranges/multiway. The same service is used by:
 •	POST /api/equity
@@ -87,6 +86,7 @@ Backends:
 •	Last resort: PokerKit (pure Python; hands-focused)
 Backends are auto-selected via EQUITY_BACKEND_POLICY=auto
 (ompeval → eval7 → pokerkit). See EQUITY.md for details.
+Example call:
 curl -X POST http://127.0.0.1:8000/api/equity \
   -H "Content-Type: application/json" \
   -d '{
@@ -135,19 +135,16 @@ make equity HANDS='AsKd,QcJh' ITERS=20000
 python -m backend.scripts.benchmark_equity --out bench_equity.csv
 # or
 make bench-equity OUT=bench_equity.csv
-Open the CSV and inspect columns like backend, policy, board_len, iters,
-elapsed_ms, evals_per_sec.
-________________________________________
-Coaching via /api/coach/advice (preflop + postflop)
-The unified coach endpoint is GET /api/coach/advice. It returns a single
-“Advice” object (AdviceV1) for any decision (preflop → river), which the
-frontend overlay uses directly.
-For payload details, see
-COACH-ADVICE-PAYLOAD.md
-Coaching is globally gated by COACH_ENABLED. Postflop behaviour is further
-gated by the POSTFLOP_COACH_* variables.
-7.1 Enable coach
-In .env:
+# Quick CLI
+python -m backend.scripts.equity_cli --hand AsKd --hand QcJh --iters 20000
+
+# or via Makefile
+make equity HANDS='AsKd,QcJh' ITERS=20000
+
+# Tiny benchmark matrix (CSV)
+python -m backend.scripts.benchmark_equity --out bench_equity.csv
+# or
+make bench-equity OUT=bench_equity.csv
 COACH_ENABLED=true
 PREFLOP_CHART_PATHS=devdata/charts/hu_example.json
 PREFLOP_EQ_DEFEND_THRESH=0.48
@@ -158,9 +155,8 @@ POSTFLOP_COACH_ENABLED=true
 POSTFLOP_COACH_ITERS=20000
 POSTFLOP_COACH_PROFILE=TAG
 # POSTFLOP_COACH_MULTIWAY_ENABLED=true  # once you trust multiway
-
 Restart the backend.
-7.2 Query advice for a decision
+7.2.2 Query advice for a decision
 Use a real hand_id and idx from your session (e.g. from /api/export/hand):
 curl http://127.0.0.1:8000/api/coach/advice?hand_id=H1&idx=0
 Example preflop response (truncated):
@@ -222,9 +218,10 @@ Status meanings (high level):
 •	status: "ok" – Advice is actionable (bucket + strategy bar present).
 •	status: "disabled" – Coaching globally off (COACH_ENABLED=false).
 •	status: "unsupported" – Node not supported yet (e.g. multiway with coach disabled, exotic states).
-•	status: "timeout" – Equity/solver exceeded time budget; coach returned a non-blocking result.
+•	status: "timeout" – Reserved for strict time-budget cases; coach should return a non-blocking result.
+•	status: "not_found" – Decision context could not be resolved (hand_id / idx mismatch).
 •	status: "error" – Internal error; check logs.
-7.3 Legacy preflop endpoint (for debugging)
+7.2.3 Legacy preflop endpoint (for debugging)
 GET /api/coach/preflop still exists and returns the older preflop-only payload:
 curl http://127.0.0.1:8000/api/coach/preflop?hand_id=H1&idx=0
 This is primarily for tooling / regression tests. New UI and exports should
@@ -252,16 +249,19 @@ curl -X POST "http://127.0.0.1:8000/api/equity?hand_id=H1&idx=0" \
     "dead":[],
     "iters":20000
   }'
+
 Advice snapshot (unified):
 curl http://127.0.0.1:8000/api/coach/advice?hand_id=H1&idx=0
 (Optional) legacy preflop snapshot for comparison:
 curl http://127.0.0.1:8000/api/coach/preflop?hand_id=H1&idx=0
+
 8.3 Inspect exports
 # Hand
 curl "http://127.0.0.1:8000/api/export/hand/H1.json" | jq .
 
 # Session
 curl "http://127.0.0.1:8000/api/export/session/1.json" | jq .
+
 Exported actions[*] may include:
 {
   "idx": 0,
@@ -316,9 +316,8 @@ Notes:
 o	If logging is disabled, equity_snapshot, preflop_advice, and
 coach_advice are simply omitted.
 •	CSV exports do not include snapshot columns; JSON is the source of truth.
-________________________________________
 9) Troubleshooting
-Equity
+9.1 Equity
 Symptom: backend: "pokerkit" even though you expect OMPEval/Eval7
 •	Check EQUITY_BACKEND_POLICY:
 o	auto tries ompeval → eval7 → pokerkit.
@@ -340,32 +339,32 @@ Symptom: Results are noisy / run-to-run different
 o	Increase EQUITY_ITERS or request-level iters.
 o	Use backend-specific seeding if available.
 o	Use exact=true where supported (small trees).
-Coach / advice
+9.2 Coach / advice
 Symptom: GET /api/coach/advice returns HTTP 501 or status: "disabled"
 •	Check COACH_ENABLED (must be true for any advice).
 •	Confirm that:
-o	Charts exist (PREFLOP_CHART_PATHS) for chart-based preflop,
-o	Or that postflop coach is allowed to fall back gracefully.
+o	Charts exist (PREFLOP_CHART_PATHS) for chart-based preflop, and/or
+o	Postflop coach is allowed to run.
 Symptom: status: "unsupported" for certain nodes
-•	Common causes:
-o	Postflop coach disabled (POSTFLOP_COACH_ENABLED=false) → only preflop
+Common causes:
+•	Postflop coach disabled (POSTFLOP_COACH_ENABLED=false) → only preflop
 supported.
-o	Multiway coach disabled (POSTFLOP_COACH_MULTIWAY_ENABLED=false) but
+•	Multiway coach disabled (POSTFLOP_COACH_MULTIWAY_ENABLED=false) but
 n_players > 2.
-o	No multiway-capable equity backend (e.g. OMPEval not built) under current
+•	No multiway-capable equity backend (e.g. OMPEval not built) under current
 EQUITY_BACKEND_POLICY.
-•	Check:
-o	POSTFLOP_COACH_ENABLED
-o	POSTFLOP_COACH_MULTIWAY_ENABLED
-o	Backends / configuration in EQUITY_BACKEND_POLICY.
+Check:
+•	POSTFLOP_COACH_ENABLED
+•	POSTFLOP_COACH_MULTIWAY_ENABLED
+•	Backends / configuration in EQUITY_BACKEND_POLICY.
 Symptom: Preflop advice differs between /api/coach/preflop and /api/coach/advice
 •	/api/coach/advice is the primary route and returns the unified AdviceV1
 payload.
 •	/api/coach/preflop is a legacy helper that should mirror the same logic,
 but small drift may appear if one of them is updated in isolation.
-•	Prefer /api/coach/advice for QA and overlay; treat /preflop as a
+•	Prefer /api/coach/advice for QA and overlay; treat /coach/preflop as a
 compatibility shim.
-Snapshots / exports
+9.3 Snapshots / exports
 Symptom: equity_snapshot / preflop_advice / coach_advice missing in JSON exports
 •	Verify flags:
 o	LOG_EQUITY_SNAPSHOT
@@ -400,6 +399,7 @@ make bench-equity OUT=bench_equity.csv POLICIES='auto,ompeval,eval7'
 
 # Frontend (if present)
 make web
+
 If problems persist:
 1.	Enable ENGINE_DEBUG_HTTP=true.
 2.	Reproduce with a unique X-Request-ID.

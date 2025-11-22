@@ -1,23 +1,26 @@
 // frontend/types/export.ts
 // Types representing the export format returned by the backend snapshot API.
 //
-// Phase 4 introduces snapshot‑aware testing in the frontend.  When the
+// Phase 4/6 introduce snapshot-aware testing in the frontend. When the
 // overlay invokes the coach or equity endpoints with logging enabled,
-// the backend persists snapshots of those calls.  The snapshots can
-// then be retrieved via GET /api/export/hand/{hand_id}.json to verify
+// the backend persists snapshots of those calls. The snapshots can
+// then be retrieved via GET /api/export/hand/{hand_id}.json to verify
 // that advice and equity were captured for a specific decision.
 //
 // This file defines minimal interfaces for the exported hand so that
 // the dev inspector can inspect the presence of advice and equity
-// snapshots without needing to know their full structure.  The actual
-// contents of preflop_advice and equity_snapshot are opaque to the
-// frontend; only the fact that they exist is asserted in tests.
+// snapshots without needing to know their full structure. The actual
+// contents of preflop_advice, coach_advice and equity_snapshot are
+// opaque to the frontend; only the fact that they exist is asserted
+// in tests and dev tools.
 
 export interface ExportDecision {
-  /** Zero‑based decision index in the hand. */
+  /** Zero-based decision index in the hand. */
   idx: number;
-  /** Optional snapshot of preflop advice returned by the coach. */
+  /** Optional snapshot of legacy preflop advice returned by /api/coach/preflop. */
   preflop_advice?: unknown;
+  /** Optional snapshot of unified coach advice (AdviceV1) returned by /api/coach/advice. */
+  coach_advice?: unknown;
   /** Optional snapshot of equity returned by the equity service. */
   equity_snapshot?: unknown;
 }

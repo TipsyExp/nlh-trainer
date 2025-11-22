@@ -5,8 +5,7 @@ contract has been updated to reflect recent behavioural changes, including
 total-amount semantics for bet sizing, clearer bot orchestration, unified
 gating via environment variables, and optional equity / coaching helpers.
 
-For the *universal* coaching payload shape (target), see
-`COACH-ADVICE-PAYLOAD.md`.
+For the *universal* coaching payload shape, see `COACH-ADVICE-PAYLOAD.md`.
 
 ---
 
@@ -25,33 +24,7 @@ legal bucket.
   "action": "bet",
   "amount": 320
 }
-# API Contract
-
-This document describes the HTTP API exposed by the trainer backend. The
-contract has been updated to reflect recent behavioural changes, including
-total-amount semantics for bet sizing, clearer bot orchestration, unified
-gating via environment variables, and optional equity / coaching helpers.
-
-For the *universal* coaching payload shape (target), see
-`COACH-ADVICE-PAYLOAD.md`.
-
----
-
-## POST `/api/hand/action`
-
-Submits an action on behalf of the human player. The request must specify the
-acting seat, the type of action, and—when betting or raising—the **total
-committed amount** (not the delta). Off-tree totals are snapped to the nearest
-legal bucket.
-
-### Request
-
-```json
-{
-  "seat": 0,
-  "action": "bet",
-  "amount": 320
-•	} seat – seat index of the acting player.
+•	seat – seat index of the acting player.
 •	action – one of "fold", "check", "call", "bet", or "raise". When
 to_call is zero (including a true heads-up small blind open preflop), a
 raise is normalised to a "bet".
@@ -165,42 +138,42 @@ When enabled it returns the same structure as a normal action response:
 •	state – post-bot snapshot, after all auto-advanced bot actions.
 ________________________________________
 Conventions & notes (hand endpoints)
-•	Min-raise formula
+Min-raise formula
 The minimum raise total is:
 min_raise_total = current_price + max(bb, last_raise_size)
 •	Attempting to raise below this threshold yields 400 with a descriptive
 message.
-•	Buckets
+Buckets
 Allowed bet sizes are published as human-readable labels:
-o	When to_call is 0 or when opening heads-up as the small blind,
+•	When to_call is 0 or when opening heads-up as the small blind,
 open buckets are ["2.2x","2.5x","3.0x","jam"].
-o	When facing a bet or raise (to_call > 0), raise buckets acquire an
+•	When facing a bet or raise (to_call > 0), raise buckets acquire an
 "R" suffix, for example ["fold","call","2.5xR","3.0xR","jam"].
 All labels refer to total commitment targets; the engine snaps arbitrary
 totals to these buckets.
-•	Snapping
+Snapping
 Requests between buckets are snapped to the nearest bucket. The response
 sets snapped=true when this occurs and reports the snapped committed
 amount.
-•	Snapshots & bots
-o	POST /api/hand/action:
-	Applies only the human action.
-	Returns a state snapshot after the human move, before any further
+Snapshots & bots
+•	POST /api/hand/action:
+o	Applies only the human action.
+o	Returns a state snapshot after the human move, before any further
 bot decisions.
-	bots_applied is always [].
-o	POST /api/hand/auto:
-	Applies one or more bot actions.
-	Returns a state snapshot after those bot actions.
-	bots_applied lists all bot moves applied in that call.
-•	Gating
+o	bots_applied is always [].
+•	POST /api/hand/auto:
+o	Applies one or more bot actions.
+o	Returns a state snapshot after those bot actions.
+o	bots_applied lists all bot moves applied in that call.
+Gating
 HAND_AUTO_ENABLED controls exposure of /api/hand/auto. The helper
 _hand_auto_enabled() also honours a process-local environment override.
-•	Debugging
+Debugging
 When ENGINE_DEBUG_HTTP=true structured debug events are emitted by the
 engine. See debugging docs for details.
 Status codes (hand endpoints)
 Status	When	Example body
-400	Minimum raise total not met / invalid action / wrong seat	{ "detail": "min-raise not met: need ≥ 540, got 500" }
+400	Min raise not met / invalid action / wrong seat	{ "detail": "min-raise not met: need ≥ 540, got 500" }
 422	Validation error (shape/verb)	Pydantic validation message
 501	/api/hand/auto disabled by gating	{ "detail": "hand auto endpoint disabled" }
 Worked example: minimum raise total
@@ -293,8 +266,8 @@ Intended for debugging and benchmarking.
 Errors
 Typical error conditions:
 Status	Condition	Example body
-400	Invalid input (malformed cards, duplicate cards, mixed)	{ "detail": "duplicate cards across players/board/dead" }
-400	Requested mode unsupported by available backend/policy	{ "detail": "no equity backend available for requested mode" }
+400	Invalid input (malformed / duplicate cards, etc)	{ "detail": "duplicate cards across players/board/dead" }
+400	Requested mode unsupported by backend/policy	{ "detail": "no equity backend available for requested mode" }
 Backend selection
 The backend used is selected according to the EQUITY_BACKEND_POLICY
 environment variable:
@@ -308,11 +281,13 @@ See EQUITY.md for full details.
 ________________________________________
 Coaching APIs
 The coaching APIs provide guidance on preflop and postflop decisions.
-•	Long-term, all modern coaching flows use a single, versioned Advice
-payload (AdviceV1) described in COACH-ADVICE-PAYLOAD.md.
-•	The current /api/coach/advice implementation still returns a
-solver-centric payload; AdviceV1 is the target shape.
-GET /api/coach/advice (universal advice, transitional)
+•	All modern coaching flows use a single, versioned Advice payload
+(AdviceV1) described in COACH-ADVICE-PAYLOAD.md.
+•	/api/coach/advice is the universal endpoint that returns AdviceV1
+across all streets.
+•	/api/coach/preflop is a legacy, preflop-only endpoint that returns a
+preflop-specific shape for compatibility.
+GET /api/coach/advice (universal AdviceV1)
 The universal coaching endpoint. Returns coach guidance for a given decision.
 Query parameters
 •	hand_id – required. Identifies the hand for which advice is requested.
@@ -321,38 +296,11 @@ Must correspond to a hand started via /api/hand/start.
 Internally the coach uses these to:
 •	locate the current hand state,
 •	build a shared decision context (street, hero seat, pot, to_call, board, etc.),
-•	route to the appropriate coach (solver-backed postflop, future preflop path, or rule-based stub).
-Current response shape (Task-2 / solver-centric)
-Today, /api/coach/advice returns a solver-centric payload:
-{
-  "recommended_bucket": "2.5xR",
-  "strategy": { "fold": 0.1, "2.5xR": 0.9 },
-  "ev_map": { "fold": 0.0, "2.5xR": 1.23 },
-  "meta": {
-    "status": "ok",
-    "cached": false,
-    "latency_ms": 12.3,
-    "node_key": "aabbcc...ff"
-  }
-}
-•	recommended_bucket – chosen bucket label for the current decision.
-•	strategy – bucket → weight map representing a mixed strategy.
-•	ev_map – optional per-bucket EVs, when available.
-•	meta:
-o	status – "ok" | "disabled" | "unsupported" | "timeout" | "error".
-o	cached – whether the result was served from the solver cache.
-o	latency_ms – wall-clock latency for this advice computation.
-o	node_key – deterministic key for this node (used by the solver cache).
-Status / HTTP mapping (current behaviour):
-•	200 with meta.status = "ok" – actionable solver advice.
-•	501 with meta.status = "disabled" – coach disabled (COACH_ENABLED=false).
-•	501 with meta.status = "unsupported" – spot unsupported (e.g., preflop or multiway in this phase).
-•	504 with meta.status = "timeout" – solver path timed out.
-•	500 with meta.status = "error" – unexpected internal error.
-A separate CoachDisabledError or UnsupportedSpotError inside the solver
-path is mapped into the same meta.status values and HTTP codes.
-Target AdviceV1 shape (future)
-In the unified model, this route will return a single AdviceV1 object:
+•	route to the appropriate coach (preflop advisor, postflop coach, or a safe
+“unsupported/disabled” result).
+Response shape (current, AdviceV1)
+/api/coach/advice returns a single AdviceV1 object. See
+COACH-ADVICE-PAYLOAD.md for full details; a simplified example:
 {
   "version": 1,
   "status": "ok",
@@ -372,44 +320,77 @@ In the unified model, this route will return a single AdviceV1 object:
   "thresholds": null,
   "rationale": "Open 2.5x from BTN per chart."
 }
-Key points (when AdviceV1 is live):
+Key fields:
 •	version – payload version; currently 1.
 •	status – coaching outcome for this decision:
 o	"ok" – advice is actionable.
 o	"disabled" – coach globally off via configuration.
 o	"unsupported" – decision not supported (street, multiway, backend limits, etc.).
-o	"not_found" – hand or decision not found.
-o	"timeout" – solver/equity exceeded configured budget.
+o	"not_found" – hand or decision not found / invalid.
+o	"timeout" – equity/solver exceeded configured budget (if applicable).
 o	"error" – internal error (unexpected).
-•	meta – minimal context (street, number of active players, hero seat, advice source).
-•	recommendation – primary bucket plus strategy bar (action → weight).
-•	equity – optional, filled when the coach used the equity service.
-•	thresholds – optional; e.g. pot odds, SPR.
-•	rationale – human-readable explanation.
-Street- and mode-specific behaviour (target):
-•	Preflop:
-o	Delegates to the preflop advisor.
-o	Wraps its output into AdviceV1 with meta.source = "chart" | "equity" | "rule".
-o	equity and thresholds may be left null initially.
-•	Postflop HU:
-o	Uses an equity- or solver-based postflop coach.
-o	Fills equity and thresholds.pot_odds where possible.
-•	Postflop multiway:
-o	Uses a multiway coach when enabled + supported by equity backends.
-o	Emits per-seat equities in equity.players when available.
-o	Otherwise returns status="unsupported".
-As the implementation moves to AdviceV1, the HTTP model may also converge
-towards “always 200 for normal outcomes, status inside the payload”.
+•	meta – minimal context:
+o	street – "preflop" | "flop" | "turn" | "river" | "showdown" | "unknown".
+o	n_players – number of active players in the pot at this decision.
+o	hero_seat – hero seat index.
+o	source – "chart" | "equity" | "rule" | "mixed" indicating where advice came from.
+•	recommendation – primary bucket plus optional strategy bar:
+o	bucket – recommended action bucket ("fold", "call", "check", "2.5x",
+"2.5xR", "jam", etc.).
+o	strategy_bar – array of { action, weight } pairs (normalized strategy).
+•	equity – optional block filled when the coach used the equity service:
+o	backend, mode, hero, players, vs_field, exact, iters (see payload doc).
+•	thresholds – optional block, e.g. pot_odds, spr.
+•	rationale – human-readable explanation of the recommendation.
+Street- and mode-specific behaviour (current)
+•	Preflop
+o	Delegates to the preflop advisor (PreflopAdvisorService).
+o	Wraps its output into AdviceV1 with:
+	meta.street = "preflop"
+	meta.source ∈ {"chart","equity","rule"}
+o	equity and thresholds may be left null in early phases.
+•	Postflop HU and multiway (flop / turn / river)
+o	Delegates to the postflop coach (equity-based).
+o	Returns a well-formed AdviceV1 with:
+	meta.street ∈ {"flop","turn","river"}
+	meta.n_players reflecting active players at this decision.
+	meta.source = "equity" (for equity-driven paths).
+o	Depending on configuration and backend capabilities:
+	May populate equity.hero, equity.players, and thresholds.pot_odds.
+	May return status = "unsupported" when multiway coaching is disabled
+or no suitable equity backend is available.
+•	Showdown / unknown / unsupported spots
+o	Returns AdviceV1 with:
+	status = "unsupported"
+	meta.street set appropriately
+	recommendation, equity, and thresholds omitted or null
+	rationale describing that the coach does not support this spot.
+HTTP status mapping
+•	200 OK – normal outcomes:
+o	Any AdviceV1.status value other than "disabled":
+	"ok" – actionable advice.
+	"unsupported" – reachable but unsupported spot.
+	"not_found" – invalid hand_id/idx or missing context.
+	"timeout" – timeout in underlying coach/equity logic.
+	"error" – internal error, but still a well-formed advice payload.
+•	501 – coach disabled by configuration:
+o	Returns AdviceV1 with status="disabled" and a rationale.
+•	400 – malformed or unresolved decision context:
+o	Typically status="not_found" with a descriptive rationale.
+•	500 – unexpected failures while constructing context:
+o	status="error" with a brief error description.
+Clients should primarily branch on the payload status and treat HTTP
+status codes as hints for transport-level issues or global gating.
 Logging
 When advice snapshot logging is enabled, successful calls to
 /api/coach/advice may be logged as coach_advice snapshots and surfaced in
-JSON exports (see below). The snapshot shape mirrors whatever the endpoint
-returns:
-•	currently: the solver-centric payload { recommended_bucket, strategy, ev_map, meta };
-•	future unified model: the full AdviceV1 object.
-Snapshot gating for /api/coach/advice is currently handled by internal
-helpers (backend.coach.advice_store and logger configuration). A dedicated
-LOG_COACH_ADVICE environment flag may be introduced in a later milestone.
+JSON exports (see below).
+•	Logging is controlled by LOG_COACH_ADVICE in backend.config.
+•	Snapshots are attached per (hand_id, idx) via backend.logger.log_coach_advice.
+•	The stored JSON blob mirrors the AdviceV1 response for that call.
+The legacy preflop advisor endpoint (/api/coach/preflop) logs its own
+preflop-specific payload under preflop_advice when LOG_PREFLOP_ADVICE
+is enabled.
 ________________________________________
 GET /api/coach/preflop (legacy preflop advisor)
 The preflop advisor provides heads-up preflop guidance using charts plus
@@ -423,7 +404,7 @@ Must correspond to a hand started via /api/hand/start.
 Internally the advisor uses these to:
 •	locate the current hand state,
 •	derive the preflop node (e.g. sb_open, bb_vs_sb_open),
-•	canonicalize the hero hand (e.g. "AJo", "KTs", "JJ").
+•	canonicalise the hero hand (e.g. "AJo", "KTs", "JJ").
 Successful response (200 OK)
 On success the endpoint returns a preflop-only advice object:
 {
@@ -509,9 +490,8 @@ in the export module, but at a high level:
         }
       },
       "coach_advice": {
-        /* shape mirrors /api/coach/advice:
-           - currently: solver payload { recommended_bucket, strategy, ev_map, meta }
-           - future: AdviceV1 payload as defined in COACH-ADVICE-PAYLOAD.md */
+        /* AdviceV1 payload mirroring /api/coach/advice
+           (see COACH-ADVICE-PAYLOAD.md). */
       }
     }
   ]
@@ -525,9 +505,8 @@ o	the corresponding API calls were made with hand_id/idx in scope.
 •	Shapes:
 o	equity_snapshot mirrors the equity API response (possibly trimmed / redacted).
 o	preflop_advice mirrors the legacy preflop API response.
-o	coach_advice mirrors the /api/coach/advice response:
-	solver-centric payload today;
-	AdviceV1 once the unified coach API is wired.
+o	coach_advice mirrors the /api/coach/advice response as an AdviceV1
+object.
 Consumers that want a single all-streets view of advice should prefer
 coach_advice. preflop_advice remains for older tools that only know about
 the legacy preflop endpoint.
@@ -550,7 +529,7 @@ Returns a JSON document describing a session. At a high level:
           "...": "...",
           "equity_snapshot": { /* optional, as above */ },
           "preflop_advice": { /* optional, as above */ },
-          "coach_advice": { /* optional, as above */ }
+          "coach_advice": { /* optional AdviceV1, as above */ }
         }
       ]
     }
@@ -576,55 +555,40 @@ hand_id and idx are logged and attached as equity_snapshot.
 omit or abstract sensitive card/range information in production.
 •	LOG_PREFLOP_ADVICE – when true, successful /api/coach/preflop calls
 are logged and attached as preflop_advice.
-Snapshots for /api/coach/advice are currently controlled by internal coach
-logging helpers (backend.coach.advice_store and logger configuration). A
-dedicated LOG_COACH_ADVICE flag may be added in a future milestone; refer to
-CONFIGURATION.md for the latest configuration surface.
+•	LOG_COACH_ADVICE – when true, successful /api/coach/advice calls
+are logged as coach_advice (AdviceV1) snapshots and surfaced in exports.
 All snapshot fields are optional and backwards-compatible: old exports remain
 valid and consumers should treat missing snapshots as “not logged”.
-
-#### M3 notes: Postflop coach (HU) and AdviceV1
-
-Once the M3 wiring is complete, `/api/coach/advice` will return the unified `AdviceV1` payload (see `COACH-ADVICE-PAYLOAD.md`) for both **preflop** and **postflop** decisions.
-
-**Behaviour overview (target):**
-
-- **Preflop (any supported spot)**
-  - Advice is backed by the preflop advisor (`PreflopAdvisorService`).
-  - Response is an `AdviceV1` object with:
-    - `meta.street = "preflop"`
-    - `meta.source ∈ {"chart","equity","rule"}` depending on how the recommendation was produced.
-  - The legacy `/api/coach/preflop` endpoint is a specialised view over the same underlying logic.
-
-- **Postflop HU (heads-up, flop/turn/river)**
-  - Advice is backed by the **postflop coach** using `DecisionContext` + `EquityService`.
-  - Response is an `AdviceV1` object with:
-    - `meta.street ∈ {"flop","turn","river"}`
-    - `meta.n_players = 2`
-    - `meta.source = "equity"`
-    - `recommendation.bucket` mapped to one of the engine’s allowed buckets (`fold`, `call`, `check`, bet/raise buckets, etc.).
-    - `recommendation.strategy_bar` describing a (usually simple) mixed strategy.
-    - `equity.hero` and `equity.players` filled from the equity engine.
-    - `thresholds.pot_odds` filled when a call/fold decision is being priced.
-
-- **Multiway postflop (3+ players)**
-  - If a multiway-capable backend and coach configuration are available, the route may return full `AdviceV1` with `meta.n_players > 2` and a `players` equity list.
-  - If multiway coaching is not available or disabled, the route should still respond with `200` and:
-    - `status = "unsupported"`
-    - `meta.street` and `meta.n_players` set appropriately
-    - No `recommendation` / `equity` body, or those fields omitted.
-
-**Status semantics (target):**
-
-- `status = "ok"`  
-  Advice is actionable and includes at least `meta`, `recommendation.bucket` and `rationale`. For HU postflop this implies a valid equity computation was completed or a safe fallback rule was applied.
-
-- `status = "unsupported"`  
-  The route is reachable but cannot provide advice for this spot under current configuration (e.g. multiway coach disabled, no suitable equity backend, or spot outside supported scope).
-
-- `status = "disabled"`  
-  Global coach gate disabled (e.g. `COACH_ENABLED=false`). The route may also return HTTP `501` in this case.
-
-- Other statuses (`"timeout"`, `"not_found"`, `"error"`) follow the general `AdviceV1` contract and apply equally to preflop and postflop.
-
-> **Note:** Preflop and postflop routes share the same `AdviceV1` schema; the main differences are in `meta.street`, `meta.source` and which optional blocks (`equity`, `thresholds`) are populated.
+________________________________________
+M3 notes: Postflop coach (HU) and AdviceV1
+Once the M3 wiring is complete, /api/coach/advice returns the unified
+AdviceV1 payload (see COACH-ADVICE-PAYLOAD.md) for both preflop and
+postflop decisions. The implementation may evolve, but the contract
+remains:
+•	Preflop (any supported spot)
+o	Advice is backed by the preflop advisor (PreflopAdvisorService).
+o	Response is an AdviceV1 object with:
+	meta.street = "preflop"
+	meta.source ∈ {"chart","equity","rule"} depending on how the recommendation was produced.
+o	The legacy /api/coach/preflop endpoint is a specialised view over the same underlying logic.
+•	Postflop HU (heads-up, flop/turn/river)
+o	Advice is backed by the postflop coach using DecisionContext + EquityService.
+o	Response is an AdviceV1 object with:
+	meta.street ∈ {"flop","turn","river"}
+	meta.n_players = 2
+	meta.source = "equity"
+	recommendation.bucket mapped to one of the engine’s allowed buckets ("fold", "call", "check", bet/raise buckets, etc.).
+	recommendation.strategy_bar describing a (usually simple) mixed strategy.
+	equity.hero and equity.players filled from the equity engine.
+	thresholds.pot_odds filled when a call/fold decision is being priced.
+•	Multiway postflop (3+ players)
+o	If a multiway-capable backend and coach configuration are available, the route returns full AdviceV1 with meta.n_players > 2 and a players equity list.
+o	If multiway coaching is not available or disabled, the route still responds with 200 and:
+	status = "unsupported"
+	meta.street and meta.n_players set appropriately
+	recommendation / equity omitted or null.
+Status semantics follow the general AdviceV1 contract: "ok",
+"unsupported", "disabled", "not_found", "timeout", "error".
+Preflop and postflop routes share the same AdviceV1 schema; the main
+differences are in meta.street, meta.source and which optional blocks
+(equity, thresholds) are populated.
