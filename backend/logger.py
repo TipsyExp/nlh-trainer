@@ -13,14 +13,16 @@ reinitialization with a specific path, or ``reset_logger()`` to close
 and clear the current instance.
 
 In addition to the bare logger, this module also exposes tiny helpers
-for attaching JSON snapshots (equity / preflop advice) to the per-hand,
-per-decision rows in the log database. These helpers are opt-in and
-controlled via configuration flags in ``backend.config``.
+for attaching JSON snapshots (equity / preflop advice / unified coach
+advice) to the per-hand, per-decision rows in the log database. These
+helpers are opt-in and controlled via configuration flags in
+``backend.config``.
 
-A stub for unified coach advice snapshots (all streets, AdviceV1) is also
-provided via ``log_coach_advice``. It currently behaves as a no-op; later
-tasks will wire it to persist the full AdviceV1 payload, including HU and
-multiway fields such as ``meta.n_players`` and ``equity.players``.
+The unified coach advice snapshots (all streets, AdviceV1) are attached
+via ``log_coach_advice``. When LOG_COACH_ADVICE is true, this helper
+persists the AdviceV1 payload into a ``coach_advice_json`` column on
+the per-decision table. The schema migration for that column is handled
+lazily by this module on first use.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from .config import (
     LOG_EQUITY_SNAPSHOT,
     LOG_EQUITY_SNAPSHOT_REDACT,
     LOG_PREFLOP_ADVICE,
+    LOG_COACH_ADVICE,
 )
 from .database import SQLiteLogger
 
@@ -106,7 +109,12 @@ def _ensure_snapshot_columns(conn: Any) -> None:
         cur = conn.execute(f"PRAGMA table_info({table})")
         cols = [row[1] for row in cur.fetchall()]
 
-        want_cols = ["equity_snapshot_json", "preflop_advice_json"]
+        # JSON blobs attached per decision; columns are added lazily if missing.
+        want_cols = [
+            "equity_snapshot_json",
+            "preflop_advice_json",
+            "coach_advice_json",
+        ]
         for col in want_cols:
             if col not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
@@ -319,7 +327,7 @@ def log_coach_advice(
     advice: Mapping[str, Any],
 ) -> None:
     """
-    Placeholder hook for logging unified coach advice (AdviceV1).
+    Attach a unified coach advice (AdviceV1) JSON blob to the per-decision row.
 
     The ``advice`` mapping is expected to be a serialized AdviceV1 payload,
     which naturally supports both heads-up and multiway decisions via:
@@ -328,14 +336,38 @@ def log_coach_advice(
       * ``equity.players`` – optional per-seat equity records.
       * ``equity.vs_field`` – optional hero-vs-field aggregate.
 
-    Task 3–4 introduce the postflop coach and multiway-aware advice. Actual
-    persistence of this blob into the log database (including schema changes
-    and a dedicated LOG_COACH_ADVICE flag) is deferred to a later task.
-
-    Callers may safely invoke this function; it is currently a no-op.
+    Behaviour:
+      - No-op unless LOG_COACH_ADVICE is true.
+      - Best-effort: any errors (schema mismatch, missing table, etc.) are
+        swallowed.
+      - Callers are responsible for any redaction they require; the payload
+        is stored as provided.
     """
-    # Intentional no-op until coach_advice logging is implemented in Task 6.
-    return
+    if not LOG_COACH_ADVICE:
+        return
+
+    try:
+        logger = get_logger()
+        conn = getattr(logger, "conn", None)
+        if conn is None:
+            return
+
+        _ensure_snapshot_columns(conn)
+        table = _find_snapshot_table(conn)
+        if not table:
+            return
+
+        payload = json.dumps(dict(advice), separators=(",", ":"), sort_keys=True)
+        conn.execute(
+            f"UPDATE {table} "
+            "SET coach_advice_json = ? "
+            "WHERE hand_id = ? AND idx = ?",
+            (payload, hand_id, idx),
+        )
+        conn.commit()
+    except Exception:
+        # Logging must never affect primary control flow.
+        return
 
 
 __all__ = [

@@ -1,10 +1,10 @@
 // frontend/utils/export.ts
 // Thin client for retrieving exported hand snapshots from the backend.
 //
-// Phase 4 adds snapshot‑aware testing by logging coach and equity
-// requests when runtime flags are enabled.  The backend exposes
-// snapshots via GET /api/export/hand/{hand_id}.json.  This helper
-// function wraps that endpoint and returns the parsed JSON.  It uses
+// Phase 4/6 add snapshot-aware testing by logging coach and equity
+// requests when runtime flags are enabled. The backend exposes
+// snapshots via GET /api/export/hand/{hand_id}.json. This helper
+// function wraps that endpoint and returns the parsed JSON. It uses
 // the existing getJson helper from utils/http to ensure consistent
 // timeout and abort semantics.
 
@@ -16,9 +16,10 @@ import type { ExportHand } from '../types/export';
 const DEFAULT_EXPORT_TIMEOUT_MS = 2000;
 
 /**
- * Fetch the exported snapshots for a given hand.  Returns the
- * entire export object which contains a list of decisions.  If the
- * request fails or times out, the promise rejects.  A caller may
+ * Fetch the exported snapshots for a given hand. Returns the
+ * entire export object which contains a list of decisions plus any
+ * attached snapshots (preflop_advice, coach_advice, equity_snapshot).
+ * If the request fails or times out, the promise rejects. A caller may
  * provide an AbortSignal to cancel the request prematurely.
  *
  * @param handId Hand identifier returned by the backend.

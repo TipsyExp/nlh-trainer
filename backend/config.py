@@ -189,6 +189,12 @@ LOG_EQUITY_SNAPSHOT: bool = _env_bool("LOG_EQUITY_SNAPSHOT", "false")
 # specific hand/index may be persisted and surfaced in exports.
 LOG_PREFLOP_ADVICE: bool = _env_bool("LOG_PREFLOP_ADVICE", "false")
 
+# When true, the unified coach advice payload (AdviceV1) returned by
+# /api/coach/advice may be persisted per decision (all streets) and
+# surfaced in exports as coach_advice. This is independent of legacy
+# preflop advice and equity snapshot logging.
+LOG_COACH_ADVICE: bool = _env_bool("LOG_COACH_ADVICE", "false")
+
 # Optional redaction knob for equity snapshots. When true, callers that
 # log equity snapshots should avoid storing raw card/range detail and
 # instead prefer abstracted identifiers (e.g. hand keys, range profile
