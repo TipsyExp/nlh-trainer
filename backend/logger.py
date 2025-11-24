@@ -32,13 +32,19 @@ import os
 import tempfile
 from typing import Any, Mapping, Optional
 
-from .config import (
-    LOG_EQUITY_SNAPSHOT,
-    LOG_EQUITY_SNAPSHOT_REDACT,
-    LOG_PREFLOP_ADVICE,
-    LOG_COACH_ADVICE,
-)
+from . import config as _config
 from .database import SQLiteLogger
+
+# -----------------------------------------------------------------------------
+# Logging flags
+# -----------------------------------------------------------------------------
+# These module-level flags are initialised from backend.config once at import
+# time, but tests are free to override them via monkeypatch.setattr(logger_mod,
+# "LOG_EQUITY_SNAPSHOT", False, ...). All helpers below gate on these values.
+LOG_EQUITY_SNAPSHOT: bool = bool(_config.LOG_EQUITY_SNAPSHOT)
+LOG_EQUITY_SNAPSHOT_REDACT: bool = bool(_config.LOG_EQUITY_SNAPSHOT_REDACT)
+LOG_PREFLOP_ADVICE: bool = bool(_config.LOG_PREFLOP_ADVICE)
+LOG_COACH_ADVICE: bool = bool(_config.LOG_COACH_ADVICE)
 
 _LOGGER: Optional[SQLiteLogger] = None
 _DB_PATH_CACHED: Optional[str] = None
@@ -377,4 +383,8 @@ __all__ = [
     "log_equity_snapshot",
     "log_preflop_advice",
     "log_coach_advice",
+    "LOG_EQUITY_SNAPSHOT",
+    "LOG_EQUITY_SNAPSHOT_REDACT",
+    "LOG_PREFLOP_ADVICE",
+    "LOG_COACH_ADVICE",
 ]

@@ -90,19 +90,34 @@ class Eval7Backend:
         range_specs: List[Optional[Any]] = []
 
         all_fixed = True
+
+        # Board + dead cards are always blocked.
         used_initial: set[str] = set(board_s) | set(dead_s)
+        # Track fixed-hand cards separately to catch collisions early, but do
+        # not add them to used_initial (otherwise they would collide with
+        # themselves in the MC loop).
+        seen_fixed: set[str] = set(used_initial)
 
         for p in players:
             if p.hand is not None and p.range is not None:
                 raise ValueError("player must specify exactly one of hand or range")
+
             if p.hand is not None:
                 c1, c2 = p.hand
                 h = (str(c1), str(c2))
                 if len(set(h)) != 2:
                     raise ValueError("duplicate cards in a player's hand")
+
+                # Reject fixed hands that collide with board/dead or any
+                # previously-seen fixed hand.
+                if h[0] in seen_fixed or h[1] in seen_fixed:
+                    raise ValueError(
+                        "fixed hand collides with board, dead cards, or another hand"
+                    )
+
                 fixed_hands.append(h)
                 range_specs.append(None)
-                used_initial.update(h)
+                seen_fixed.update(h)
             elif p.range:
                 # Parse range (PokerStove-like). "random" -> accept anything.
                 fixed_hands.append(None)

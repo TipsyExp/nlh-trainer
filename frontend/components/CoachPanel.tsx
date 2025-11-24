@@ -3,18 +3,59 @@
 import { useEffect, useMemo, useState } from "react";
 import { Api } from "../lib/api";
 
-type AdviceMeta = {
-  status: "ok" | "unsupported" | "disabled" | "timeout" | "error";
+type AdviceStatus =
+  | "ok"
+  | "unsupported"
+  | "disabled"
+  | "timeout"
+  | "error"
+  | "not_found";
+
+type AdviceMetaLegacy = {
+  // Legacy solver-centric status
+  status?: AdviceStatus;
   cached?: boolean;
   latency_ms?: number;
   node_key?: string | null;
 };
 
+type AdviceMetaV1 = {
+  // AdviceV1 meta fields
+  street?: string;
+  n_players?: number;
+  hero_seat?: number;
+  source?: string;
+  // Optional passthroughs if backend adds them here
+  cached?: boolean;
+  latency_ms?: number;
+};
+
+type AdviceMeta = AdviceMetaLegacy & AdviceMetaV1;
+
+type StrategyBarEntry = {
+  action: string;
+  weight: number;
+};
+
 type AdviceResponse = {
+  // Unified: may be legacy solver payload or AdviceV1
+  version?: number;
+  status?: AdviceStatus;
+  meta: AdviceMeta;
+
+  // Legacy solver-centric fields
   recommended_bucket?: string;
   strategy?: Record<string, number>;
   ev_map?: Record<string, number>;
-  meta: AdviceMeta;
+
+  // AdviceV1 fields
+  recommendation?: {
+    bucket?: string;
+    strategy_bar?: StrategyBarEntry[];
+  };
+  equity?: any;
+  thresholds?: any;
+  rationale?: string;
 };
 
 type DebugEvent = {
@@ -119,13 +160,27 @@ export function CoachPanel({
           setAdvice(null);
           setError(null);
           setIsDisabled(true);
-        } else if (raw.ok && raw.body?.meta?.status === "ok") {
-          setAdvice(raw.body as AdviceResponse);
-          setError(null);
-          setIsDisabled(false);
+        } else if (raw.ok && raw.body) {
+          const body = raw.body as AdviceResponse;
+          // AdviceV1: status is top-level; legacy: status is under meta.status.
+          const bodyStatus: AdviceStatus | undefined =
+            body.status ?? body.meta?.status;
+
+          if (bodyStatus === "ok") {
+            setAdvice(body);
+            setError(null);
+            setIsDisabled(false);
+          } else {
+            const msg =
+              bodyStatus ||
+              (body as any).detail ||
+              (typeof body === "string" ? body : "unavailable");
+            setAdvice(null);
+            setError(String(msg));
+            setIsDisabled(false);
+          }
         } else {
           const msg =
-            raw.body?.meta?.status ||
             raw.body?.detail ||
             (typeof raw.body === "string" ? raw.body : "unavailable");
           setAdvice(null);
@@ -146,10 +201,12 @@ export function CoachPanel({
 
   // Derive the current status for the coach. If the endpoint is disabled,
   // override whatever meta status might be present. Otherwise fall back
-  // to the advice meta status, error state, or enabled flag.
-  const status = isDisabled
+  // to the advice status (AdviceV1), legacy meta.status, error state, or enabled flag.
+  const status: AdviceStatus | "unavailable" = isDisabled
     ? "disabled"
-    : advice?.meta?.status ?? (error ? "error" : enabled ? "ok" : "disabled");
+    : advice?.status ??
+      advice?.meta?.status ??
+      (error ? "error" : enabled ? "ok" : "disabled");
 
   // --- PRE-FLOP BADGE OVERRIDE (minor polish) ---
   // If we're preflop *and* the feature is enabled, show a neutral
@@ -160,14 +217,35 @@ export function CoachPanel({
     | "unsupported"
     | "timeout"
     | "error"
-    | "na_preflop";
+    | "not_found"
+    | "na_preflop"
+    | "unavailable";
   const badgeStatus: BadgeStatus =
     enabled && !isPostflop ? "na_preflop" : (status as BadgeStatus);
   // ----------------------------------------------
 
   const sortedStrategy = useMemo(() => {
-    const s = advice?.strategy || {};
-    return Object.entries(s).sort((a, b) => b[1] - a[1]);
+    if (!advice) return [];
+
+    // Legacy solver payload: strategy is a map action -> weight.
+    if (advice.strategy && typeof advice.strategy === "object") {
+      return Object.entries(advice.strategy).sort((a, b) => b[1] - a[1]);
+    }
+
+    // AdviceV1: recommendation.strategy_bar is an array of { action, weight }.
+    const bar = advice.recommendation?.strategy_bar;
+    if (Array.isArray(bar)) {
+      const strat: Record<string, number> = {};
+      for (const part of bar) {
+        if (!part) continue;
+        const action = String(part.action);
+        const weight = Number(part.weight ?? 0);
+        strat[action] = weight;
+      }
+      return Object.entries(strat).sort((a, b) => b[1] - a[1]);
+    }
+
+    return [];
   }, [advice]);
 
   const Badge = ({ text, color }: { text: string; color: string }) => (
@@ -189,6 +267,10 @@ export function CoachPanel({
       <Badge text="Unsupported" color="bg-yellow-100 text-yellow-800" />
     ) : badgeStatus === "timeout" ? (
       <Badge text="Timeout" color="bg-orange-100 text-orange-800" />
+    ) : badgeStatus === "error" ? (
+      <Badge text="Unavailable" color="bg-red-100 text-red-800" />
+    ) : badgeStatus === "not_found" ? (
+      <Badge text="Not found" color="bg-yellow-100 text-yellow-800" />
     ) : (
       <Badge text="Unavailable" color="bg-red-100 text-red-800" />
     );
@@ -234,7 +316,7 @@ export function CoachPanel({
             <div className="text-sm text-gray-600">No advice: {error}</div>
           )}
 
-          {!loading && advice && status !== "ok" && (
+          {!loading && advice && status !== "ok" && !error && (
             <div className="text-sm text-gray-600">No advice: {status}</div>
           )}
 
@@ -243,7 +325,9 @@ export function CoachPanel({
               <div className="text-sm">
                 <span className="text-gray-500 mr-1">Recommended:</span>
                 <span className="font-medium">
-                  {advice.recommended_bucket}
+                  {advice.recommended_bucket ??
+                    advice.recommendation?.bucket ??
+                    "—"}
                 </span>
                 {typeof advice.meta.latency_ms === "number" && (
                   <span className="text-xs text-gray-400 ml-2">
@@ -310,7 +394,9 @@ export function CoachPanel({
                       className="text-gray-700 underline"
                       onClick={() => {
                         const payload = JSON.stringify(lastEvent, null, 2);
-                        navigator.clipboard?.writeText(payload).catch(() => {});
+                        navigator.clipboard
+                          ?.writeText(payload)
+                          .catch(() => {});
                       }}
                     >
                       Copy last

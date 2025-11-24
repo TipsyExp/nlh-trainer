@@ -15,6 +15,7 @@
     }
   ],
   "hand_id": "H1",
+  "session_id": 1,
   "state": {
     "action_history": [
       {

@@ -11,10 +11,7 @@ from pydantic import BaseModel, Field
 
 from backend.adapters.engines import get_adapter
 from backend.api.session import get_session_state
-from backend.api.hand import (
-    _auto_advance_bots,
-    _to_public_state,
-)
+from backend.api.hand import _auto_advance_bots
 from backend.adapters.solver.texassolver_adapter import (
     TexasSolverAdapter,
     SolveRequest,
@@ -225,7 +222,12 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
     # Build a shared decision context. Errors here are treated as input
     # / state issues rather than 500s.
     try:
-        ctx = _decision_context.build_decision_context(hand_id=hand_id, idx=idx)
+        # Use the shared engine-based context helper. Tests and other
+        # subsystems rely on being able to monkeypatch this function.
+        ctx = _decision_context.build_decision_context(
+            hand_id=hand_id,
+            idx=idx,
+        )
     except ValueError as e:
         advice = AdviceV1(
             version=1,
@@ -275,7 +277,7 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
         )
         return _respond_with_logging(advice, status_code=500)
 
-    street = ctx.street.lower()
+    street = str(ctx.street).lower()
 
     # Preflop: delegate to existing preflop advisor and wrap into AdviceV1.
     if street == "preflop":
@@ -491,7 +493,7 @@ def post_ensure_progress() -> JSONResponse:
     This endpoint is orthogonal to the coaching payload shape; it simply
     coordinates engine progress.
     """
-    adapter = get_adapter()
+    adapter = cast(Any, get_adapter())
     ss = get_session_state()
     human_seat = ss.human_seat
 
@@ -519,7 +521,7 @@ def post_ensure_progress() -> JSONResponse:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
     # Return current snapshot (post-bot if any advanced)
-    state = _to_public_state(human_seat)
+    state = adapter.state_public(human_seat)
     return JSONResponse(
         {"ok": True, "bots_applied": bots, "state": state}, status_code=200
     )
