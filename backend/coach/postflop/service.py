@@ -46,7 +46,6 @@ from backend.schemas.advice import (
     StrategyPart,
 )
 from backend.services.equity.service import EquityService
-from backend.services.equity.base import PlayerSpec
 
 StreetLiteral = Literal["preflop", "flop", "turn", "river", "showdown", "unknown"]
 EquityModeLiteral = Literal["hands", "ranges"]
@@ -105,6 +104,98 @@ def _compute_pot_odds(ctx: DecisionContext) -> Optional[float]:
     if price <= 0 or pot < 0:
         return None
     return price / (pot + price)
+
+
+def _flatten_board_like(obj: object) -> List[str]:
+    """
+    Best-effort normalisation of a board-like object into a flat list of
+    card strings.
+
+    Handles:
+      * Dicts like {"flop":[...], "turn":[...], "river":[...]}.
+      * Engine-style objects with .flop / .turn / .river attributes.
+      * Lists / tuples, including list-of-lists.
+    """
+    cards: List[str] = []
+    if obj is None:
+        return cards
+
+    # Dict-like: {"flop":[...], "turn":[...], "river":[...]}
+    if isinstance(obj, dict):
+        for key in ("flop", "turn", "river"):
+            seg = obj.get(key)
+            if isinstance(seg, (list, tuple)):
+                for c in seg:
+                    if isinstance(c, str):
+                        cards.append(c)
+                    elif c is not None:
+                        cards.append(str(c))
+            elif isinstance(seg, str):
+                cards.append(seg)
+        if cards:
+            return cards
+
+    # Object with flop/turn/river attributes (engine board dataclass)
+    has_attr = any(hasattr(obj, attr) for attr in ("flop", "turn", "river"))
+    if has_attr:
+        for attr in ("flop", "turn", "river"):
+            seg = getattr(obj, attr, None)
+            if isinstance(seg, (list, tuple)):
+                for c in seg:
+                    if isinstance(c, str):
+                        cards.append(c)
+                    elif c is not None:
+                        cards.append(str(c))
+            elif isinstance(seg, str):
+                cards.append(seg)
+        if cards:
+            return cards
+
+    # Generic sequence: flatten one level
+    if isinstance(obj, (list, tuple)):
+        for item in obj:
+            if isinstance(item, (list, tuple)):
+                for inner in item:
+                    if isinstance(inner, str):
+                        cards.append(inner)
+                    elif inner is not None:
+                        cards.append(str(inner))
+            elif isinstance(item, str):
+                cards.append(item)
+            elif item is not None:
+                cards.append(str(item))
+        return cards
+
+    return cards
+
+
+def _resolve_board_for_equity(ctx: DecisionContext) -> List[str]:
+    """
+    Resolve a robust board representation suitable for the equity engine.
+
+    Priority:
+      1. ctx.board (already "public" form from DecisionContext).
+      2. ctx.raw_state.board (engine-native shape) as a fallback.
+      3. Empty board as a last resort.
+
+    Guarantees that the returned board length is in {0, 3, 4, 5} so that
+    backends like eval7 do not raise a "board must be 0, 3, 4, or 5 cards"
+    error.
+    """
+    # First attempt: whatever the DecisionContext has.
+    cards = _flatten_board_like(ctx.board)
+    if len(cards) in (0, 3, 4, 5):
+        return cards
+
+    # Fallback: try the raw engine state.
+    raw_state = getattr(ctx, "raw_state", None)
+    board_attr = getattr(raw_state, "board", None)
+    cards2 = _flatten_board_like(board_attr)
+    if len(cards2) in (0, 3, 4, 5):
+        return cards2
+
+    # Last resort: treat as unknown board and use an empty board.
+    return []
 
 
 def _pick_bucket(
@@ -182,12 +273,15 @@ def _build_hu_advice(
 
     villain_range = get_default_villain_range(street=street, role="oop")
 
+    # Resolve board robustly for the equity engine.
+    board_cards = _resolve_board_for_equity(ctx)
+
     svc = equity_service or EquityService()
     try:
         hero_equity = svc.hero_vs_range_equity(
             hero_hand=hero_hand,
             villain_range=villain_range,
-            board=list(ctx.board),
+            board=board_cards,
             dead=(),
             iters=cfg.iters,
             exact=False,
@@ -347,11 +441,13 @@ def _build_multiway_advice(
     # Build players: seat 0 -> hero hand, remaining active seats -> generic villain ranges.
     villain_range = get_default_villain_range(street=street, role="oop")
 
+    from backend.services.equity.base import (
+        PlayerSpec,
+    )  # local import to avoid cycles in some tools
+
     players: List[PlayerSpec] = [PlayerSpec(hand=hero_hand)]
-    # For now we treat all villains symmetrically with the same default range.
     villain_seats = [s for s in active if s != ctx.hero_seat]
     if not villain_seats:
-        # Should not happen if n_players > 1, but be defensive.
         return AdviceV1(
             version=1,
             status="unsupported",
@@ -365,10 +461,13 @@ def _build_multiway_advice(
     for _ in villain_seats:
         players.append(PlayerSpec(range=villain_range))
 
+    # Resolve board robustly for the equity engine.
+    board_cards = _resolve_board_for_equity(ctx)
+
     try:
         result = svc.calc_equity(
             players=players,
-            board=list(ctx.board),
+            board=board_cards,
             dead=(),
             iters=cfg.multiway_iters or cfg.iters,
             exact=False,
