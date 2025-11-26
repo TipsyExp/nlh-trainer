@@ -211,6 +211,76 @@ def get_default_villain_range(street: str, role: Role = "oop") -> str:
     return get_hu_villain_range(street=street, role=role, profile=DEFAULT_PROFILE_NAME)
 
 
+def get_villain_range_for_postflop(
+    *,
+    street: str,
+    hero_is_ip: bool,
+    preflop_line: str | None = None,
+    hero_position: str | None = None,
+    villain_position: str | None = None,
+    profile: ProfileName = DEFAULT_PROFILE_NAME,
+) -> str:
+    """
+    Higher-level HU helper for postflop villain ranges.
+
+    This is the API the postflop coach should prefer going forward. It is
+    designed to accept richer context (preflop line, positions, profile)
+    without pulling in DecisionContext or configuration modules.
+
+    Args:
+        street:
+            Current street name; case-insensitive. Expected values are
+            "flop", "turn", or "river". Unknown streets fall back to
+            "flop".
+
+        hero_is_ip:
+            True if hero is in position postflop (acts after villain),
+            False if hero is out of position.
+
+        preflop_line:
+            Optional abstract label for the preflop action sequence,
+            e.g. "BTN_RFI_BB_call" or "BTN_RFI_BB_3B_BTN_call".
+            Currently unused, but reserved so that future versions can
+            condition villain ranges on the exact preflop path.
+
+        hero_position:
+            Optional textual position label for the hero ("BTN", "SB",
+            "BB", etc.). Currently unused here, but included so callers
+            can pass a consistent context without changing the API.
+
+        villain_position:
+            Optional textual position label for the villain. Also
+            reserved for future refinements.
+
+        profile:
+            Villain profile name; currently only "TAG" is supported.
+
+    Returns:
+        A range string in the equity engine's native syntax.
+
+    Current behaviour (v1):
+        - Infer villain role from hero_is_ip:
+            * hero_is_ip = True  -> villain is OOP
+            * hero_is_ip = False -> villain is IP
+        - Delegate to get_hu_villain_range(...) with that role.
+        - Ignore preflop_line / positions for now.
+
+    This keeps current semantics identical to the old helpers, while
+    allowing future implementations to become more expressive without
+    having to change call sites.
+    """
+    street_key: StreetKey = normalize_street_key(street)
+
+    # If hero is in position, villain is OOP; otherwise villain is IP.
+    villain_role: Role = "oop" if hero_is_ip else "ip"
+
+    return get_hu_villain_range(
+        street=street_key,
+        role=villain_role,
+        profile=profile,
+    )
+
+
 __all__ = [
     "DEFAULT_PROFILE_NAME",
     "ProfileName",
@@ -221,4 +291,5 @@ __all__ = [
     "available_profiles",
     "get_hu_villain_range",
     "get_default_villain_range",
+    "get_villain_range_for_postflop",
 ]

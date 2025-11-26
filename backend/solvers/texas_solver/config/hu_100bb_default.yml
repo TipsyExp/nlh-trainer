@@ -1,0 +1,54 @@
+# backend/solvers/texas_solver/config/hu_100bb_default.yml
+
+meta:
+  format_version: 1
+  name: "HU 100bb default"
+  description: >
+    Heads-up NLH, ~100bb effective, built around 2.5x opens preflop.
+    Postflop tree uses simple pot-percentage buckets (33/66/100 + jam)
+    for both IP and OOP in SRP/3BP spots.
+  game_type: "NLH"
+  stack_bb: 100
+  rake: "0"
+  spot_types: ["SRP", "3BP"]
+
+tree:
+  # Streets we actually build trees for (preflop is handled by charts, not TS).
+  streets: ["flop", "turn", "river"]
+
+  # Conceptual cap on raises per street. TexasSolver’s actual raise limits
+  # still come from its internal rule YAML, but this is here so the coach /
+  # runner can reason about “shallow” vs “deep” trees later.
+  max_raises_per_street:
+    flop: 2
+    turn: 2
+    river: 2
+
+  # Threshold used when adding an explicit “allin” bet size in the TS script.
+  # Mirrors the value we currently hard-code in the adapter.
+  allin_threshold: 0.67
+
+  # Bet-size *labels* by street and position. These labels are in the same
+  # syntax the adapter already understands (e.g. "33%", "66%", "100%", "jam")
+  # and will be mapped to pot-% integers via _map_bucket_to_pot_percent.
+  #
+  # For now we keep it symmetric IP/OOP and the same across streets to match
+  # DEFAULT_BUCKET_LABELS in runner.py. Later you can specialize per street.
+  bet_buckets:
+    flop:
+      ip:  ["33%", "66%", "100%", "jam"]
+      oop: ["33%", "66%", "100%", "jam"]
+    turn:
+      ip:  ["33%", "66%", "100%", "jam"]
+      oop: ["33%", "66%", "100%", "jam"]
+    river:
+      ip:  ["33%", "66%", "100%", "jam"]
+      oop: ["33%", "66%", "100%", "jam"]
+
+solver:
+  # These mirror the environment-driven defaults in TexasSolverAdapter.
+  # You can let env-vars override them later if you want.
+  threads: 1          # COACH_TS_THREADS
+  accuracy: 1.0       # COACH_TS_ACCURACY
+  max_iterations: 200 # COACH_TS_MAX_ITERS
+  timeout_s: 90       # COACH_TS_TIMEOUT_S
