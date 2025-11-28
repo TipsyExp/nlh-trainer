@@ -15,6 +15,15 @@
 
 export type AdviceStatus = 'ok' | 'skipped' | 'error' | 'unavailable';
 
+/**
+ * High-level source label, as used by the backend in `meta.source`
+ * (e.g. "equity", "solver", "chart", "noop"...).
+ *
+ * This is kept intentionally loose so dev tooling can treat it as a
+ * simple human-readable string.
+ */
+export type AdviceSource = string;
+
 /** Street literal set, matching backend semantics. */
 export type AdviceStreet =
   | 'preflop'
@@ -94,6 +103,14 @@ export interface AdviceEquityPlayer {
  *     "exact": null,
  *     "iters": null
  *   }
+ *
+ * We also expose a few optional, more "UI-friendly" aliases so newer
+ * components (like the DecisionHelpOverlay) can attach to them without
+ * breaking older callers:
+ *
+ *   hero_vs_villain_equity  – alias for `hero`
+ *   pot_odds                – often comes from thresholds; may be copied over
+ *   min_equity_to_call      – same as above
  */
 export interface AdviceEquity {
   backend: string | null;
@@ -103,8 +120,14 @@ export interface AdviceEquity {
   vs_field: unknown | null;
   exact: boolean | null;
   iters: number | null;
-  /** Optional text comment, if backend provides one. */
+
+  /** Optional text comment, if backend or adapter provides one. */
   comment?: string | null;
+
+  /** Optional normalised aliases used by newer UIs. */
+  hero_vs_villain_equity?: number | null;
+  pot_odds?: number | null;
+  min_equity_to_call?: number | null;
 }
 
 /**
@@ -149,7 +172,7 @@ export interface AdviceMeta {
   n_players?: number;
   hero_seat?: number;
   /** High-level backend source, e.g. "equity", "solver", "chart". */
-  source?: string;
+  source?: AdviceSource;
 }
 
 /**
@@ -164,8 +187,15 @@ export interface AdvicePayloadV1 {
   /** Simple metadata; new code should prefer `context` where available. */
   meta?: AdviceMeta;
 
-  /** Optional richer, UI-focused context. */
+  /** Optional richer, UI-focused context (future-facing). */
   context?: AdviceContext;
+
+  /**
+   * Optional explicit source object or label. Most current backends
+   * only populate meta.source, but this gives UI code a stable place
+   * to hang a human-readable "Source:" badge if we add it later.
+   */
+  source?: AdviceSource | null;
 
   recommendation?: AdviceRecommendation;
   equity?: AdviceEquity;
