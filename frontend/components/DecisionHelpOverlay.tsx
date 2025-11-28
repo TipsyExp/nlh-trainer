@@ -1,71 +1,81 @@
 // frontend/components/DecisionHelpOverlay.tsx
-// Presentational overlay for hand guidance (phase 3, updated in phase 5).
+// Presentational overlay for hand guidance (unified advice payload).
 //
 // This component renders a fixed panel on the right side of the screen (or
-// bottom on small screens) and displays coach advice and equity for the
-// current decision. It is purely presentational: all network logic is
-// encapsulated in hooks invoked by the parent component. Consumers
-// supply normalised coach and equity state along with the meta snapshot.
-//
-// Future alignment (M3+):
-// - The UI here is conceptually tied to the universal Advice payload described
-//   in docs/COACH-ADVICE-PAYLOAD.md.
-// - The "Recommended" section corresponds to advice.recommendation.bucket and
-//   advice.recommendation.strategy_bar.
-// - The equity block corresponds to advice.equity.hero / advice.equity.players
-//   plus thresholds and rationale fields.
-// When the backend / hook migrate to GET /api/coach/advice, this component
-// should be able to render that AdviceV1 shape with minimal changes.
+// bottom on small screens) and displays coach advice (charts / solver) plus
+// optional equity annotations for the current decision. All network logic is
+// handled by hooks; this component only consumes the normalised state
+// returned by `useDecisionOverlay` and renders it.
 
 import React from 'react';
 import type { DecisionContext } from '../types/decision';
+import type { AdvicePayloadV1 } from '../types/advice';
 import { StrategyBar } from './StrategyBar';
 import { StatusChip } from './StatusChip';
 import { HeroEquityBar } from './HeroEquityBar';
-import type { CoachAdvice } from '../types/coach';
-import type { EquityResponse } from '../types/equity';
-import type { EquityStatus } from '../utils/overlayCache';
-import type { Meta } from '../types/meta';
 
 export interface DecisionHelpOverlayProps {
-  /** Optional decision context (unused here but reserved for future extensions). */
+  /** Optional decision context (not used yet, reserved for future extensions). */
   decision?: DecisionContext | null;
-  /** Normalised coach state from useDecisionOverlay. */
-  coach: {
-    data: CoachAdvice | null;
+  /** Normalised advice state from useDecisionOverlay. */
+  advice: {
+    data: AdvicePayloadV1 | null;
     loading: boolean;
     status: 'ok' | 'loading' | 'disabled' | 'not_found' | 'unavailable';
     error?: string;
   };
-  /** Normalised equity state from useDecisionOverlay. */
-  equity: {
-    data: EquityResponse | null;
-    loading: boolean;
-    status: EquityStatus;
-    error?: string;
-    origin?: string;
-  };
-  /** Meta snapshot from useDecisionOverlay (contains backend name). */
-  meta: {
-    meta: Meta | null;
-    loading: boolean;
-    error?: string;
-  };
 }
 
-/**
- * Guidance overlay for preflop advice and (in later phases) equity.
- *
- * This component consumes the normalised state provided by
- * useDecisionOverlay and renders:
- *   - coach source + recommended bucket + strategy bar
- *   - hero equity summary derived from /api/equity
- *
- * It does not itself perform any network calls. When advice is not
- * available a friendly message is shown. The overlay should mount
- * only when the overlayEnabled prop is true.
- */
-export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionHelpOverlayProps) {
+export function DecisionHelpOverlay({ decision, advice }: DecisionHelpOverlayProps) {
+  const payload = advice.data ?? null;
+
+  const recommendation = payload?.recommendation ?? null;
+  const equity = payload?.equity ?? null;
+  const thresholds = payload?.thresholds ?? null;
+  const ctx = payload?.context ?? null;
+  const meta = payload?.meta ?? null;
+
+  // Compute a simple label for the source badge.
+  // For now we just surface meta.source (e.g. "equity", "solver", "chart").
+  const sourceLabel = meta?.source || (payload ? 'coach' : '—');
+
+  // Strategy parts: prefer backend strategy_bar; fall back to action_mix
+  const strategyParts =
+    recommendation && recommendation.strategy_bar && recommendation.strategy_bar.length > 0
+      ? recommendation.strategy_bar
+          .map((p) => ({
+            action: p.action,
+            weight: typeof p.weight === 'number' ? p.weight : Number(p.weight),
+          }))
+          .filter((p) => p.weight > 0)
+      : recommendation && recommendation.action_mix
+      ? Object.entries(recommendation.action_mix)
+          .map(([action, weight]) => ({
+            action,
+            weight: typeof weight === 'number' ? weight : Number(weight),
+          }))
+          .filter((p) => p.weight > 0)
+      : [];
+
+  // Primary action: prefer bucket; fall back to primary_action if present.
+  const primaryAction =
+    recommendation?.bucket ?? recommendation?.primary_action ?? null;
+
+  // Equity + thresholds
+  const heroEquity =
+    typeof equity?.hero === 'number' ? equity.hero : null;
+
+  const potOdds =
+    typeof thresholds?.pot_odds === 'number' ? thresholds.pot_odds : null;
+
+  const minEqToCall =
+    typeof thresholds?.min_equity_to_call === 'number'
+      ? thresholds.min_equity_to_call
+      : null;
+
+  const equityComment =
+    (equity?.comment ?? thresholds?.ev_hint ?? payload?.rationale) || null;
+
   return (
     <div
       role="region"
@@ -75,53 +85,76 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
       <div className="bg-white shadow-lg rounded-xl p-4 space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">Guidance</h2>
-          {/* Status badge summarises the current coach state */}
-          <StatusChip status={coach.status} />
+          {/* Status badge summarises the current advice state */}
+          <StatusChip status={advice.status} />
         </div>
 
-        {/* Coach section depends on coach status */}
-        {coach.status === 'loading' && (
+        {/* Advice section */}
+        {advice.status === 'loading' && (
           <div className="space-y-2">
             <div className="h-4 w-32 bg-gray-100 animate-pulse rounded" />
             <div className="h-3 w-24 bg-gray-100 animate-pulse rounded" />
           </div>
         )}
 
-        {coach.status === 'disabled' && (
-          <div className="text-sm text-gray-600">Coach disabled or not configured.</div>
+        {advice.status === 'disabled' && (
+          <div className="text-sm text-gray-600">
+            Advice disabled or not configured.
+          </div>
         )}
 
-        {coach.status === 'not_found' && (
-          <div className="text-sm text-gray-600">Coach route not available.</div>
+        {advice.status === 'not_found' && (
+          <div className="text-sm text-gray-600">
+            Advice route not available.
+          </div>
         )}
 
-        {coach.status === 'unavailable' && (
-          <div className="text-sm text-gray-600">Coach unavailable.</div>
+        {advice.status === 'unavailable' && (
+          <div className="text-sm text-gray-600">
+            Advice unavailable.
+          </div>
         )}
 
-        {coach.status === 'ok' && coach.data && (
+        {advice.status === 'ok' && payload && (
           <div className="space-y-3 text-sm">
             {/* Source badge and recommended line */}
             <div className="flex items-center gap-2">
               <span className="text-gray-500">Source:</span>
               <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-700">
-                {coach.data.source}
-              </span>
-            </div>
-            <div>
-              <span className="text-gray-500 mr-1">Recommended:</span>
-              <span className="font-medium capitalize">
-                {coach.data.bucket.replace(/_/g, ' ')}
+                {sourceLabel}
               </span>
             </div>
 
-            {/* Strategy bar if provided */}
-            {coach.data.strategy_bar && coach.data.strategy_bar.length > 0 && (
+            {ctx && (
+              <div className="text-xs text-gray-500 flex flex-wrap gap-x-2 gap-y-1">
+                <span className="uppercase">
+                  {(ctx.street ?? meta?.street ?? 'unknown')}{' '}
+                  · {(ctx.hero_position ?? 'unknown')}
+                </span>
+                {typeof ctx.to_call === 'number' && (
+                  <span>To call: {ctx.to_call}</span>
+                )}
+                {typeof ctx.pot_size === 'number' && (
+                  <span>Pot: {ctx.pot_size}</span>
+                )}
+              </div>
+            )}
+
+            <div>
+              <span className="text-gray-500 mr-1">Recommended:</span>
+              <span className="font-medium capitalize">
+                {primaryAction
+                  ? primaryAction.replace(/_/g, ' ')
+                  : '—'}
+              </span>
+            </div>
+
+            {/* Strategy bar if we have a mix */}
+            {strategyParts.length > 0 && (
               <div className="space-y-1">
-                <StrategyBar parts={coach.data.strategy_bar} />
-                {/* Optional legend */}
+                <StrategyBar parts={strategyParts} />
                 <div className="flex justify-between text-[11px] text-gray-500">
-                  {coach.data.strategy_bar.map((p) => (
+                  {strategyParts.map((p) => (
                     <div key={p.action} className="flex-1 text-center">
                       {p.action}
                     </div>
@@ -130,83 +163,57 @@ export function DecisionHelpOverlay({ decision, coach, equity, meta }: DecisionH
               </div>
             )}
 
-            {coach.data.rationale && (
-              <div className="text-xs text-gray-500">{coach.data.rationale}</div>
+            {/* Optional comment / rationale */}
+            {equityComment && (
+              <div className="text-xs text-gray-500">{equityComment}</div>
             )}
           </div>
         )}
 
-        {/* Equity section (planned to map to advice.equity.* in the unified payload) */}
-        {equity && (
+        {/* Equity / thresholds block */}
+        {payload && (
           <div className="mt-3 border-t pt-3 space-y-2">
-            {equity.loading && (
+            {advice.status === 'loading' && (
               <div className="space-y-2">
                 <div className="h-4 w-32 bg-gray-100 animate-pulse rounded" />
                 <div className="h-3 w-24 bg-gray-100 animate-pulse rounded" />
               </div>
             )}
 
-            {!equity.loading && equity.status === 'ok' && equity.data && (
+            {advice.status === 'ok' && (
               <div className="space-y-2 text-sm">
-                <div className="flex items-center gap-2">
-                  <span className="text-gray-500">Equity:</span>
-                  <span className="font-medium">
-                    {(() => {
-                      const hero = equity.data.players?.[0];
-                      if (!hero) return '-';
-                      const pct = hero.equity * 100;
-                      return `${pct.toFixed(1)}%`;
-                    })()}
-                  </span>
-                </div>
+                {/* Hero equity */}
+                {heroEquity !== null && (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <span className="text-gray-500">
+                        Equity vs villain:
+                      </span>
+                      <span className="font-medium">
+                        {(heroEquity * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                    <HeroEquityBar equity={heroEquity} />
+                  </>
+                )}
 
-                {/* Hero equity bar */}
-                {(() => {
-                  const hero = equity.data.players?.[0];
-                  if (!hero) return null;
-                  return <HeroEquityBar equity={hero.equity} />;
-                })()}
-
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="inline-flex items-center rounded-full px-2 py-0.5 bg-gray-100 text-gray-700">
-                    {meta?.meta?.equity.backend ?? equity.data.backend}
-                  </span>
-                  <span className="inline-flex items-center rounded-full px-2 py-0.5 bg-gray-100 text-gray-700">
-                    {equity.data.mode}
-                  </span>
-                </div>
-
-                {(() => {
-                  if (equity.data.mode === 'ranges') {
-                    return (
-                      <div className="text-xs text-gray-500">
-                        vs range ({equity.origin || 'default'})
-                      </div>
-                    );
-                  }
-                  // Postflop: indicate exact/MC and iteration count
-                  if (equity.data.exact) {
-                    return <div className="text-xs text-gray-500">exact</div>;
-                  }
-                  if (equity.data.iters) {
-                    return (
-                      <div className="text-xs text-gray-500">
-                        MC {equity.data.iters.toLocaleString()} iters
-                      </div>
-                    );
-                  }
-                  return null;
-                })()}
-              </div>
-            )}
-
-            {!equity.loading && equity.status !== 'ok' && equity.status !== 'skipped' && (
-              <div className="text-sm text-gray-600">
-                {equity.status === 'disabled' && 'Equity disabled'}
-                {equity.status === 'unsupported' && 'Equity not available here'}
-                {equity.status === 'route-missing' && 'Equity route not available'}
-                {equity.status === 'timeout' && 'Equity timed out (retry?)'}
-                {equity.status === 'error' && 'Equity unavailable'}
+                {/* Pot odds / min equity to call */}
+                {(potOdds !== null || minEqToCall !== null) && (
+                  <div className="flex flex-col gap-1 text-xs text-gray-500">
+                    {potOdds !== null && (
+                      <span>
+                        Pot odds:{' '}
+                        {(potOdds * 100).toFixed(1)}%
+                      </span>
+                    )}
+                    {minEqToCall !== null && (
+                      <span>
+                        Min equity to call:{' '}
+                        {(minEqToCall * 100).toFixed(1)}%
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

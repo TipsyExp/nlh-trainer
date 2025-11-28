@@ -1,23 +1,23 @@
 // frontend/dev/SnapshotInspector.tsx
 // Developer-only inspector for snapshot logging (Phase 4 / early M3).
 //
-// When the guidance overlay triggers coach or equity requests and the
-// backend is configured to log snapshots, these calls are persisted and
-// surfaced in the export API. This component provides a simple UI to
-// inspect whether the overlay made the expected calls for the current
-// decision and to fetch the exported snapshots. It is gated by
+// When the guidance overlay triggers advice requests and the backend is
+// configured to log snapshots, these calls are persisted and surfaced
+// in the export API. This component provides a simple UI to inspect
+// whether the overlay made the expected calls for the current decision
+// and to fetch the exported snapshots. It is gated by
 // NEXT_PUBLIC_DEV_TOOLS and should not appear in production builds.
 //
 // Snapshot types note:
 // --------------------
-// The backend now attaches three optional per-action snapshot fields
-// in the JSON export:
+// Historically the backend attached three optional per-action snapshot
+// fields in the JSON export:
 //   - preflop_advice  (legacy preflop-only advice)
-//   - coach_advice    (unified AdviceV1 from /api/coach/advice, all streets)
+//   - coach_advice    (legacy unified AdviceV1)
 //   - equity_snapshot (equity results from /api/equity)
-// This inspector simply detects whether those fields are present for
-// the current (hand_id, idx) pair and surfaces booleans; it does not
-// depend on their internal structure.
+// Newer backends may expose a single `advice_snapshot` field carrying
+// the unified advice payload. This inspector tolerates both shapes and
+// simply reports which fields are present for the current (hand_id, idx).
 
 import { useEffect, useState } from 'react';
 import { getOverlayTrace, subscribeOverlayTrace } from '../store/overlayDebugStore';
@@ -50,11 +50,7 @@ export default function SnapshotInspector() {
     return () => unsub();
   }, []);
 
-  // Determine whether overlay is currently enabled. We call
-  // useHelpOverlayToggle without a sessionId so it falls back to a
-  // generic key; this suffices for displaying the per-session state in
-  // the dev inspector. Overlay is enabled only if the global gate and
-  // per-session toggle are true.
+  // Determine whether overlay is currently enabled.
   const { enabled: helpEnabled } = useHelpOverlayToggle(undefined);
   const overlayEnabled = globalOverlayGate && helpEnabled;
 
@@ -68,9 +64,6 @@ export default function SnapshotInspector() {
     try {
       setLoadingExport(true);
       const res = await getHandExport(trace.handId);
-      // Log the full export response for debugging the snapshot shape. This
-      // helps diagnose mismatches between frontend expectations and
-      // backend structure without crashing the UI.
       if (process.env.NEXT_PUBLIC_DEV_TOOLS) {
         try {
           // eslint-disable-next-line no-console
@@ -90,6 +83,7 @@ export default function SnapshotInspector() {
   // Extract snapshots for current idx from export if available.
   let decisionSnapshot:
     | {
+        hasUnifiedAdvice: boolean;
         hasPreflopAdvice: boolean;
         hasCoachAdvice: boolean;
         hasEquity: boolean;
@@ -99,28 +93,27 @@ export default function SnapshotInspector() {
   if (exportRes && typeof trace.idx === 'number') {
     // Prefer the canonical "actions" array, but tolerate older "decisions"
     // naming if present for transitional backends.
-    const actions: any =
-      (exportRes as any).actions ?? (exportRes as any).decisions;
+    const actions: any = (exportRes as any).actions ?? (exportRes as any).decisions;
 
     if (Array.isArray(actions)) {
       const d: any = actions.find((x: any) => x && x.idx === trace.idx);
       if (d) {
         decisionSnapshot = {
+          hasUnifiedAdvice: typeof d.advice_snapshot !== 'undefined',
           hasPreflopAdvice: typeof d.preflop_advice !== 'undefined',
           hasCoachAdvice: typeof d.coach_advice !== 'undefined',
           hasEquity: typeof d.equity_snapshot !== 'undefined',
         };
       } else {
         decisionSnapshot = {
+          hasUnifiedAdvice: false,
           hasPreflopAdvice: false,
           hasCoachAdvice: false,
           hasEquity: false,
         };
       }
     } else {
-      // If the export structure differs from expectations, keep snapshot
-      // null. The logged export in onExport() can be used to update
-      // this logic when the shape is understood.
+      // If the export structure differs from expectations, keep snapshot null.
       decisionSnapshot = null;
     }
   }
@@ -136,8 +129,7 @@ export default function SnapshotInspector() {
         <div>Hand: {trace.handId ?? 'N/A'}</div>
         <div>Idx: {trace.idx ?? 'N/A'}</div>
         <div>Street: {trace.street ?? 'N/A'}</div>
-        <div>Coach called: {trace.calledCoach ? 'Yes' : 'No'}</div>
-        <div>Equity called: {trace.calledEquity ? 'Yes' : 'No'}</div>
+        <div>Advice called: {trace.calledAdvice ? 'Yes' : 'No'}</div>
       </div>
       <button
         onClick={onExport}
@@ -150,15 +142,20 @@ export default function SnapshotInspector() {
       {decisionSnapshot && (
         <div>
           <div>
-            Preflop advice snapshot:{' '}
+            Unified advice snapshot (advice_snapshot):{' '}
+            {decisionSnapshot.hasUnifiedAdvice ? 'Yes' : 'No'}
+          </div>
+          <div>
+            Legacy preflop advice snapshot (preflop_advice):{' '}
             {decisionSnapshot.hasPreflopAdvice ? 'Yes' : 'No'}
           </div>
           <div>
-            Coach advice snapshot:{' '}
+            Legacy coach advice snapshot (coach_advice):{' '}
             {decisionSnapshot.hasCoachAdvice ? 'Yes' : 'No'}
           </div>
           <div>
-            Equity snapshot: {decisionSnapshot.hasEquity ? 'Yes' : 'No'}
+            Legacy equity snapshot (equity_snapshot):{' '}
+            {decisionSnapshot.hasEquity ? 'Yes' : 'No'}
           </div>
         </div>
       )}

@@ -1,175 +1,179 @@
 // frontend/types/advice.ts
+// Types for the unified Advice V1 payload returned by /api/coach/advice.
+//
+// This is shaped to match the real backend JSON, e.g.:
+//
+// {
+//   "version": 1,
+//   "status": "ok",
+//   "meta": { "street": "flop", "n_players": 2, "hero_seat": 0, "source": "equity" },
+//   "recommendation": { "bucket": "2.2x", "strategy_bar": [ { "action": "2.2x", "weight": 1 } ] },
+//   "equity": { "backend": null, "mode": null, "hero": 0.63705, ... },
+//   "thresholds": { "pot_odds": null, "spr": null, "ev_hint": null },
+//   "rationale": "Hero equity ≈ ..."
+// }
 
-/**
- * Unified coaching advice payload (v1).
- *
- * This mirrors the backend `AdviceV1` schema in `backend.schemas.advice`
- * and is used by the decision overlay for ALL streets (preflop + postflop,
- * HU + multiway).
- *
- * Notes:
- * - Backend always returns `version = 1`.
- * - HTTP status codes are mostly for “route disabled / missing”; normal
- *   runtime states are expressed via `AdviceStatus` on the payload itself.
- */
+export type AdviceStatus = 'ok' | 'skipped' | 'error' | 'unavailable';
 
-/** Overall status of the advice payload, independent of HTTP status. */
-export type AdviceStatus =
-  | "ok"          // Advice is actionable.
-  | "disabled"    // Coach disabled by config / env.
-  | "unsupported" // Spot not yet supported by this coach.
-  | "not_found"   // Hand/idx or context could not be resolved.
-  | "timeout"     // (Reserved) Equity / solver timed out.
-  | "error";      // Unexpected backend or equity error.
-
-/** Street literal set, matching backend `StreetLiteral`. */
+/** Street literal set, matching backend semantics. */
 export type AdviceStreet =
-  | "preflop"
-  | "flop"
-  | "turn"
-  | "river"
-  | "showdown"
-  | "unknown";
+  | 'preflop'
+  | 'flop'
+  | 'turn'
+  | 'river'
+  | 'showdown'
+  | 'unknown';
 
-/** Source of the recommendation. */
-export type AdviceSource = "chart" | "equity" | "rule" | "mixed";
+/** Hero’s logical table position. */
+export type HeroPosition =
+  | 'BTN'
+  | 'SB'
+  | 'BB'
+  | 'UTG'
+  | 'HJ'
+  | 'CO'
+  | 'unknown';
 
-/** Single bar in the strategy breakdown. */
-export interface StrategyPart {
-  /** Canonical bucket label, e.g. "fold", "call", "check", "2.5x", "2.5xR", "jam". */
+/** Mixed strategy over action labels. Keys are bucket labels. */
+export type ActionMix = Record<string, number>;
+
+export interface AdviceStrategyPart {
   action: string;
-  /** Relative weight / probability in [0, 1]. */
   weight: number;
 }
 
-/** Recommended action + strategy mix. */
+/**
+ * The coach’s recommendation for this spot.
+ *
+ * The backend currently sends:
+ *   recommendation.bucket        – canonical chosen bucket/action id
+ *   recommendation.strategy_bar  – [{ action, weight }, ...]
+ *
+ * Early prototypes used:
+ *   recommendation.primary_action
+ *   recommendation.action_mix
+ *
+ * We support both for compatibility.
+ */
 export interface AdviceRecommendation {
-  /** Primary bucket to recommend to the user. */
-  bucket: string;
-  /**
-   * Strategy bar components.
-   *
-   * In v1 this is usually a single-entry array with weight=1.0, but the
-   * type allows for richer mixes (e.g. call/raise splits) later.
-   */
-  strategy_bar?: StrategyPart[] | null;
-}
+  /** Canonical bucket/action id, e.g. "fold", "call", "2.5x", "jam". */
+  bucket?: string;
 
-/** Per-player equity entry used in multiway spots. */
-export interface AdviceEquityPlayer {
-  /** Table seat index. */
-  seat: number;
-  /** Equity for this seat, 0..1. */
-  equity: number;
-}
+  /** Backwards-compatible alias used in early drafts. */
+  primary_action?: string;
 
-/** Equity section of the advice payload. */
-export interface AdviceEquity {
-  /**
-   * Backend name, e.g. "ompeval", "eval7", "pokerkit".
-   * May be null when the coach does not expose it (e.g. preflop chart-only).
-   */
-  backend: string | null;
+  /** Canonical strategy bar from backend. */
+  strategy_bar?: AdviceStrategyPart[];
 
-  /**
-   * Equity evaluation mode:
-   * - "hands": all players specified by concrete hands.
-   * - "ranges": one or more players specified as ranges.
-   */
-  mode: "hands" | "ranges" | null;
+  /** Optional map-form mix used by older code. */
+  action_mix?: ActionMix;
 
-  /** Hero equity in [0, 1]. */
-  hero: number;
-
-  /**
-   * Per-player equities (mainly for multiway).
-   * In HU v1 this is often null.
-   */
-  players: AdviceEquityPlayer[] | null;
-
-  /**
-   * Hero equity vs the rest of the field combined.
-   * For HU this is typically equal to `hero`.
-   */
-  vs_field: number | null;
-
-  /** Whether the calculation was exact (true) or Monte Carlo (false), if known. */
-  exact: boolean | null;
-
-  /** Number of iterations used for Monte Carlo backends, if applicable. */
-  iters: number | null;
-}
-
-/** Thresholds and pricing info derived from the current spot. */
-export interface AdviceThresholds {
-  /**
-   * Required equity to continue given the current price:
-   *
-   *   pot_odds = to_call / (pot_total + to_call)
-   *
-   * Using the convention that `pot_total` is the pot size *before* hero acts.
-   */
-  pot_odds: number | null;
-
-  /**
-   * Stack-to-pot ratio (SPR) if/when the backend exposes it.
-   * Currently unused by the coach, but reserved for future UI.
-   */
-  spr: number | null;
-}
-
-/** Metadata about the decision and how advice was produced. */
-export interface AdviceMeta {
-  /** Street at this decision. */
-  street: AdviceStreet;
-  /** Number of players still in the hand at this decision. */
-  n_players: number;
-  /** Hero's seat index. */
-  hero_seat: number;
-  /** High-level source of this advice (chart, equity, rule, mixed). */
-  source: AdviceSource;
+  /** Optional sizing hint (rarely populated). */
+  sizing_hint?: string | null;
 }
 
 /**
- * Versioned unified advice payload.
- *
- * This is the single shape returned by `/api/coach/advice` across all
- * streets and player counts.
+ * Per-seat equity entry (multiway support).
+ * Not always present; often only hero is returned.
  */
-export interface AdviceV1 {
-  /** Schema version. Currently always 1. */
-  version: 1;
-
-  /** High-level status for this advice object. */
-  status: AdviceStatus;
-
-  /** Decision metadata. */
-  meta: AdviceMeta;
-
-  /**
-   * Recommended action and strategy mix.
-   * May be null when the spot is disabled/unsupported/error.
-   */
-  recommendation: AdviceRecommendation | null;
-
-  /**
-   * Equity information if the coach used an equity backend.
-   * Null for pure chart/rule-only advice.
-   */
-  equity: AdviceEquity | null;
-
-  /**
-   * Pot odds / SPR thresholds derived from the decision context.
-   * Null when not applicable or unavailable.
-   */
-  thresholds: AdviceThresholds | null;
-
-  /**
-   * Human-readable explanation of the recommendation.
-   * May be null in purely mechanical or error cases.
-   */
-  rationale: string | null;
+export interface AdviceEquityPlayer {
+  seat: number;
+  equity: number;
 }
 
-/** Convenience alias for “current” advice type. */
-export type Advice = AdviceV1;
+/**
+ * Equity block from the backend.
+ *
+ * In your current payload this looks like:
+ *   "equity": {
+ *     "backend": null,
+ *     "mode": null,
+ *     "hero": 0.63705,
+ *     "players": null,
+ *     "vs_field": null,
+ *     "exact": null,
+ *     "iters": null
+ *   }
+ */
+export interface AdviceEquity {
+  backend: string | null;
+  mode: string | null;
+  hero: number | null;
+  players: AdviceEquityPlayer[] | null;
+  vs_field: unknown | null;
+  exact: boolean | null;
+  iters: number | null;
+  /** Optional text comment, if backend provides one. */
+  comment?: string | null;
+}
+
+/**
+ * Thresholds / pot-odds hints attached to the equity.
+ */
+export interface AdviceThresholds {
+  /** Pot odds required equity to continue (0..1). */
+  pot_odds?: number | null;
+
+  /** Minimum equity required to call given the price (0..1). */
+  min_equity_to_call?: number | null;
+
+  /** Stack-to-pot ratio, if provided. */
+  spr?: number | null;
+
+  /** Optional EV hint string from backend. */
+  ev_hint?: string | null;
+}
+
+/**
+ * Optional richer context block. Not all fields will necessarily be
+ * populated yet; everything is optional on purpose.
+ */
+export interface AdviceContext {
+  street?: AdviceStreet | string;
+  hero_position?: HeroPosition | string;
+  hero_seat?: number;
+  hero_cards?: string[] | null;
+  board?: string[];
+  pot_size?: number;
+  to_call?: number;
+  stack_effective?: number | null;
+  allowed_buckets?: string[];
+}
+
+/**
+ * Light-weight metadata; superseded by `context` when present.
+ * This mirrors the `meta` object you see in the JSON.
+ */
+export interface AdviceMeta {
+  street?: AdviceStreet | string;
+  n_players?: number;
+  hero_seat?: number;
+  /** High-level backend source, e.g. "equity", "solver", "chart". */
+  source?: string;
+}
+
+/**
+ * Canonical Advice V1 envelope from the backend.
+ *
+ * This is what `/api/coach/advice` returns today.
+ */
+export interface AdvicePayloadV1 {
+  version: 1;
+  status: AdviceStatus;
+
+  /** Simple metadata; new code should prefer `context` where available. */
+  meta?: AdviceMeta;
+
+  /** Optional richer, UI-focused context. */
+  context?: AdviceContext;
+
+  recommendation?: AdviceRecommendation;
+  equity?: AdviceEquity;
+  thresholds?: AdviceThresholds;
+
+  /** Optional free-form explanation string. */
+  rationale?: string | null;
+}
+
+/** Convenience alias used throughout the frontend. */
+export type Advice = AdvicePayloadV1;
