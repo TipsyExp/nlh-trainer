@@ -52,14 +52,12 @@ export default function TablePage() {
 
   const bb = useMemo(() => state?.table?.bb ?? 100, [state]);
 
-  const pot = useMemo(
-    () =>
-      state?.pot_total ??
-      (state as any)?.pot_after ??
-      (state as any)?.pot ??
-      0,
-    [state]
-  );
+  // Always rely on the server‑reported pot_total. The backend exposes
+  // a cumulative pot_total that should be trusted over any derived or
+  // legacy fields (pot_after, pot). Falling back to those legacy fields
+  // caused out‑of‑sync values and huge numbers when pot percentage sizing
+  // mis‑computed.
+  const pot = useMemo(() => state?.pot_total ?? 0, [state]);
 
   // Prefer state.allowed/to_act if present; fallback to legacy actor
   const allowedCtx: AllowedContext | null = useMemo(() => {
@@ -576,6 +574,9 @@ export default function TablePage() {
                             typeof maxRaiseRaw === 'number'
                               ? maxRaiseRaw
                               : undefined;
+                          // If heroStack is null, use a large sentinel so clamping falls
+                          // back to other bounds. The helper will clamp to min/max and
+                          // call if the stack is effectively infinite.
                           const heroStackForSizing =
                             heroStack != null
                               ? heroStack

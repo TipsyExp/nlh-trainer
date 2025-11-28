@@ -1,8 +1,8 @@
 // frontend/utils/potSizing.ts
-// Helpers for converting between pot-percentage labels (e.g. "33%")
+// Helpers for converting between pot‑percentage labels (e.g. "33%")
 // and numeric bet / raise totals in chips.
 //
-// This is deliberately UI-focused: the backend remains the authority on
+// This is deliberately UI‑focused: the backend remains the authority on
 // what actions are legal, and these helpers just compute reasonable
 // totals that respect min / max bounds and hero's remaining stack.
 
@@ -15,78 +15,69 @@ import type { Chips } from "../types/stack";
 export function parsePercentLabel(label: string): number | null {
   const m = String(label).trim().match(/^(\d+(?:\.\d+)?)%$/);
   if (!m) return null;
-
   const pct = Number(m[1]);
   if (!Number.isFinite(pct) || pct <= 0) return null;
-
   return pct / 100;
 }
 
 /**
- * Compute a total bet / raise amount for a pot-percentage label.
+ * Compute a total bet / raise amount for a pot‑percentage label.
  *
  * Inputs:
  *  - label:     percentage bucket label, e.g. "33%", "50%", "75%", "100%".
- *  - potBefore: pot size in chips before hero acts (P).
+ *  - pot:       pot size in chips before hero acts (P).
  *  - toCall:    chips hero must call to continue (C). This is 0 for
  *               pure bet spots and >0 for facing a bet / raise.
- *  - minTotal:  optional minimum legal total (e.g. min-raise total).
- *  - maxTotal:  optional maximum legal total (e.g. jam total from backend).
- *  - heroStack: optional remaining chips behind for hero (excluding
- *               any chips already committed).
+ *  - heroStack: remaining chips behind for hero (excluding any chips
+ *               already committed). This is used to ensure we never propose
+ *               a total greater than the hero’s stack.
+ *  - minRaise:  optional minimum legal total (e.g. min‑raise total).
+ *  - maxRaise:  optional maximum legal total (e.g. jam total from backend).
  *
- * Formula (from the design doc):
- *
- *   pot_after_call = P + C
- *   total_invested = C + X * pot_after_call
- *
- * where X is the fraction corresponding to the percentage (e.g. 0.5
- * for "50%"). We then clamp this total to legal bounds and hero's
- * remaining stack and round to the nearest whole chip.
+ * Formula:
+ *   total = C + f * (P + C)
+ * where f is the fraction corresponding to the percentage. We then clamp
+ * this total to legal bounds and hero's remaining stack and round to the
+ * nearest whole chip. If the result is <= 0, returns null.
  */
 export function amountForPercentLabel(
   label: string,
-  potBefore: Chips,
+  pot: Chips,
   toCall: Chips,
-  minTotal?: Chips | null,
-  maxTotal?: Chips | null,
-  heroStack?: Chips | null
-): Chips {
-  const frac = parsePercentLabel(label);
-  const pot = Number(potBefore) || 0;
-  const call = Number(toCall) || 0;
+  heroStack: Chips,
+  minRaise?: Chips,
+  maxRaise?: Chips
+): Chips | null {
+  const m = String(label).trim().match(/^(\d+(?:\.\d+)?)%$/);
+  if (!m) return null;
+  const pct = parseFloat(m[1]) / 100;
+  const P = Number(pot) || 0;
+  const C = Number(toCall) || 0;
+  let total = C + pct * (P + C);
 
-  // Fallback: if the label is not a percent, just return a safe minimum.
-  if (!frac) {
-    const fallback =
-      minTotal != null && minTotal > 0 ? Number(minTotal) : call;
-    const n = Math.round(fallback);
-    return n > 0 ? n : 0;
+  // Enforce minimum raise if provided. We do not apply any minimum if
+  // minRaise is undefined or non‑positive. Note that C is part of total
+  // already, so minRaise should be the total amount to invest.
+  if (typeof minRaise === 'number' && minRaise > 0 && total < minRaise) {
+    total = minRaise;
   }
-
-  const potAfterCall = pot + call;
-  let total = call + frac * potAfterCall;
 
   // Clamp to explicit max bound if provided (e.g. jam total).
-  if (typeof maxTotal === "number" && maxTotal > 0) {
-    total = Math.min(total, maxTotal);
+  if (typeof maxRaise === 'number' && maxRaise > 0 && total > maxRaise) {
+    total = maxRaise;
   }
 
-  // Clamp so that the *additional* chips do not exceed hero's stack.
-  if (typeof heroStack === "number" && heroStack >= 0) {
-    const maxByStack = call + heroStack;
-    total = Math.min(total, maxByStack);
-  }
-
-  // Enforce minimum total (e.g. min-raise) or at least a call.
-  const min =
-    minTotal != null && minTotal > 0 ? Number(minTotal) : call;
-  if (total < min) {
-    total = min;
+  // Clamp so that the *additional* chips do not exceed hero's stack. If
+  // heroStack is undefined we skip this check and rely on other bounds.
+  if (typeof heroStack === 'number' && heroStack >= 0) {
+    const maxByStack = C + heroStack;
+    if (total > maxByStack) {
+      total = maxByStack;
+    }
   }
 
   const rounded = Math.round(total);
-  return rounded > 0 ? rounded : 0;
+  return rounded > 0 ? rounded : null;
 }
 
 /**
