@@ -46,10 +46,17 @@ export type HeroPosition =
 /** Mixed strategy over action labels. Keys are bucket labels. */
 export type ActionMix = Record<string, number>;
 
-export interface AdviceStrategyPart {
+/**
+ * Generic strategy-part shape used by legacy coach types.
+ * `types/coach.ts` re-exports this as `AdviceStrategyPart`.
+ */
+export interface StrategyPart {
   action: string;
   weight: number;
 }
+
+/** Alias kept for clarity in newer code. */
+export type AdviceStrategyPart = StrategyPart;
 
 /**
  * The coach’s recommendation for this spot.
@@ -205,5 +212,6 @@ export interface AdvicePayloadV1 {
   rationale?: string | null;
 }
 
-/** Convenience alias used throughout the frontend. */
+/** Convenience aliases used throughout the frontend. */
 export type Advice = AdvicePayloadV1;
+export type AdviceV1 = AdvicePayloadV1;
