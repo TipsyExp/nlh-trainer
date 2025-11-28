@@ -70,11 +70,21 @@ function stableIndex(key: string, mod: number): number {
 function pickColor(key: string, i: number) {
   // Prefer classic poker action colors when we can recognize the key
   const k = key.toLowerCase();
+
   if (k.includes("fold")) return "bg-rose-500";
   if (k.includes("check")) return "bg-gray-400";
   if (k.includes("call")) return "bg-emerald-500";
+
+  // Detect overbets: explicit "overbet" or % labels > 100%
+  const pctMatch = k.match(/(\d+(?:\.\d+)?)%/);
+  const pct = pctMatch ? parseFloat(pctMatch[1]) : null;
+  if (k.includes("overbet") || (pct !== null && pct > 100)) {
+    return "bg-amber-600";
+  }
+
   if (k.includes("bet") || k.includes("%")) return "bg-blue-500";
   if (k.includes("raise")) return "bg-violet-500";
+
   return defaultPalette[i % defaultPalette.length];
 }
 
@@ -98,7 +108,10 @@ function toEntries(data: StrategyMap | StrategyEntry[]): StrategyEntry[] {
 }
 
 function normalizeWeights(entries: StrategyEntry[]): StrategyEntry[] {
-  const sum = entries.reduce((acc, e) => acc + (isFinite(e.p) ? Math.max(0, e.p) : 0), 0);
+  const sum = entries.reduce(
+    (acc, e) => acc + (isFinite(e.p) ? Math.max(0, e.p) : 0),
+    0
+  );
   if (sum <= 0) {
     // Avoid division by zero; evenly distribute
     const even = entries.length > 0 ? 1 / entries.length : 0;
@@ -158,7 +171,9 @@ export function StrategyBar({
           "w-full overflow-hidden rounded-lg ring-1 ring-gray-200 bg-gray-100",
           sizeHeights[size]
         )}
-        title={entries.map((e) => `${e.label ?? e.key}: ${formatPct(e.p, precision)}`).join(" • ")}
+        title={entries
+          .map((e) => `${e.label ?? e.key}: ${formatPct(e.p, precision)}`)
+          .join(" • ")}
       >
         <div className="flex w-full h-full">
           {entries.map((e, i) => (
@@ -166,7 +181,10 @@ export function StrategyBar({
               key={e.key}
               className={clsx("h-full", e.color || pickColor(e.key, i))}
               style={{ width: `${Math.max(0, rounded[i] || 0)}%` }}
-              title={e.title ?? `${e.label ?? e.key} — ${formatPct(e.p, precision)}`}
+              title={
+                e.title ??
+                `${e.label ?? e.key} — ${formatPct(e.p, precision)}`
+              }
             />
           ))}
         </div>
@@ -175,7 +193,10 @@ export function StrategyBar({
       {showLegend && (
         <div className="mt-2 grid grid-cols-1 gap-1 sm:grid-cols-2">
           {entries.map((e, i) => (
-            <div key={`legend-${e.key}`} className="flex items-center gap-2 text-sm text-gray-700">
+            <div
+              key={`legend-${e.key}`}
+              className="flex items-center gap-2 text-sm text-gray-700"
+            >
               <span
                 className={clsx(
                   "inline-block h-3 w-3 rounded-sm ring-1 ring-gray-300",

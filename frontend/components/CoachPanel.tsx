@@ -103,9 +103,7 @@ export function CoachPanel({
 
   const [events, setEvents] = useState<DebugEvent[]>([]);
 
-  // Track whether the coach endpoint is explicitly disabled (HTTP 501). When
-  // this is true the UI shows a Disabled badge. The flag is reset when
-  // subsequent requests succeed or when advice is fetched successfully.
+  // Track whether the coach endpoint is explicitly disabled (HTTP 501).
   const [isDisabled, setIsDisabled] = useState<boolean>(false);
 
   const isPostflop = useMemo(() => {
@@ -153,9 +151,7 @@ export function CoachPanel({
 
       try {
         // If the backend reports the coach advice endpoint as disabled (HTTP 501),
-        // treat this as a disabled state rather than an error. Do not set advice
-        // or error; instead set the disabled flag so the UI shows the
-        // appropriate badge.
+        // treat this as a disabled state rather than an error.
         if (raw.disabled) {
           setAdvice(null);
           setError(null);
@@ -199,9 +195,7 @@ export function CoachPanel({
     // re-fetch when any of these change
   }, [canFetch, enabled, handId, idx, debugOn]);
 
-  // Derive the current status for the coach. If the endpoint is disabled,
-  // override whatever meta status might be present. Otherwise fall back
-  // to the advice status (AdviceV1), legacy meta.status, error state, or enabled flag.
+  // Derive the current status for the coach.
   const status: AdviceStatus | "unavailable" = isDisabled
     ? "disabled"
     : advice?.status ??
@@ -209,8 +203,6 @@ export function CoachPanel({
       (error ? "error" : enabled ? "ok" : "disabled");
 
   // --- PRE-FLOP BADGE OVERRIDE (minor polish) ---
-  // If we're preflop *and* the feature is enabled, show a neutral
-  // "n/a preflop" badge instead of "On".
   type BadgeStatus =
     | "ok"
     | "disabled"
@@ -277,6 +269,33 @@ export function CoachPanel({
 
   const lastEvent = events[0];
 
+  // Normalised source badge (solver vs equity vs chart vs coach)
+  let sourceBadge: JSX.Element | null = null;
+  if (advice && advice.meta) {
+    const raw = (advice.meta.source || "").toString().toLowerCase();
+    if (raw) {
+      let label = advice.meta.source as string;
+      let color = "bg-gray-100 text-gray-700";
+      if (raw.includes("solver") || raw.includes("texas")) {
+        label = "Solver";
+        color = "bg-indigo-100 text-indigo-800";
+      } else if (raw.includes("equity")) {
+        label = "Equity";
+        color = "bg-emerald-100 text-emerald-800";
+      } else if (raw.includes("chart") || raw.includes("preflop")) {
+        label = "Chart";
+        color = "bg-blue-100 text-blue-800";
+      } else {
+        // leave backend-provided label but with neutral styling
+        label = advice.meta.source as string;
+      }
+      sourceBadge = <Badge text={label} color={color} />;
+    } else if (status === "ok") {
+      // Generic coach when we don't know the exact engine
+      sourceBadge = <Badge text="Coach" color="bg-gray-100 text-gray-700" />;
+    }
+  }
+
   return (
     <div className="rounded-2xl bg-white shadow p-4 space-y-3">
       <div className="flex items-center justify-between">
@@ -322,6 +341,14 @@ export function CoachPanel({
 
           {!loading && advice && status === "ok" && (
             <div className="space-y-3">
+              {/* Source badge row */}
+              {sourceBadge && (
+                <div className="text-xs text-gray-500 flex items-center gap-2">
+                  <span>Source:</span>
+                  {sourceBadge}
+                </div>
+              )}
+
               <div className="text-sm">
                 <span className="text-gray-500 mr-1">Recommended:</span>
                 <span className="font-medium">
@@ -338,22 +365,29 @@ export function CoachPanel({
 
               {/* Strategy list */}
               <div className="space-y-1">
-                {sortedStrategy.map(([label, p]) => (
-                  <div key={label} className="flex items-center gap-2">
-                    <div className="w-24 text-xs text-gray-600">{label}</div>
-                    <div className="flex-1 bg-gray-100 rounded-full h-2 overflow-hidden">
-                      <div
-                        className="bg-black h-2"
-                        style={{
-                          width: `${Math.min(100, Math.max(0, p * 100))}%`,
-                        }}
-                      />
+                {sortedStrategy.map(([label, p]) => {
+                  const weight = Number(p);
+                  const frac = Number.isFinite(weight) ? weight : 0;
+                  const pct = Math.min(100, Math.max(0, frac * 100));
+                  return (
+                    <div key={label} className="flex items-center gap-2">
+                      <div className="w-24 text-xs text-gray-600 truncate">
+                        {label}
+                      </div>
+                      <div className="flex-1 bg-gray-100 rounded-full h-2 overflow-hidden">
+                        <div
+                          className="bg-black h-2"
+                          style={{
+                            width: `${pct}%`,
+                          }}
+                        />
+                      </div>
+                      <div className="w-12 text-right text-xs">
+                        {pct.toFixed(1)}%
+                      </div>
                     </div>
-                    <div className="w-12 text-right text-xs">
-                      {(p * 100).toFixed(1)}%
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               {/* Optional EV row */}
@@ -364,7 +398,7 @@ export function CoachPanel({
                     {Object.entries(advice.ev_map).map(([k, v]) => (
                       <div key={k} className="flex justify-between">
                         <span className="text-gray-600">{k}</span>
-                        <span>{v.toFixed(2)}</span>
+                        <span>{Number(v).toFixed(2)}</span>
                       </div>
                     ))}
                   </div>

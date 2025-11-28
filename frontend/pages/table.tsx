@@ -1,11 +1,9 @@
 // frontend/pages/table.tsx
-// Updated Table page with unified guidance overlay integration.
+// Minimal dark-mode table page for playing vs the bot.
 //
-// This page renders the main NLH table UI. It includes a right-side
-// guidance overlay that is gated by build-time environment variables
-// (NEXT_PUBLIC_DEV_TOOLS and NEXT_PUBLIC_HELP_OVERLAY_ENABLED) and a
-// per-session toggle persisted in localStorage. The overlay now fetches
-// a unified Advice payload from /api/coach/advice via useDecisionOverlay.
+// - Shows basic table info, board, hero and opponent.
+// - Provides action buttons based on allowed_buckets.
+// - No coach overlay, no CoachPanel, no advice wiring.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Api } from '../lib/api';
@@ -15,17 +13,10 @@ import type {
   Actor,
   AllowedAction,
 } from '../lib/types/hand';
-import { CoachPanel } from '../components/CoachPanel';
 import { WaitingOverlay } from '../components/WaitingOverlay';
 import { BoardRow as CommunityBoardRow } from '../components/common/Cards';
-import { globalOverlayGate } from '../utils/overlayFlags';
-import { useHelpOverlayToggle } from '../hooks/useHelpOverlayToggle';
-import { HelpOverlayToggle } from '../components/HelpOverlayToggle';
-import { DecisionHelpOverlay } from '../components/DecisionHelpOverlay';
-import type { DecisionContext } from '../types/decision';
-import { useDecisionOverlay } from '../hooks/useDecisionOverlay';
-import { mapCoachToAction } from '../utils/coachMapping';
-// Dev inspector for snapshot testing. Loaded only when dev tools are enabled.
+import { formatStack } from '../utils/stack';
+import { amountForPercentLabel } from '../utils/potSizing';
 import SnapshotInspector from '../dev/SnapshotInspector';
 
 // Gate dev-only /api/hand/auto. Default is false unless explicitly enabled.
@@ -38,6 +29,11 @@ const DEV_TOOLS = ['1', 'true', 'yes', 'on'].includes(
 
 const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
+// X-multiplier labels, e.g. "2.2x", "3x"
+const MULTIPLIER_LABEL_RE = /^(\d+(?:\.\d+)?)x$/;
+// % labels, e.g. "33%", "50%", "75%"
+const PERCENT_LABEL_RE = /^(\d+(?:\.\d+)?)%$/;
+
 export default function TablePage() {
   const [loading, setLoading] = useState(false);
   const [state, setState] = useState<HandState | null>(null);
@@ -45,19 +41,7 @@ export default function TablePage() {
   const [err, setErr] = useState<string | null>(null);
   const [botsAdvancing, setBotsAdvancing] = useState(false);
 
-  const COACH_TOGGLE_KEY = 'coachEnabled';
   const HUMAN_SEAT_KEY = 'humanSeat';
-
-  const [coachEnabled, setCoachEnabled] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    const raw = localStorage.getItem(COACH_TOGGLE_KEY);
-    return raw === '1';
-  });
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(COACH_TOGGLE_KEY, coachEnabled ? '1' : '0');
-    }
-  }, [coachEnabled]);
 
   const [handId, setHandId] = useState<string | null>(null);
 
@@ -80,8 +64,9 @@ export default function TablePage() {
   // Prefer state.allowed/to_act if present; fallback to legacy actor
   const allowedCtx: AllowedContext | null = useMemo(() => {
     if (!state) return null;
-    if (state.allowed && typeof state.allowed.to_call === 'number')
+    if (state.allowed && typeof state.allowed.to_call === 'number') {
       return state.allowed;
+    }
     if (actor) {
       return {
         to_call: actor.to_call,
@@ -92,8 +77,28 @@ export default function TablePage() {
     return null;
   }, [state, actor, bb]);
 
+  const allowedBuckets = useMemo(
+    () => allowedCtx?.allowed_buckets ?? [],
+    [allowedCtx]
+  );
+
   const toActSeat = state?.to_act ?? actor?.seat ?? null;
   const canAct = toActSeat === humanSeat;
+
+  // Dynamic verb for any sized action
+  const currentSizedVerb: 'bet' | 'raise' =
+    allowedCtx?.to_call === 0 ? 'bet' : 'raise';
+  const sizedLabel = allowedCtx?.to_call === 0 ? 'Bet' : 'Raise';
+
+  // Typed actions, used for jam sizing when backend provides it.
+  const typedActions: AllowedAction[] = state?.allowed?.actions ?? [];
+
+  // If backend gives us a jam action with an explicit amount, use it.
+  // Otherwise we will call "jam" without an amount and let the server decide.
+  const jamAction = useMemo(
+    () => typedActions.find((a) => a.type === 'jam'),
+    [typedActions]
+  );
 
   const refresh = useCallback(async () => {
     setErr(null);
@@ -187,8 +192,6 @@ export default function TablePage() {
     try {
       const res = await Api.postAction({ seat: humanSeat, action, amount });
       setState(res.state);
-
-      // Always follow up by polling until it's our turn or the hand is over.
       await pollUntilSettled(humanSeat);
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -197,32 +200,34 @@ export default function TablePage() {
     }
   }
 
-  // Preflop open helpers
+  // Preflop open helpers (X × BB)
   function amountForOpenLabel(label: string): number | undefined {
-    const m = label.match(/^(\d+(?:\.\d+)?)x$/);
+    const m = label.match(MULTIPLIER_LABEL_RE);
     if (!m) return undefined;
     const mult = parseFloat(m[1]);
     return Math.round(mult * bb);
   }
 
-  // Prefer typed jam amount when provided by backend; fallback to sentinel
-  const typedActions: AllowedAction[] = state?.allowed?.actions ?? [];
-  const jamTotal = useMemo(
-    () =>
-      typedActions.find(
-        (a) => a.type === 'jam' && typeof a.amount === 'number'
-      )?.amount,
-    [typedActions]
-  );
-  function jamAmount(): number {
-    return typeof jamTotal === 'number' ? jamTotal : 1_000_000_000;
+  function handleJam() {
+    if (!allowedCtx) return;
+
+    // Prefer the explicit "jam" verb if it's in allowed_buckets; otherwise
+    // fall back to the current sized verb (bet/raise) just in case.
+    const verb = allowedCtx.allowed_buckets?.includes('jam')
+      ? 'jam'
+      : currentSizedVerb;
+
+    const amount =
+      jamAction && typeof jamAction.amount === 'number'
+        ? jamAction.amount
+        : undefined;
+
+    // Do NOT invent a giant fallback like 1e12; if the backend needs an
+    // explicit amount it should give us one.
+    postAction(verb, amount);
   }
 
-  // Dynamic verb for any sized action
-  const currentSizedVerb = allowedCtx?.to_call === 0 ? 'bet' : 'raise';
-  const sizedLabel = allowedCtx?.to_call === 0 ? 'Bet' : 'Raise';
-
-  // Decision idx (best-effort)
+  // Decision idx (best-effort; still handy for debugging)
   const decisionIdx =
     typeof (state as any)?.decision_idx === 'number'
       ? (state as any).decision_idx
@@ -230,117 +235,70 @@ export default function TablePage() {
       ? 0
       : null;
 
-  // ----- Guidance overlay state -----
-  // Read per-session toggle and compute overlayEnabled using global gate.
-  const { enabled: helpEnabled, setEnabled: setHelpEnabled } =
-    useHelpOverlayToggle(handId || undefined);
-  const overlayEnabled = globalOverlayGate && helpEnabled;
+  // Hero / opponent lookup
+  const heroPlayer: any | null = useMemo(
+    () => state?.players?.find((p: any) => p.seat === humanSeat) ?? null,
+    [state?.players, humanSeat]
+  );
+  const opponentPlayer: any | null = useMemo(
+    () => state?.players?.find((p: any) => p.seat !== humanSeat) ?? null,
+    [state?.players, humanSeat]
+  );
 
-  // Derive hero hole cards (still handy for future overlay features).
-  const heroCards: string[] = useMemo(() => {
-    const hero = state?.players?.find((p: any) => p.seat === humanSeat);
-    return hero?.hole_cards ? [...hero.hole_cards] : [];
-  }, [state?.players, humanSeat]);
+  const heroCards: string[] = useMemo(
+    () => (heroPlayer?.hole_cards ? [...heroPlayer.hole_cards] : []),
+    [heroPlayer]
+  );
 
-  // Flatten the board across streets.
-  const boardCards: string[] = useMemo(() => {
-    const flopCards: string[] = state?.board?.flop ?? [];
-    const turnCards: string[] = state?.board?.turn ?? [];
-    const riverCards: string[] = state?.board?.river ?? [];
-    return [...flopCards, ...turnCards, ...riverCards];
-  }, [state?.board]);
+  const heroStack: number | null = useMemo(() => {
+    if (!heroPlayer) return null;
+    const raw =
+      (heroPlayer as any).stack_after ??
+      (heroPlayer as any).stack ??
+      (heroPlayer as any).chips ??
+      null;
+    return typeof raw === 'number' ? raw : null;
+  }, [heroPlayer]);
 
-  // Map of opponent seat -> known hole cards (fully revealed).
-  const knownHandsBySeat: Record<number, string[]> = useMemo(() => {
-    const map: Record<number, string[]> = {};
-    if (state?.players) {
-      state.players.forEach((p: any) => {
-        if (p.hole_cards && p.hole_cards.length === 2) {
-          if (p.seat !== humanSeat) {
-            map[p.seat] = [...p.hole_cards];
-          }
-        }
-      });
+  const opponentStack: number | null = useMemo(() => {
+    if (!opponentPlayer) return null;
+    const raw =
+      (opponentPlayer as any).stack_after ??
+      (opponentPlayer as any).stack ??
+      (opponentPlayer as any).chips ??
+      null;
+    return typeof raw === 'number' ? raw : null;
+  }, [opponentPlayer]);
+
+  // Board extraction
+  const flop: string[] = state?.board?.flop ?? [];
+  const turnArr: string[] = state?.board?.turn ?? [];
+  const riverArr: string[] = state?.board?.river ?? [];
+  const turnCard: string | null =
+    turnArr.length > 0 ? turnArr[turnArr.length - 1] : null;
+  const riverCard: string | null =
+    riverArr.length > 0 ? riverArr[riverArr.length - 1] : null;
+
+  // Action visibility flags
+  const showCheck = allowedBuckets.includes('check');
+  const showCall = allowedBuckets.includes('call');
+  const foldListed = allowedBuckets.includes('fold');
+  const showFold =
+    foldListed || (!foldListed && (allowedCtx?.to_call ?? 0) > 0);
+  const showJam = allowedBuckets.includes('jam');
+
+  // Size presets:
+  // - preflop: use X-multipliers from allowedBuckets
+  // - postflop: fixed % of pot labels
+  const sizedLabels = useMemo(() => {
+    if (!state) return [];
+    const street = state.street ?? 'preflop';
+    if (street.toLowerCase() === 'preflop') {
+      return allowedBuckets.filter((b) => MULTIPLIER_LABEL_RE.test(b));
     }
-    return map;
-  }, [state?.players, humanSeat]);
-
-  // Number of players (reserved for future overlay enhancements).
-  const playerCount: number = useMemo(
-    () => state?.players?.length ?? 0,
-    [state?.players]
-  );
-
-  // Build a decision context for overlay hooks.
-  const decisionCtx: DecisionContext = useMemo(
-    () => ({
-      handId,
-      idx: decisionIdx,
-      street: state?.street || null,
-      heroSeat: humanSeat,
-      pot,
-      toCall: allowedCtx?.to_call ?? 0,
-      heroCards,
-      board: boardCards,
-      knownHandsBySeat,
-      playerCount,
-    }),
-    [
-      handId,
-      decisionIdx,
-      state?.street,
-      humanSeat,
-      pot,
-      allowedCtx?.to_call,
-      heroCards,
-      boardCards,
-      knownHandsBySeat,
-      playerCount,
-    ]
-  );
-
-  // Fetch unified advice for the overlay.
-  const { advice } = useDecisionOverlay(decisionCtx, overlayEnabled);
-
-  // Derive allowed buckets & raise presets (used by highlight + UI).
-  const allowedBuckets = useMemo(
-    () => allowedCtx?.allowed_buckets ?? [],
-    [allowedCtx]
-  );
-  const sizedLabels = useMemo(
-    () => allowedBuckets.filter((b) => /^\d+(?:\.\d+)?x$/.test(b)),
-    [allowedBuckets]
-  );
-
-  // Final highlighted action key based on advice recommendation and presets.
-  const highlightedAction: string | null = useMemo(() => {
-    if (advice.status !== 'ok' || !advice.data) return null;
-
-    // Be tolerant of both shapes:
-    // - recommendation.bucket  (current backend)
-    // - recommendation.primary_action (future / canonical)
-    const rec: any = advice.data.recommendation ?? null;
-    const bucket: string | null =
-      rec && (rec.bucket || rec.primary_action) ? (rec.bucket ?? rec.primary_action) : null;
-
-    if (!bucket) return null;
-    const toCall = allowedCtx?.to_call ?? 0;
-    return mapCoachToAction(bucket, toCall, sizedLabels);
-  }, [advice, allowedCtx, sizedLabels]);
-
-  // Log overlay state changes in dev for diagnostics.
-  useEffect(() => {
-    if (!DEV_TOOLS) return;
-    // eslint-disable-next-line no-console
-    console.debug('[overlay] enabled:', overlayEnabled);
-  }, [overlayEnabled]);
-
-  const coachShouldShow =
-    coachEnabled &&
-    canAct &&
-    state &&
-    state.street !== 'preflop' &&
-    decisionIdx !== null;
+    // postflop: fixed percent options
+    return ['33%', '50%', '75%', '100%'];
+  }, [allowedBuckets, state]);
 
   // Dev util: copy raw state
   const copyState = async () => {
@@ -352,71 +310,44 @@ export default function TablePage() {
     }
   };
 
-  // Board extraction using structured board; show latest single turn/river card
-  const flop: string[] = state?.board?.flop ?? [];
-  const turnArr: string[] = state?.board?.turn ?? [];
-  const riverArr: string[] = state?.board?.river ?? [];
-  const turnCard: string | null =
-    turnArr.length > 0 ? turnArr[turnArr.length - 1] : null;
-  const riverCard: string | null =
-    riverArr.length > 0 ? riverArr[riverArr.length - 1] : null;
-
-  // Allowed buckets helpers (use existing allowedBuckets/sizedLabels).
-  const showCheck = allowedBuckets.includes('check');
-  const showCall = allowedBuckets.includes('call');
-  // Defensive: if server omitted "fold" but to_call > 0, still show Fold.
-  const foldListed = allowedBuckets.includes('fold');
-  const showFold =
-    foldListed || (!foldListed && (allowedCtx?.to_call ?? 0) > 0);
-  const showJam = allowedBuckets.includes('jam');
-
   return (
-    <main className="min-h-screen p-6 bg-gray-50 relative">
-      {/* Overlay shown when waiting for bots to act (prod mode). */}
+    <main className="min-h-screen bg-slate-950 text-slate-50 relative">
+      {/* Overlay shown when waiting for bots to act */}
       <WaitingOverlay show={botsAdvancing} message="Waiting for opponents…" />
 
-      {/* Guidance overlay (unified advice integration) */}
-      {overlayEnabled && (
-        <DecisionHelpOverlay decision={decisionCtx} advice={advice} />
-      )}
-
-      {/* Snapshot inspector. Renders only when dev tools are enabled. */}
       {DEV_TOOLS && <SnapshotInspector />}
 
-      <div className="max-w-5xl mx-auto grid gap-6">
-        <header className="flex items-center justify-between">
-          <h1 className="text-2xl font-bold">NLH Trainer — Table</h1>
+      <div className="max-w-6xl mx-auto px-4 py-6 space-y-4">
+        {/* Header */}
+        <header className="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div>
+            <h1 className="text-xl font-semibold tracking-wide">
+              Poker — Info
+            </h1>
+            <p className="text-xs text-slate-400 mt-1">
+              {state
+                ? `${state.table.sb}/${state.table.bb} · ${
+                    state.table.seats
+                  } seats · BTN ${state.table.button}`
+                : 'No session active'}
+            </p>
+          </div>
           <div className="flex items-center gap-3">
             {botsAdvancing && (
-              <span className="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-800">
+              <span className="text-[11px] px-2 py-1 rounded-full bg-amber-500/20 text-amber-200 border border-amber-500/40">
                 Bots thinking…
               </span>
             )}
-            <label className="flex items-center gap-2 text-sm">
-              <input
-                type="checkbox"
-                checked={coachEnabled}
-                onChange={(e) => setCoachEnabled(e.target.checked)}
-              />
-              <span>Coach</span>
-            </label>
-            {/* Show guidance toggle only when globally enabled */}
-            {globalOverlayGate && (
-              <HelpOverlayToggle
-                enabled={helpEnabled}
-                setEnabled={setHelpEnabled}
-              />
-            )}
             <button
               onClick={onStartHand}
-              className="rounded-xl bg-black text-white px-4 py-2 disabled:opacity-50"
+              className="rounded-xl bg-emerald-500 text-slate-950 px-4 py-2 text-sm font-medium disabled:opacity-50"
               disabled={loading}
             >
               {loading ? 'Working…' : 'Start Hand'}
             </button>
             <button
               onClick={refresh}
-              className="rounded-xl border px-4 py-2 disabled:opacity-50"
+              className="rounded-xl border border-slate-600 px-4 py-2 text-sm text-slate-100 disabled:opacity-50"
               disabled={loading}
             >
               Refresh
@@ -424,7 +355,7 @@ export default function TablePage() {
             {DEV_TOOLS && (
               <button
                 onClick={copyState}
-                className="rounded-xl border px-3 py-2 text-xs disabled:opacity-50"
+                className="rounded-xl border border-slate-600 px-3 py-2 text-[11px] text-slate-200 disabled:opacity-50"
                 disabled={!state}
                 title="Copy /api/hand/state JSON"
               >
@@ -434,199 +365,287 @@ export default function TablePage() {
           </div>
         </header>
 
+        {/* Error message */}
         {err && (
-          <div className="rounded-xl bg-red-50 text-red-700 p-3">{err}</div>
+          <div className="rounded-xl border border-rose-600 bg-rose-950/60 text-rose-100 px-3 py-2 text-sm">
+            {err}
+          </div>
         )}
 
-        {/* Snapshot */}
-        {state && (
-          <div className="grid md:grid-cols-3 gap-4">
-            {/* Table card */}
-            <div className="rounded-2xl bg-white shadow p-4 space-y-2">
-              <h2 className="font-semibold">Table</h2>
-              <div className="text-sm text-gray-700">
-                <div>Seats: {state.table.seats}</div>
-                <div>
-                  Blinds: {state.table.sb}/{state.table.bb}
+        {/* Table info strip */}
+        <section className="rounded-xl border border-slate-800 bg-slate-900/70 px-4 py-2 text-[11px] flex flex-wrap gap-x-4 gap-y-1">
+          <span>
+            Street:{' '}
+            <span className="font-medium">
+              {state?.street ?? '—'}
+            </span>
+          </span>
+          <span>
+            Pot:{' '}
+            <span className="font-medium">
+              {pot}
+            </span>
+          </span>
+          {handId && (
+            <span>
+              Hand:{' '}
+              <span className="font-mono text-slate-300">
+                {handId}
+              </span>
+            </span>
+          )}
+          {typeof decisionIdx === 'number' && (
+            <span>
+              Decision:{' '}
+              <span className="font-medium">
+                {decisionIdx}
+              </span>
+            </span>
+          )}
+          <span>
+            Hero seat:{' '}
+            <span className="font-medium">
+              {humanSeat}
+            </span>
+          </span>
+          {heroStack != null && (
+            <span>
+              Hero stack:{' '}
+              <span className="font-medium">
+                {formatStack(heroStack, bb)}
+              </span>
+            </span>
+          )}
+        </section>
+
+        {/* Main table view */}
+        <section className="grid gap-4 lg:grid-rows-[1fr_auto]">
+          {/* Central table */}
+          <div className="rounded-2xl border border-slate-800 bg-gradient-to-b from-slate-900 to-slate-950 px-4 py-5 flex flex-col gap-6">
+            {/* Opponent */}
+            <div className="flex justify-center">
+              <div className="inline-flex flex-col items-center gap-2 px-4 py-3 rounded-2xl bg-slate-900/80 border border-slate-700 shadow-sm">
+                <div className="text-xs uppercase tracking-wider text-slate-400">
+                  Opponent
                 </div>
-                <div>Button: {state.table.button}</div>
-                <div>SB Seat: {state.table.sb_seat}</div>
-                <div>BB Seat: {state.table.bb_seat}</div>
-                <div>Street: {state.street}</div>
-                <div>Pot: {pot}</div>
-                <div className="text-gray-500 text-xs">
-                  Seed: {state.deck_seed}
+                <div className="flex gap-1 text-lg">
+                  <span className="inline-block rounded-md bg-slate-800 px-3 py-1 text-slate-300 text-sm">
+                    Cards hidden
+                  </span>
                 </div>
-                {handId && (
-                  <div className="text-gray-500 text-xs">Hand: {handId}</div>
-                )}
-                {typeof decisionIdx === 'number' && (
-                  <div className="text-gray-500 text-xs">
-                    Decision: {decisionIdx}
-                  </div>
-                )}
+                <div className="text-[11px] text-slate-400 mt-1">
+                  Seat{' '}
+                  {opponentPlayer ? opponentPlayer.seat : '—'}
+                </div>
+                <div className="text-xs text-slate-300">
+                  Stack:{' '}
+                  {opponentStack != null
+                    ? formatStack(opponentStack, bb)
+                    : '—'}
+                </div>
               </div>
             </div>
 
-            {/* Players */}
-            <div className="rounded-2xl bg-white shadow p-4 space-y-2 md:col-span-2">
-              <h2 className="font-semibold">Players</h2>
-              <div className="grid sm:grid-cols-2 gap-3">
-                {state.players.map((p: any) => (
-                  <div
-                    key={p.seat}
-                    className={`rounded-xl border p-3 ${
-                      p.seat === humanSeat
-                        ? 'border-black'
-                        : 'border-gray-200'
-                    }`}
-                  >
-                    <div className="text-sm font-medium">
-                      Seat {p.seat} {p.seat === humanSeat && '(You)'}
-                    </div>
-                    <div className="text-sm text-gray-700">
-                      Hand: {p.hole_cards[0]} {p.hole_cards[1]}
-                    </div>
-                  </div>
-                ))}
+            {/* Board */}
+            <div className="flex flex-col items-center gap-2">
+              <div className="text-xs uppercase tracking-widest text-slate-400">
+                Board · Pot {pot}
+              </div>
+              <CommunityBoardRow
+                flop={flop}
+                turn={turnCard}
+                river={riverCard}
+              />
+            </div>
+
+            {/* Hero */}
+            <div className="flex justify-center">
+              <div className="inline-flex flex-col items-center gap-2 px-4 py-3 rounded-2xl bg-slate-900/80 border border-slate-700 shadow-sm">
+                <div className="text-xs uppercase tracking-wider text-slate-400">
+                  Player
+                </div>
+                <div className="flex gap-2 text-lg">
+                  {heroCards.length === 2 ? (
+                    <>
+                      <span className="inline-block rounded-md bg-slate-800 px-3 py-1 text-slate-100">
+                        {heroCards[0]}
+                      </span>
+                      <span className="inline-block rounded-md bg-slate-800 px-3 py-1 text-slate-100">
+                        {heroCards[1]}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="inline-block rounded-md bg-slate-800 px-3 py-1 text-slate-300 text-sm">
+                      Cards unknown
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1">
+                  Seat {humanSeat} (You)
+                </div>
+                <div className="text-xs text-slate-300">
+                  Stack:{' '}
+                  {heroStack != null
+                    ? formatStack(heroStack, bb)
+                    : '—'}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Action panel */}
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold tracking-wide text-slate-100">
+                Preset Bet Sizes
+              </h2>
+              <div className="text-xs text-slate-400">
+                To call:{' '}
+                <span className="font-medium">
+                  {allowedCtx?.to_call ?? 0}
+                </span>
               </div>
             </div>
 
-            {/* Board (full-width) */}
-            <div className="rounded-2xl bg-white shadow p-4 space-y-2 md:col-span-3">
-              <h2 className="font-semibold">Board</h2>
+            {canAct && allowedCtx && state ? (
+              <>
+                {/* Big primary buttons */}
+                <div className="flex flex-wrap gap-3">
+                  {/* Fold */}
+                  {showFold && (
+                    <button
+                      onClick={() => postAction('fold')}
+                      className="flex-1 min-w-[90px] rounded-2xl px-4 py-3 text-sm font-semibold border border-rose-700/70 bg-gradient-to-br from-rose-900 to-rose-800 text-rose-50 shadow-sm disabled:opacity-50"
+                      disabled={loading}
+                    >
+                      Fold
+                    </button>
+                  )}
 
-              {/* Board legend + shared row */}
-              <div className="space-y-1">
-                <div className="text-xs text-gray-500">Flop / Turn / River</div>
-                <CommunityBoardRow
-                  flop={flop}
-                  turn={turnCard}
-                  river={riverCard}
+                  {/* Check / Call */}
+                  {(showCheck || showCall) && (
+                    <button
+                      onClick={() =>
+                        postAction(showCall ? 'call' : 'check')
+                      }
+                      className="flex-1 min-w-[110px] rounded-2xl px-4 py-3 text-sm font-semibold border border-slate-600 bg-slate-800 text-slate-50 shadow-sm disabled:opacity-50"
+                      disabled={loading}
+                    >
+                      {showCall
+                        ? `Call ${allowedCtx.to_call}`
+                        : 'Check'}
+                    </button>
+                  )}
+
+                  {/* Jam */}
+                  {showJam && (
+                    <button
+                      onClick={handleJam}
+                      className="flex-1 min-w-[90px] rounded-2xl px-4 py-3 text-sm font-semibold border border-red-700/70 bg-gradient-to-br from-red-900 to-red-800 text-red-50 shadow-sm disabled:opacity-50"
+                      disabled={loading}
+                    >
+                      Jam
+                    </button>
+                  )}
+                </div>
+
+                {/* Size presets row */}
+                {sizedLabels.length > 0 && (
+                  <div className="space-y-1">
+                    <div className="text-[11px] text-slate-400">
+                      Size presets
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {sizedLabels.map((label) => {
+                        const isPercent = PERCENT_LABEL_RE.test(label);
+                        let amt: number | null = null;
+                        let title: string | undefined;
+
+                        if (
+                          isPercent &&
+                          state.street &&
+                          state.street.toLowerCase() !== 'preflop'
+                        ) {
+                          const toCall = allowedCtx.to_call ?? 0;
+                          const minRaise = allowedCtx.min_raise ?? 0;
+                          const maxRaiseRaw =
+                            (allowedCtx as any).max_raise ??
+                            (allowedCtx as any).max_bet ??
+                            undefined;
+                          const maxRaise =
+                            typeof maxRaiseRaw === 'number'
+                              ? maxRaiseRaw
+                              : undefined;
+                          const heroStackForSizing =
+                            heroStack != null
+                              ? heroStack
+                              : Number.MAX_SAFE_INTEGER;
+
+                          const computed = amountForPercentLabel(
+                            label,
+                            pot,
+                            toCall,
+                            heroStackForSizing,
+                            minRaise,
+                            maxRaise
+                          );
+                          if (computed != null) {
+                            amt = computed;
+                            title = `~Total ${computed}`;
+                          }
+                        } else {
+                          // Preflop X-multipliers
+                          const maybeAmt = amountForOpenLabel(label);
+                          if (typeof maybeAmt === 'number') {
+                            amt = maybeAmt;
+                            title = `Total ${maybeAmt}`;
+                          }
+                        }
+
+                        return (
+                          <button
+                            key={label}
+                            onClick={() => {
+                              if (amt != null) {
+                                postAction(currentSizedVerb, amt);
+                              }
+                            }}
+                            className="rounded-2xl px-3 py-2 text-xs font-medium bg-slate-800 border border-slate-600 text-slate-50 disabled:opacity-40"
+                            disabled={loading || amt == null}
+                            title={title}
+                          >
+                            {sizedLabel} {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Custom sized action */}
+                <CustomSized
+                  disabled={loading}
+                  verb={currentSizedVerb}
+                  onSubmit={(amt) =>
+                    postAction(currentSizedVerb, amt)
+                  }
                 />
+              </>
+            ) : (
+              <div className="text-xs text-slate-400">
+                Waiting for opponents or no action available.
               </div>
-            </div>
+            )}
           </div>
-        )}
+        </section>
 
-        {/* Action Panel */}
-        {canAct && allowedCtx && state && (
-          <div className="rounded-2xl bg-white shadow p-4 space-y-4">
-            <h2 className="font-semibold">Your Action</h2>
-            <div className="text-sm text-gray-700">
-              <div>To call: {allowedCtx.to_call}</div>
-              <div className="text-xs text-gray-500">
-                Allowed: {allowedBuckets.join(', ')}
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              {/* Fold */}
-              {showFold && (
-                <button
-                  onClick={() => postAction('fold')}
-                  className={`rounded-xl border px-3 py-2 ${
-                    highlightedAction === 'fold'
-                      ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white'
-                      : ''
-                  }`}
-                  disabled={loading}
-                >
-                  Fold
-                </button>
-              )}
-
-              {/* Check */}
-              {showCheck && (
-                <button
-                  onClick={() => postAction('check')}
-                  className={`rounded-xl border px-3 py-2 ${
-                    highlightedAction === 'check'
-                      ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white'
-                      : ''
-                  }`}
-                  disabled={loading}
-                >
-                  Check
-                </button>
-              )}
-
-              {/* Call */}
-              {showCall && (
-                <button
-                  onClick={() => postAction('call')}
-                  className={`rounded-xl border px-3 py-2 ${
-                    highlightedAction === 'call'
-                      ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white'
-                      : ''
-                  }`}
-                  disabled={loading}
-                >
-                  Call {allowedCtx.to_call}
-                </button>
-              )}
-
-              {/* Quick open/raise sizes */}
-              {sizedLabels.map((label) => {
-                const amt = amountForOpenLabel(label);
-                const isHighlighted = highlightedAction === label;
-                return (
-                  <button
-                    key={label}
-                    onClick={() => postAction(currentSizedVerb, amt)}
-                    className={`rounded-xl bg-black text-white px-3 py-2 disabled:opacity-50 ${
-                      isHighlighted
-                        ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white'
-                        : ''
-                    }`}
-                    disabled={loading}
-                    title={`Total ${amt}`}
-                  >
-                    {sizedLabel} {label}
-                  </button>
-                );
-              })}
-
-              {/* Jam */}
-              {showJam && (
-                <button
-                  onClick={() => postAction(currentSizedVerb, jamAmount())}
-                  className={`rounded-xl bg-red-600 text-white px-3 py-2 disabled:opacity-50 ${
-                    highlightedAction === 'jam'
-                      ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white'
-                      : ''
-                  }`}
-                  disabled={loading}
-                >
-                  Jam
-                </button>
-              )}
-            </div>
-
-            {/* Custom sized action */}
-            <CustomSized
-              disabled={loading}
-              verb={currentSizedVerb}
-              onSubmit={(amt) => postAction(currentSizedVerb, amt)}
-            />
-          </div>
-        )}
-
-        {/* Coach Panel (postflop, human turn only) */}
-        {coachShouldShow && (
-          <CoachPanel
-            enabled={true}
-            handId={handId}
-            idx={decisionIdx}
-            street={state?.street}
-          />
-        )}
-
-        {/* Last action panel */}
+        {/* Last action panel (debug) */}
         {state?.last_action && (
-          <div className="rounded-2xl bg-white shadow p-4 space-y-1">
-            <h2 className="font-semibold">Last Action</h2>
-            <pre className="text-xs bg-gray-50 rounded-xl p-3 overflow-auto">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 space-y-1">
+            <h2 className="text-sm font-semibold text-slate-100">
+              Last Action
+            </h2>
+            <pre className="text-[11px] bg-slate-950 rounded-xl p-3 overflow-auto text-slate-200">
               {JSON.stringify(state.last_action, null, 2)}
             </pre>
           </div>
@@ -649,24 +668,27 @@ function CustomSized({
 
   return (
     <form
-      className="flex items-center gap-2"
+      className="flex items-center gap-2 mt-2"
       onSubmit={(e) => {
         e.preventDefault();
         const n = parseInt(val, 10);
-        if (!Number.isNaN(n) && n > 0) onSubmit(n);
+        if (!Number.isNaN(n) && n > 0) {
+          onSubmit(n);
+          setVal('');
+        }
       }}
     >
       <input
         type="number"
         min={1}
         placeholder="Custom total"
-        className="rounded-lg border p-2"
+        className="rounded-lg border border-slate-600 bg-slate-950 px-3 py-1.5 text-xs text-slate-50 placeholder:text-slate-500"
         value={val}
         onChange={(e) => setVal(e.target.value)}
       />
       <button
         type="submit"
-        className="rounded-xl border px-3 py-2 disabled:opacity-50"
+        className="rounded-xl border border-slate-600 px-3 py-1.5 text-xs text-slate-50 disabled:opacity-50"
         disabled={disabled}
       >
         {verb === 'bet' ? 'Bet' : 'Raise'} (custom)
