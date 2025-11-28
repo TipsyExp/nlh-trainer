@@ -1,13 +1,11 @@
 // frontend/pages/table.tsx
-// Updated Table page with guidance overlay integration (Phase 4).
+// Updated Table page with unified guidance overlay integration.
 //
 // This page renders the main NLH table UI. It includes a right-side
 // guidance overlay that is gated by build-time environment variables
 // (NEXT_PUBLIC_DEV_TOOLS and NEXT_PUBLIC_HELP_OVERLAY_ENABLED) and a
-// per-session toggle persisted in localStorage. In Phase 4 the overlay
-// fetches preflop coach advice and hero equity from the backend via
-// useDecisionOverlay, and a dev-only SnapshotInspector helps verify
-// snapshot logging.
+// per-session toggle persisted in localStorage. The overlay now fetches
+// a unified Advice payload from /api/coach/advice via useDecisionOverlay.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Api } from '../lib/api';
@@ -27,7 +25,7 @@ import { DecisionHelpOverlay } from '../components/DecisionHelpOverlay';
 import type { DecisionContext } from '../types/decision';
 import { useDecisionOverlay } from '../hooks/useDecisionOverlay';
 import { mapCoachToAction } from '../utils/coachMapping';
-// Dev inspector for snapshot testing (Phase 4). Loaded only when dev tools are enabled.
+// Dev inspector for snapshot testing. Loaded only when dev tools are enabled.
 import SnapshotInspector from '../dev/SnapshotInspector';
 
 // Gate dev-only /api/hand/auto. Default is false unless explicitly enabled.
@@ -137,7 +135,6 @@ export default function TablePage() {
 
   async function pollUntilSettled(humanSeat: number) {
     // Poll GET /api/hand/state until it's our turn or the hand is over.
-    // Switch to a time-based cap to handle slower solves gracefully.
     const start = Date.now();
     const maxWaitMs = 30_000; // 30s cap
     let bannerSet = false;
@@ -239,13 +236,13 @@ export default function TablePage() {
     useHelpOverlayToggle(handId || undefined);
   const overlayEnabled = globalOverlayGate && helpEnabled;
 
-  // Derive hero hole cards for the equity builder.
+  // Derive hero hole cards (still handy for future overlay features).
   const heroCards: string[] = useMemo(() => {
     const hero = state?.players?.find((p: any) => p.seat === humanSeat);
     return hero?.hole_cards ? [...hero.hole_cards] : [];
   }, [state?.players, humanSeat]);
 
-  // Flatten the board across streets for postflop equity requests.
+  // Flatten the board across streets.
   const boardCards: string[] = useMemo(() => {
     const flopCards: string[] = state?.board?.flop ?? [];
     const turnCards: string[] = state?.board?.turn ?? [];
@@ -268,7 +265,7 @@ export default function TablePage() {
     return map;
   }, [state?.players, humanSeat]);
 
-  // Number of players (used to gate postflop equity).
+  // Number of players (reserved for future overlay enhancements).
   const playerCount: number = useMemo(
     () => state?.players?.length ?? 0,
     [state?.players]
@@ -302,8 +299,8 @@ export default function TablePage() {
     ]
   );
 
-  // Fetch coach advice and equity.
-  const { coach, equity, meta } = useDecisionOverlay(decisionCtx, overlayEnabled);
+  // Fetch unified advice for the overlay.
+  const { advice } = useDecisionOverlay(decisionCtx, overlayEnabled);
 
   // Derive allowed buckets & raise presets (used by highlight + UI).
   const allowedBuckets = useMemo(
@@ -315,12 +312,21 @@ export default function TablePage() {
     [allowedBuckets]
   );
 
-  // Final highlighted action key based on coach bucket and presets.
+  // Final highlighted action key based on advice recommendation and presets.
   const highlightedAction: string | null = useMemo(() => {
-    if (coach.status !== 'ok' || !coach.data) return null;
+    if (advice.status !== 'ok' || !advice.data) return null;
+
+    // Be tolerant of both shapes:
+    // - recommendation.bucket  (current backend)
+    // - recommendation.primary_action (future / canonical)
+    const rec: any = advice.data.recommendation ?? null;
+    const bucket: string | null =
+      rec && (rec.bucket || rec.primary_action) ? (rec.bucket ?? rec.primary_action) : null;
+
+    if (!bucket) return null;
     const toCall = allowedCtx?.to_call ?? 0;
-    return mapCoachToAction(coach.data.bucket, toCall, sizedLabels);
-  }, [coach, allowedCtx, sizedLabels]);
+    return mapCoachToAction(bucket, toCall, sizedLabels);
+  }, [advice, allowedCtx, sizedLabels]);
 
   // Log overlay state changes in dev for diagnostics.
   useEffect(() => {
@@ -369,17 +375,12 @@ export default function TablePage() {
       {/* Overlay shown when waiting for bots to act (prod mode). */}
       <WaitingOverlay show={botsAdvancing} message="Waiting for opponents…" />
 
-      {/* Guidance overlay (Phase 4: coach + equity integration) */}
+      {/* Guidance overlay (unified advice integration) */}
       {overlayEnabled && (
-        <DecisionHelpOverlay
-          decision={decisionCtx}
-          coach={coach}
-          equity={equity}
-          meta={meta}
-        />
+        <DecisionHelpOverlay decision={decisionCtx} advice={advice} />
       )}
 
-      {/* Snapshot inspector (Phase 4). Renders only when dev tools are enabled. */}
+      {/* Snapshot inspector. Renders only when dev tools are enabled. */}
       {DEV_TOOLS && <SnapshotInspector />}
 
       <div className="max-w-5xl mx-auto grid gap-6">
@@ -495,7 +496,7 @@ export default function TablePage() {
             <div className="rounded-2xl bg-white shadow p-4 space-y-2 md:col-span-3">
               <h2 className="font-semibold">Board</h2>
 
-              {/* [BOARD-LEGEND] — adds a tiny legend above the shared board row */}
+              {/* Board legend + shared row */}
               <div className="space-y-1">
                 <div className="text-xs text-gray-500">Flop / Turn / River</div>
                 <CommunityBoardRow
@@ -504,7 +505,6 @@ export default function TablePage() {
                   river={riverCard}
                 />
               </div>
-              {/* [/BOARD-LEGEND] */}
             </div>
           </div>
         )}
@@ -566,7 +566,7 @@ export default function TablePage() {
                 </button>
               )}
 
-              {/* Quick open/raise sizes (use dynamic verb, from bucket labels) */}
+              {/* Quick open/raise sizes */}
               {sizedLabels.map((label) => {
                 const amt = amountForOpenLabel(label);
                 const isHighlighted = highlightedAction === label;
@@ -587,7 +587,7 @@ export default function TablePage() {
                 );
               })}
 
-              {/* Jam (use dynamic verb) — prefer typed amount when available */}
+              {/* Jam */}
               {showJam && (
                 <button
                   onClick={() => postAction(currentSizedVerb, jamAmount())}
@@ -603,7 +603,7 @@ export default function TablePage() {
               )}
             </div>
 
-            {/* Custom sized action uses dynamic verb */}
+            {/* Custom sized action */}
             <CustomSized
               disabled={loading}
               verb={currentSizedVerb}

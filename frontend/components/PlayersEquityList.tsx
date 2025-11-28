@@ -1,17 +1,24 @@
 // frontend/components/PlayersEquityList.tsx
 // Compact list for displaying per-seat equities in multiway spots.
 //
-// This component is designed to render the `players` array from the
-// unified AdviceV1 payload (advice.equity.players), where each entry
-// contains a seat index and that seat's overall equity. The hero seat
-// can be highlighted for quick scanning in multiway pots.
+// This component is designed to render a small array of { seat, equity }
+// entries, typically coming from an equity backend or a unified advice
+// payload wrapper in the frontend. The hero seat can be highlighted for
+// quick scanning in multiway pots.
 
 import React from 'react';
-import type { AdviceEquityPlayer } from '../types/advice';
+
+/** Minimal per-seat equity entry used by this component. */
+export interface PlayerEquityEntry {
+  /** Table seat index. */
+  seat: number;
+  /** Equity for this seat, 0..1. */
+  equity: number;
+}
 
 export interface PlayersEquityListProps {
-  /** Per-seat equity entries from advice.equity.players. */
-  players: AdviceEquityPlayer[] | null | undefined;
+  /** Per-seat equity entries (0–1 each). */
+  players: PlayerEquityEntry[] | null | undefined;
   /** Optional hero seat; when provided, that row is highlighted. */
   heroSeat?: number | null;
 }
@@ -36,7 +43,11 @@ export function PlayersEquityList({ players, heroSeat }: PlayersEquityListProps)
             >
               <span className="mr-1">Seat {p.seat}:</span>
               <span>{pct.toFixed(1)}%</span>
-              {isHero && <span className="ml-1 text-[0.7rem] uppercase tracking-wide">Hero</span>}
+              {isHero && (
+                <span className="ml-1 text-[0.7rem] uppercase tracking-wide">
+                  Hero
+                </span>
+              )}
             </li>
           );
         })}

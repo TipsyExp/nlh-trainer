@@ -14,24 +14,14 @@ It provides two layers:
        - get_hu_preflop_advice(ctx, profile=...)
        - get_hu_preflop_recommendation(ctx, profile=...)  (alias)
 
-     This API:
-       - inspects a DecisionContext,
-       - canonicalises hero's hole cards (e.g. ["As","Kd"] → "AKo"),
-       - looks up a mix in the chart for the inferred node,
-       - returns a small advice object exposing `.bucket_mix` /
-         `.action_mix`.
-
-  2) A small class wrapper that orchestrator code *may* use:
+  2) A small class wrapper that orchestrator code may use:
        - PreflopHUChartPolicy.build_advice(ctx) -> dict | None
-
-     This wraps `get_hu_preflop_advice` and converts the result into
-     a JSON-friendly dict of the shape the orchestrator expects.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, List
 import random
 
 from backend.coach.decision_context import DecisionContext
@@ -50,22 +40,6 @@ DEFAULT_PROFILE_NAME = "default_100bb_2.5x"
 class PreflopHUAdvice:
     """
     Lightweight advice object used by tests and internal callers.
-
-    Attributes:
-        node:
-            String identifier for the preflop node (e.g. "BTN_open").
-
-        hand_key:
-            Canonical hand key such as "AKo", "J9s", "TT".
-
-        bucket_mix:
-            Mapping from abstract bucket/action id -> probability in [0, 1].
-
-        recommended_bucket:
-            The argmax bucket id from bucket_mix (or None if mix is empty).
-
-        raw_chart:
-            Optional underlying chart object (for debugging / tracing).
     """
 
     node: str
@@ -102,7 +76,6 @@ def _normalise_distribution(raw: Mapping[str, float]) -> Dict[str, float]:
     if total > 0.0:
         return {k: v / total for k, v in cleaned.items()}
 
-    # Fallback: uniform across actions if we have no positive mass
     if not cleaned:
         return {}
 
@@ -139,7 +112,6 @@ def _infer_node_id(ctx: DecisionContext) -> Optional[str]:
       - HU only.
       - If hero is the button → "BTN_open".
       - If hero is BB → "BB_vs_BTN_open".
-      - Otherwise return None.
     """
     if ctx.street != "preflop":
         return None
@@ -154,45 +126,6 @@ def _infer_node_id(ctx: DecisionContext) -> Optional[str]:
     return None
 
 
-def _extract_mix_from_chart(
-    chart: Any, node_id: str, hand_key: str
-) -> Optional[Dict[str, float]]:
-    """
-    Try several common chart APIs to obtain a bucket/action mix for
-    (node_id, hand_key).
-
-    Supports:
-      - chart.lookup_mix(node, hand_key) -> dict
-      - chart.lookup(node, hand_key) -> row with .strategy_bar
-      - chart.lookup(node, hand_key) -> dict
-
-    Tests inject a DummyChart with a compatible API via monkeypatching
-    `load_hu_chart`.
-    """
-    # 1) Explicit mix helper, if provided.
-    if hasattr(chart, "lookup_mix"):
-        mix = chart.lookup_mix(node_id, hand_key)  # type: ignore[call-arg]
-        if isinstance(mix, Mapping):
-            return {str(k): float(v) for k, v in mix.items()}
-
-    # 2) Generic lookup returning a row object or dict.
-    if hasattr(chart, "lookup"):
-        row = chart.lookup(node_id, hand_key)  # type: ignore[call-arg]
-        if row is None:
-            return None
-
-        # a) Row with strategy_bar attribute (PreflopChart-like)
-        strategy_bar = getattr(row, "strategy_bar", None)
-        if isinstance(strategy_bar, Mapping):
-            return {str(k): float(v) for k, v in strategy_bar.items()}
-
-        # b) Row itself is a dict
-        if isinstance(row, Mapping):
-            return {str(k): float(v) for k, v in row.items()}
-
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Chart loading (function form so tests can monkeypatch it)
 # ---------------------------------------------------------------------------
@@ -202,20 +135,35 @@ def load_hu_chart(profile: str = DEFAULT_PROFILE_NAME) -> Any:
     """
     Load a single HU preflop chart for the given profile.
 
-    **Important:** In tests, this function is monkeypatched to return a
-    DummyChart with the expected API.
+    In production, this delegates to backend.coach.preflop.hu_charts.load_default_chart_set()
+    and selects the first chart for the requested profile.
 
-    In production code you can wire this up to:
-
-      * the YAML-backed HU charts in backend.coach.preflop.hu_charts, or
-      * any other chart representation that supports either:
-            - lookup_mix(node_id, hand_key) -> {bucket: freq, ...}
-            - lookup(node_id, hand_key) -> row with .strategy_bar
-            - lookup(node_id, hand_key) -> {bucket: freq, ...}
-
-    For now, the default implementation is a stub that signals “no chart”.
+    In tests, this function is commonly monkeypatched.
     """
-    raise RuntimeError("HU preflop charts are not wired up yet")
+    try:
+        from backend.coach.preflop.hu_charts import load_default_chart_set
+    except Exception:
+        # Charts not wired up (older build / missing dependency).
+        return None
+
+    chart_set = load_default_chart_set()
+
+    # Preferred API: HUChartSet.charts_for_profile
+    charts: List[Any]
+    try:
+        charts = chart_set.charts_for_profile(profile)  # type: ignore[attr-defined]
+    except Exception:
+        # Fallback: treat HUChartSet as an iterable of charts
+        try:
+            charts = list(chart_set)  # type: ignore[arg-type]
+        except Exception:
+            return None
+
+    if not charts:
+        return None
+
+    # For v1 we only need a single chart.
+    return charts[0]
 
 
 # ---------------------------------------------------------------------------
@@ -230,15 +178,6 @@ def get_hu_preflop_advice(
 ) -> Optional[PreflopHUAdvice]:
     """
     Main functional entrypoint for HU preflop chart advice.
-
-    Behaviour (v1):
-
-      - Ignore non-preflop or non-HU spots (return None).
-      - Require hero_hole_cards to be present; otherwise return None.
-      - Infer a coarse node_id from the DecisionContext.
-      - Load the HU chart for the given profile via load_hu_chart().
-      - Look up the action/bucket mix for (node_id, hand_key).
-      - Normalise and sample a recommended bucket.
     """
     if ctx.street != "preflop":
         return None
@@ -264,7 +203,25 @@ def get_hu_preflop_advice(
     if chart is None:
         return None
 
-    raw_mix = _extract_mix_from_chart(chart, node_id, hand_key)
+    # chart is expected to be a PreflopChart-like object with lookup/lookup_mix
+    from typing import Mapping as _Mapping  # local alias only
+
+    raw_mix: Optional[_Mapping[str, float]]
+    if hasattr(chart, "lookup_mix"):
+        raw_mix = chart.lookup_mix(node_id, hand_key)  # type: ignore[call-arg]
+    else:
+        row = chart.lookup(node_id, hand_key)  # type: ignore[call-arg]
+        if row is None:
+            raw_mix = None
+        else:
+            strategy_bar = getattr(row, "strategy_bar", None)
+            if isinstance(strategy_bar, _Mapping):
+                raw_mix = strategy_bar
+            elif isinstance(row, _Mapping):
+                raw_mix = row
+            else:
+                raw_mix = None
+
     if not raw_mix:
         return None
 
@@ -290,9 +247,6 @@ def get_hu_preflop_recommendation(
 ) -> Optional[PreflopHUAdvice]:
     """
     Backwards-compatible alias for get_hu_preflop_advice.
-
-    Some older test code refers to this name; we keep it to avoid
-    breaking imports.
     """
     return get_hu_preflop_advice(ctx, profile=profile, rng=rng)
 
@@ -305,25 +259,6 @@ def get_hu_preflop_recommendation(
 class PreflopHUChartPolicy:
     """
     Small wrapper that higher-level orchestration code can use.
-
-    Example:
-
-        policy = PreflopHUChartPolicy(profile="default_100bb_2.5x")
-        advice_dict = policy.build_advice(ctx)
-
-    build_advice(ctx) returns either:
-
-      - None              -> no advice for this spot
-      - dict(...)         -> JSON-friendly payload including:
-            {
-              "kind": "preflop_hu_chart",
-              "source": "preflop_hu_chart_v1",
-              "node": "...",
-              "hand_key": "...",
-              "recommended_bucket": "...",
-              "strategy": { ... },
-              "profile": "default_100bb_2.5x",
-            }
     """
 
     def __init__(
@@ -357,7 +292,6 @@ class PreflopHUChartPolicy:
             "hand_key": adv.hand_key,
             "recommended_bucket": recommended,
             "strategy": dict(adv.bucket_mix),
-            # profile name can be useful for debugging / UI
             "profile": self.profile,
         }
 

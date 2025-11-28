@@ -2,7 +2,7 @@
 // Simple in-memory store to trace overlay calls during the help overlay phases.
 //
 // Snapshot-aware testing requires the frontend to know whether the
-// overlay invoked the coach and equity endpoints for the current
+// overlay invoked the unified advice endpoint for the current
 // decision. This module stores the most recent call information so
 // that a dev inspector can display it. It uses a basic publish/
 // subscribe pattern to notify subscribers when the trace changes.
@@ -14,10 +14,8 @@ export interface OverlayTrace {
   idx: number | null;
   /** Current street (preflop/flop/turn/river/showdown/unknown). */
   street: string | null;
-  /** Whether the overlay made a coach request for this decision. */
-  calledCoach: boolean;
-  /** Whether the overlay made an equity request for this decision. */
-  calledEquity: boolean;
+  /** Whether the overlay made an advice request for this decision. */
+  calledAdvice: boolean;
 }
 
 // Internal mutable state.
@@ -25,8 +23,7 @@ let trace: OverlayTrace = {
   handId: null,
   idx: null,
   street: null,
-  calledCoach: false,
-  calledEquity: false,
+  calledAdvice: false,
 };
 
 // Listeners subscribed to trace updates.
@@ -80,8 +77,7 @@ export function resetOverlayTrace(): void {
     handId: null,
     idx: null,
     street: null,
-    calledCoach: false,
-    calledEquity: false,
+    calledAdvice: false,
   };
   for (const fn of listeners) {
     try {

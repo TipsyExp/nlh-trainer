@@ -6,7 +6,7 @@
 // The component is intentionally minimal to avoid cluttering the
 // guidance overlay. It can be driven either by the standalone equity
 // endpoint (EquityResponse.players[hero].equity) or by the unified
-// AdviceV1 payload (advice.equity.hero).
+// Advice payload (advice.equity.hero_vs_villain_equity).
 
 import React from 'react';
 

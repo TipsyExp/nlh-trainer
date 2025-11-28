@@ -1,4 +1,5 @@
-﻿schema: v1
+﻿# data/ranges/preflop/hu.yaml
+schema: v1
 seat_count: 2
 
 positions:
