@@ -1,3 +1,4 @@
+# backend/tests/test_postflop_coach_hu.py
 from __future__ import annotations
 
 from typing import Any, Dict, List
@@ -6,6 +7,18 @@ import pytest
 
 from backend.coach.decision_context import DecisionContext
 from backend.coach.postflop.service import build_postflop_advice
+
+
+# Make sure these tests never hit TexasSolver; they are testing equity logic.
+@pytest.fixture(autouse=True)
+def disable_texas_solver_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Force the postflop coach to skip the TexasSolver path in this module.
+
+    We want to exercise the equity-based fallback only, regardless of whether
+    the solver binary / adapter is installed locally.
+    """
+    monkeypatch.setenv("TEXASSOLVER_ENABLED", "0")
 
 
 class StubEquityService:

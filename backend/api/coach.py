@@ -176,7 +176,8 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
               - Delegates to the preflop advisor and wraps its output into
                 AdviceV1 (source ∈ {"chart","equity","rule"}).
           - Postflop (flop/turn/river, HU + multiway):
-              - Delegates to the postflop coach v1 (equity-based).
+              - Delegates to the postflop coach v1 (TexasSolver-based when
+                configured, with equity/heuristic fallbacks).
           - Other spots:
               - Returns AdviceV1 with status="unsupported".
 
@@ -374,11 +375,64 @@ def get_advice(hand_id: str = Query(...), idx: int = Query(0)) -> JSONResponse:
         )
         return _respond_with_logging(advice, status_code=200)
 
-    # Postflop (HU + multiway): delegate to postflop coach v1.
+    # Postflop (HU + multiway): delegate to postflop coach v1 (TexasSolver-based).
     if street in {"flop", "turn", "river"}:
-        advice = _postflop_service.get_postflop_advice(ctx)
-        # Postflop coach v1 always returns a well-formed AdviceV1. The status
-        # field indicates whether the spot was actually supported.
+        try:
+            advice = _postflop_service.get_postflop_advice(ctx)
+        except CoachDisabledError:
+            # TexasSolver (or postflop coach) is disabled at runtime.
+            advice = AdviceV1(
+                version=1,
+                status="disabled",
+                meta=AdviceMeta(
+                    street=_normalize_street(street),
+                    n_players=ctx.n_players,
+                    hero_seat=ctx.hero_seat,
+                    source="rule",
+                ),
+                recommendation=None,
+                equity=None,
+                thresholds=None,
+                rationale="Postflop coach is disabled or solver unavailable.",
+            )
+            return _respond_with_logging(advice, status_code=200)
+        except UnsupportedSpotError as e:
+            # Spot is outside the supported tree / config.
+            advice = AdviceV1(
+                version=1,
+                status="unsupported",
+                meta=AdviceMeta(
+                    street=_normalize_street(street),
+                    n_players=ctx.n_players,
+                    hero_seat=ctx.hero_seat,
+                    source="rule",
+                ),
+                recommendation=None,
+                equity=None,
+                thresholds=None,
+                rationale=str(e) or "Postflop spot is not supported by the solver.",
+            )
+            return _respond_with_logging(advice, status_code=200)
+        except Exception as e:
+            # Generic postflop failure.
+            advice = AdviceV1(
+                version=1,
+                status="error",
+                meta=AdviceMeta(
+                    street=_normalize_street(street),
+                    n_players=ctx.n_players,
+                    hero_seat=ctx.hero_seat,
+                    source="rule",
+                ),
+                recommendation=None,
+                equity=None,
+                thresholds=None,
+                rationale=f"Postflop coach failure: {e}",
+            )
+            return _respond_with_logging(advice, status_code=200)
+
+        # Postflop coach v1 returns a well-formed AdviceV1. The status field
+        # indicates whether the spot was actually supported.
         return _respond_with_logging(advice, status_code=200)
 
     # Everything else (unknown street, showdown, etc.) is currently unsupported.

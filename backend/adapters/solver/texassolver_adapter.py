@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import tempfile
+import shutil  # for copying debug input scripts
 
 from backend.config import COACH_ENABLED as CONFIG_COACH_ENABLED
 
@@ -118,6 +119,93 @@ def _map_bucket_to_pot_percent(label: str) -> Optional[int]:
     return None
 
 
+# Rank ordering used for expanding "+" shorthand (e.g. "22+", "A2s+", "ATo+")
+_RANKS = "23456789TJQKA"
+
+
+def _expand_plus_token(base: str) -> list[str]:
+    """
+    Expand simple PokerStove-style '+' shorthand into explicit hand classes.
+
+    Supported patterns:
+      - "22+"          -> "22,33,44,...,AA"
+      - "A2s+"         -> "A2s,A3s,...,AKs"
+      - "K9s+"         -> "K9s,KTs,KJs,KQs"
+      - "ATo+"         -> "ATo,AJo,AQo,AKo"
+      - "KJo+"         -> "KJo,KQo"
+
+    If we don't recognise the pattern, we fall back to stripping the "+"
+    and returning the base token as-is.
+    """
+    s = base.strip()
+
+    # Pairs: "22+"
+    m_pair = re.match(r"^([2-9TJQKA])\1\+$", s)
+    if m_pair:
+        start = m_pair.group(1)
+        start_idx = _RANKS.index(start)
+        return [r + r for r in _RANKS[start_idx:]]
+
+    # Suited / offsuit like "A2s+", "K9s+", "ATo+", "KJo+"
+    m_suited = re.match(r"^([2-9TJQKA])([2-9TJQKA])(s|o)\+$", s)
+    if m_suited:
+        hi, lo, suitedness = m_suited.groups()
+        hi_idx = _RANKS.index(hi)
+        lo_idx = _RANKS.index(lo)
+
+        # Expect hi > lo (e.g. A2, K9, AT). If not, just strip "+".
+        if lo_idx >= hi_idx:
+            return [s[:-1]]
+
+        return [hi + r + suitedness for r in _RANKS[lo_idx:hi_idx]]
+
+    # Unknown pattern with "+": strip the "+" and keep the base
+    if s.endswith("+"):
+        return [s[:-1]]
+
+    # No "+", return unchanged
+    return [s]
+
+
+def _expand_equity_range_for_texassolver(range_str: str) -> str:
+    """
+    Convert an equity-style range string into a TexasSolver-compatible one.
+
+    - Splits on commas, preserves weights of the form 'AA:0.75' when present.
+    - Expands '+' shorthand (22+, A2s+, ATo+, etc.) into explicit hand tokens.
+    - Re-attaches any single weight to each expanded token if present.
+    """
+    if not range_str:
+        return range_str
+
+    tokens = [t.strip() for t in range_str.split(",") if t.strip()]
+    out: list[str] = []
+
+    for tok in tokens:
+        # Split off optional weight, e.g. "QQ:0.5"
+        if ":" in tok:
+            base, weight = tok.split(":", 1)
+            base = base.strip()
+            weight = weight.strip()
+        else:
+            base, weight = tok, None
+
+        # If there's no "+" in the base hand, keep it as-is.
+        if "+" not in base:
+            out.append(tok.strip())
+            continue
+
+        expanded = _expand_plus_token(base)
+
+        if weight is not None:
+            # Apply the same weight to each expanded hand class
+            out.extend(f"{h}:{weight}" for h in expanded)
+        else:
+            out.extend(expanded)
+
+    return ",".join(out)
+
+
 def _is_supported(req: SolveRequest) -> bool:
     # Task-16 scope: HU postflop (SRP or 3BP). We don't handle preflop or multi-way.
     if req.street not in {"flop", "turn", "river"}:
@@ -153,6 +241,12 @@ class TexasSolverAdapter:
         self._max_iters = int(os.getenv("COACH_TS_MAX_ITERS", "200"))
         self._timeout_s = int(os.getenv("COACH_TS_TIMEOUT_S", "90"))
 
+        # Simple debug flag: when enabled, keep a copy of the generated
+        # node_input.txt so we can reproduce solver issues from the CLI.
+        dbg = os.getenv("COACH_TS_DEBUG", "false").strip().lower()
+        self._debug = dbg in {"1", "true", "yes", "on"}
+        self._debug_dir = os.getenv("COACH_TS_DEBUG_DIR", "").strip()
+
     def solve(self, req: SolveRequest) -> AdvicePayload:
         # Gate & support checks
         solver_path = self._solver_path or _require_solver_enabled()
@@ -163,6 +257,8 @@ class TexasSolverAdapter:
                 "Only HU postflop SRP/3BP on flop/turn/river are supported"
             )
 
+        debug_copy_path: Optional[Path] = None
+
         # Build a temp workdir with input + output files
         with tempfile.TemporaryDirectory(prefix="texassolver_node_") as tmp:
             tmpdir = Path(tmp)
@@ -170,6 +266,22 @@ class TexasSolverAdapter:
             output_path = tmpdir / "output_result.json"
 
             self._write_input_script(req, input_path, output_path)
+
+            # If debug is enabled, copy the input script to a stable location
+            # *outside* the temporary directory so we can inspect it later.
+            if self._debug:
+                try:
+                    debug_root = (
+                        Path(self._debug_dir)
+                        if self._debug_dir
+                        else Path.cwd() / "texassolver_debug"
+                    )
+                    debug_root.mkdir(parents=True, exist_ok=True)
+                    debug_copy_path = debug_root / "last_node_input.txt"
+                    shutil.copyfile(input_path, debug_copy_path)
+                except Exception:
+                    # Debugging helper should never break the main path.
+                    debug_copy_path = None
 
             # Run solver
             cmd = [str(solver_path), "-i", str(input_path)]
@@ -183,19 +295,34 @@ class TexasSolverAdapter:
                     timeout=self._timeout_s,
                 )
             except subprocess.TimeoutExpired as e:
+                hint = (
+                    f" (input saved to {debug_copy_path})"
+                    if debug_copy_path is not None
+                    else ""
+                )
                 raise UnsupportedSpotError(
-                    f"TexasSolver timed out after {self._timeout_s}s"
+                    f"TexasSolver timed out after {self._timeout_s}s{hint}"
                 ) from e
             except subprocess.CalledProcessError as e:
+                hint = (
+                    f" (input saved to {debug_copy_path})"
+                    if debug_copy_path is not None
+                    else ""
+                )
                 raise UnsupportedSpotError(
-                    f"TexasSolver failed (exit={e.returncode}): {e.stderr or e.stdout}"
+                    f"TexasSolver failed (exit={e.returncode}){hint}: {e.stderr or e.stdout}"
                 ) from e
 
             output = (
                 output_path if output_path.exists() else (tmpdir / "output_result.json")
             )
             if not output.exists():
-                raise UnsupportedSpotError("TexasSolver produced no output JSON")
+                hint = (
+                    f" (input saved to {debug_copy_path})"
+                    if debug_copy_path is not None
+                    else ""
+                )
+                raise UnsupportedSpotError(f"TexasSolver produced no output JSON{hint}")
 
             # Read JSON tolerating optional UTF-8 BOM (common on Windows)
             data = output.read_bytes()
@@ -249,9 +376,12 @@ class TexasSolverAdapter:
         lines.append(f"set_effective_stack {eff}")
         lines.append(f"set_board {board_str}")
 
-        # Ranges are solver-native strings (caller supplies valid format)
-        lines.append(f"set_range_ip {req.ip_range}")
-        lines.append(f"set_range_oop {req.oop_range}")
+        # Ranges: expand equity-style '+' shorthand into solver-compatible form.
+        ip_range = _expand_equity_range_for_texassolver(req.ip_range)
+        oop_range = _expand_equity_range_for_texassolver(req.oop_range)
+
+        lines.append(f"set_range_ip {ip_range}")
+        lines.append(f"set_range_oop {oop_range}")
 
         # Configure ONLY the current street to keep graph tiny.
         st = req.street  # "flop" | "turn" | "river"
@@ -353,7 +483,7 @@ class TexasSolverAdapter:
                     and len(v) >= n
                     and all(isinstance(x, (int, float)) for x in v[:n])
                 ):
-                    return [float(x) for x in v[:n]]
+                    return [float(vv) for vv in v[:n]]
             return None
 
         def _find_first_dict_numeric(
@@ -502,6 +632,7 @@ class TexasSolverAdapter:
                     if any(b.lower() == "jam" for b in req.bucket_labels)
                     else "call"
                 )
+
             best_b, best_pp = pairs[0]
             best_d = abs(best_pp - p)
             for b, bp in pairs[1:]:
@@ -588,6 +719,10 @@ class TexasSolverAdapter:
 
         # 6) Recommend argmax
         best = max(bucket_strategy.items(), key=lambda kv: kv[1])[0]
-        return AdvicePayload(
-            recommended_bucket=best, strategy=bucket_strategy, ev_map=ev_map
-        )
+
+        # IMPORTANT: return a plain dict so callers don't accidentally see `None`
+        return {
+            "recommended_bucket": best,
+            "strategy": bucket_strategy,
+            "ev_map": ev_map,
+        }

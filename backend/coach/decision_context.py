@@ -94,19 +94,25 @@ class DecisionContext:
 
         seat_stacks:
             Best-effort mapping of seat index → stack behind in chips at this
-            decision. This is derived from the players array when available.
-            Intended for multiway equity / SPR heuristics.
+            decision. For engine-based contexts this is derived from
+            stack_by_seat - committed_by_seat when available; for state dicts
+            it is taken from per-player "stack" fields.
 
         seat_committed:
             Best-effort mapping of seat index → total chips committed so far
-            in the hand (or on the current street, depending on engine
-            semantics). Also derived from the players array.
+            in the hand. Derived from engine-level committed_by_seat or
+            per-player "committed" fields.
 
         hero_stack:
             Convenience view of `seat_stacks[hero_seat]` when known.
 
         hero_committed:
             Convenience view of `seat_committed[hero_seat]` when known.
+
+        hero_in_position:
+            Best-effort flag indicating whether the hero is in position for
+            this street. For HU postflop spots this is approximated as
+            hero_seat == button.
     """
 
     hand_id: str
@@ -141,6 +147,9 @@ class DecisionContext:
     seat_committed: Dict[int, int] = field(default_factory=dict)
     hero_stack: Optional[int] = None
     hero_committed: Optional[int] = None
+
+    # Positional helper
+    hero_in_position: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +259,8 @@ def _extract_stacks_and_committed_from_players(
 
     This looks for common fields on each player entry:
 
-        * 'stack'
-        * 'committed'
+        * 'stack'      → interpreted as chips behind.
+        * 'committed'  → total committed so far.
 
     on either dict-like entries or engine player objects. Values are coerced
     to ints when numeric. Missing or non-numeric fields are ignored.
@@ -370,7 +379,7 @@ def build_decision_context_from_state(
     active_seats = _infer_active_seats_from_players(players)
     n_players = len(active_seats)
 
-    # Per-seat stack / committed information (best-effort)
+    # Per-seat stack / committed information (best-effort, from per-player fields)
     seat_stacks, seat_committed = _extract_stacks_and_committed_from_players(players)
 
     hero_seat_int = int(hero_seat)
@@ -388,6 +397,10 @@ def build_decision_context_from_state(
 
     hero_stack = seat_stacks.get(hero_seat_int)
     hero_committed = seat_committed.get(hero_seat_int)
+
+    # Simple IP heuristic: postflop, button is in position in HU.
+    street_l = street.lower()
+    hero_in_position = street_l in {"flop", "turn", "river"} and hero_seat_int == button
 
     return DecisionContext(
         hand_id=str(hand_id),
@@ -413,6 +426,7 @@ def build_decision_context_from_state(
         seat_committed=seat_committed,
         hero_stack=hero_stack,
         hero_committed=hero_committed,
+        hero_in_position=hero_in_position,
     )
 
 
@@ -505,8 +519,30 @@ def build_decision_context(hand_id: str, idx: int) -> DecisionContext:
     active_seats = _infer_active_seats_from_players(players)
     n_players = len(active_seats)
 
-    # Per-seat stack / committed information (best-effort)
+    # Per-seat stack / committed information.
+    # Start with per-player fields (usually empty for engine snapshots).
     seat_stacks, seat_committed = _extract_stacks_and_committed_from_players(players)
+
+    # Prefer engine-level maps when available (PokerKitAdapter exposes these).
+    raw_stack_by_seat = getattr(state, "stack_by_seat", None)
+    raw_committed_by_seat = getattr(state, "committed_by_seat", None)
+    if isinstance(raw_stack_by_seat, dict):
+        for k, v in raw_stack_by_seat.items():
+            try:
+                seat = int(k)
+                total = int(v)
+            except Exception:
+                continue
+            committed = 0
+            if isinstance(raw_committed_by_seat, dict):
+                cv = raw_committed_by_seat.get(k)
+                if isinstance(cv, (int, float)):
+                    committed = int(cv)
+            # seat_stacks is "behind" (total - committed)
+            behind = max(0, total - committed)
+            seat_stacks[seat] = behind
+            if committed > 0:
+                seat_committed[seat] = committed
 
     hero_seat_int = int(hero_seat)
     hero_cards = _extract_hero_hole_cards_from_players(players, hero_seat_int)
@@ -519,6 +555,9 @@ def build_decision_context(hand_id: str, idx: int) -> DecisionContext:
 
     hero_stack = seat_stacks.get(hero_seat_int)
     hero_committed = seat_committed.get(hero_seat_int)
+
+    street_l = street.lower()
+    hero_in_position = street_l in {"flop", "turn", "river"} and hero_seat_int == button
 
     return DecisionContext(
         hand_id=hand_id_str,
@@ -544,4 +583,5 @@ def build_decision_context(hand_id: str, idx: int) -> DecisionContext:
         seat_committed=seat_committed,
         hero_stack=hero_stack,
         hero_committed=hero_committed,
+        hero_in_position=hero_in_position,
     )

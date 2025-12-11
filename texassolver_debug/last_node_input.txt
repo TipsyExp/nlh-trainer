@@ -1,0 +1,29 @@
+set_pot 100
+set_effective_stack 10000
+set_board Ah,Kd,3s
+set_range_ip 22,33,44,55,66,77,88,99,TT,JJ,QQ,KK,AA,A2s,A3s,A4s,A5s,A6s,A7s,A8s,A9s,ATs,AJs,AQs,AKs,K9s,KTs,KJs,KQs,Q9s,QTs,QJs,J9s,JTs,T9s,98s,87s,ATo,AJo,AQo,AKo,KJo,KQo,QJo
+set_range_oop 22,33,44,55,66,77,88,99,TT,JJ,QQ,KK,AA,A2s,A3s,A4s,A5s,A6s,A7s,A8s,A9s,ATs,AJs,AQs,AKs,KTs,KJs,KQs,QTs,QJs,JTs,T9s,98s,87s,AJo,AQo,AKo,KQo
+set_bet_sizes oop,flop,bet,25
+set_bet_sizes oop,flop,raise,25
+set_bet_sizes oop,flop,bet,40
+set_bet_sizes oop,flop,raise,40
+set_bet_sizes oop,flop,bet,67
+set_bet_sizes oop,flop,raise,67
+set_bet_sizes oop,flop,allin
+set_bet_sizes ip,flop,bet,25
+set_bet_sizes ip,flop,raise,25
+set_bet_sizes ip,flop,bet,40
+set_bet_sizes ip,flop,raise,40
+set_bet_sizes ip,flop,bet,67
+set_bet_sizes ip,flop,raise,67
+set_bet_sizes ip,flop,allin
+set_allin_threshold 0.67
+build_tree
+set_thread_num 1
+set_accuracy 1.0
+set_max_iteration 200
+set_print_interval 10
+set_use_isomorphism 1
+start_solve
+set_dump_rounds 1
+dump_result output_result.json

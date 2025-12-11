@@ -72,7 +72,10 @@ async function getJSON<T = any>(path: string): Promise<T> {
 // Throws on non-200 (for main UI)
 async function getCoachAdvice(handId: string, idx: number): Promise<AdvicePayloadV1> {
   const url = `/api/coach/advice?hand_id=${encodeURIComponent(handId)}&idx=${idx}`;
-  const r = await fetch(`${API_BASE}${url}`, { method: "GET" });
+  const r = await fetch(`${API_BASE}${url}`, {
+    method: "GET",
+    cache: "no-store",
+  });
 
   let json: any;
   try {
@@ -103,7 +106,10 @@ async function getCoachAdviceRaw(handId: string, idx: number): Promise<{
 }> {
   const urlPath = `/api/coach/advice?hand_id=${encodeURIComponent(handId)}&idx=${idx}`;
   const url = `${API_BASE}${urlPath}`;
-  const res = await fetch(url, { method: "GET" });
+  const res = await fetch(url, {
+    method: "GET",
+    cache: "no-store",
+  });
 
   let body: any = null;
   try {

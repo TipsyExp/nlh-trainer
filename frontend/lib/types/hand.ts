@@ -1,10 +1,10 @@
+// frontend/lib/types/hand.ts
 // Updated HandState and related types for the NLH Trainer frontend.
 // This file mirrors the original types from the repository but clarifies
 // that the frontend should rely on server-provided fields for turn,
-// allowed actions, pot totals, and last-action details. It also adds
-// a typed shape for the last action with an optional committed amount.
+// allowed actions, pot totals, last-action details, and board structure.
 
-// Define the possible actions a player can take.
+/** Define the possible actions a player can take. */
 export type ActionKind =
   | "fold"
   | "check"
@@ -16,7 +16,7 @@ export type ActionKind =
 /**
  * A single allowed action entry. The backend may return a list of these
  * instead of simple bucket strings. For bet/raise/jam actions the
- * `amount` field may indicate the total chip count required.
+ * `amount` field may indicate the TOTAL chip count required.
  */
 export type AllowedAction = {
   type: ActionKind;
@@ -53,48 +53,94 @@ export type TableShape = {
 };
 
 /**
- * A typed representation of the most recent action in the hand. The
- * backend may include the seat, action kind, and an amount. When a
- * player calls, the `committed` field contains the total chips put in
- * by that call; for a bet/raise/jam the amount may reflect the new
- * total bet. Extra keys from the backend are allowed to ensure
- * forwards‑compatibility.
+ * A typed representation of the most recent action in the hand.
+ *
+ * The backend's public state (via `_la_to_dict` in backend/api/hand.py)
+ * exposes:
+ *   seat, type, requested, committed, snapped, bucket_label, allowed_buckets
+ *
+ * `type` is the canonical field; `action` is kept as a soft alias for any
+ * older callers that might still look for it.
  */
 export interface LastAction {
   seat: number;
-  action: ActionKind | string;
+
+  /** Canonical backend key (`type` from _la_to_dict). */
+  type?: ActionKind | string;
+
+  /** Optional alias for compatibility with older UI code. */
+  action?: ActionKind | string;
+
+  requested?: number;
   committed?: number;
-  amount?: number;
+  snapped?: boolean;
+  bucket_label?: string;
+  allowed_buckets?: string[];
+
   [key: string]: any;
 }
 
+/**
+ * Public hand state as returned by GET /api/hand/state.
+ *
+ * The frontend should treat this as the source of truth for:
+ *   - table configuration (blinds, seats, button),
+ *   - hero/opponent hole cards (with masking for opponents),
+ *   - street and board,
+ *   - pot_total,
+ *   - whose turn it is (`to_act`) and allowed actions (`allowed`),
+ *   - last_action metadata.
+ */
 export type HandState = {
   table: TableShape;
   players: PlayerPublic[];
   street: string;
   deck_seed?: string | null;
+
+  /** Board cards as provided by backend.api.hand._to_public_state. */
+  board?: {
+    flop: string[];
+    turn: string[];
+    river: string[];
+    // Future-proofing for any additional board views.
+    [key: string]: string[] | undefined;
+  };
+
   /** The last action that occurred in this hand. */
   last_action?: LastAction;
+
   /**
    * Stable, cumulative pot size. Always use this field rather than
    * calculating pot from bets.
    */
   pot_total?: number;
+
+  /**
+   * Optional per-seat remaining stack maps (if backend chooses to expose them).
+   * These are not required by the UI but are helpful for overlays and
+   * effective-stack calculations.
+   */
+  stacks_by_seat?: Record<number, number>;
+  committed_by_seat?: Record<number, number>;
+
   /**
    * The seat index whose turn it currently is. If null, no one can act
    * (for example, the hand may be finished or waiting on bots).
    */
   to_act?: number | null;
+
   /**
    * The allowed actions for the current actor. The frontend should use
    * this to determine which UI elements to enable.
    */
   allowed?: AllowedContext;
+
   /**
    * Legacy alias used by older UIs. Prefer `allowed`. Included for
    * backwards compatibility.
    */
   allowed_actions?: AllowedAction[];
+
   [key: string]: any;
 };
 

@@ -48,7 +48,7 @@ from backend.coach.texassolver_cache import resolve_with_cache
 # Default bucket labels used when the caller doesn't specify their own.
 # These are expressed in the *coach* / UI's naming convention and will be
 # mapped to pot-% internally by the adapter.
-DEFAULT_BUCKET_LABELS: List[str] = ["33%", "66%", "100%", "jam"]
+DEFAULT_BUCKET_LABELS: List[str] = ["25%", "40%", "67%", "jam"]
 
 
 @dataclass(frozen=True)
