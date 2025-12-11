@@ -1,14 +1,4 @@
 // frontend/types/decision.ts
-// Decision context used by the guidance overlay (Phase 3).
-//
-// The DecisionContext aggregates the minimum information about the
-// current hand required by the guidance overlay to fetch coach advice
-// and compute equity. It includes identifiers, street, hero cards,
-// board cards, known opponent hands and player counts.
-//
-// Newer iterations also add optional stack-related fields so that
-// solver-backed advice and pot-percentage sizing can reason about
-// effective stacks.
 
 import type {
   Chips,
@@ -25,10 +15,20 @@ export interface DecisionContext {
   street: string | null;
   /** Seat index for the hero (0-based). */
   heroSeat: number;
+  /**
+   * Hero's logical table position (BTN, SB, BB, etc.), when known.
+   * Optional for backwards compatibility.
+   */
+  heroPosition?: string | null;
   /** Total chips in the pot prior to acting. */
   pot: number;
   /** Chips required to call. */
   toCall: number;
+  /**
+   * Abstract action buckets available to hero at this decision
+   * (e.g. ["fold", "call", "2.5x", "jam"]), when known.
+   */
+  allowedBuckets?: string[];
   /**
    * The hero's hole cards. Always two strings when available; when
    * unknown or masked (e.g. during preflop when cards haven't been

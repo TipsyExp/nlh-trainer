@@ -133,6 +133,10 @@ POSTFLOP_COACH_MULTIWAY_ITERS: int = _env_int(
     "POSTFLOP_COACH_MULTIWAY_ITERS",
     "30000",
 )
+POSTFLOP_COACH_MULTIWAY_TIMEOUT_MS: int = _env_int(
+    "POSTFLOP_COACH_MULTIWAY_TIMEOUT_MS",
+    "0",
+)
 
 # Policy for selecting / constraining backends in multiway coach calls.
 # For now this is informational; the coach primarily relies on
@@ -146,6 +150,24 @@ POSTFLOP_COACH_MULTIWAY_POLICY: str = (
     .strip()
     .lower()
 )
+
+# TexasSolver / solver integration (postflop solver-based coach).
+# These knobs are consumed by the TexasSolver adapter / postflop coach
+# to decide whether to attempt a solver node and how aggressively to run it.
+
+# When false, the postflop coach will skip TexasSolver entirely and fall
+# back to the equity-based coach for HU spots.
+TEXASSOLVER_ENABLED: bool = _env_bool("TEXASSOLVER_ENABLED", "true")
+
+# Optional explicit solver binary path (also read directly by the adapter
+# via TEXASSOLVER_PATH); exposed here for completeness / tooling.
+TEXASSOLVER_PATH: str = os.getenv("TEXASSOLVER_PATH", "").strip()
+
+# Solver tuning knobs (kept small / deterministic for CI by default).
+COACH_TS_THREADS: int = _env_int("COACH_TS_THREADS", "1")
+COACH_TS_ACCURACY: float = _env_float("COACH_TS_ACCURACY", "1.0")
+COACH_TS_MAX_ITERS: int = _env_int("COACH_TS_MAX_ITERS", "200")
+COACH_TS_TIMEOUT_S: int = _env_int("COACH_TS_TIMEOUT_S", "90")
 
 
 # ---------------------------------------------------------------------------

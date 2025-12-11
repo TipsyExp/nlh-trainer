@@ -1,10 +1,13 @@
 // frontend/utils/potSizing.ts
-// Helpers for converting between pot‑percentage labels (e.g. "33%")
+// Helpers for converting between pot-percentage labels (e.g. "33%")
 // and numeric bet / raise totals in chips.
 //
-// This is deliberately UI‑focused: the backend remains the authority on
+// This is deliberately UI-focused: the backend remains the authority on
 // what actions are legal, and these helpers just compute reasonable
-// totals that respect min / max bounds and hero's remaining stack.
+// totals that respect hero's remaining stack and any explicit max
+// (e.g. jam). We intentionally DO NOT hard-enforce min-raise here so
+// that the displayed percentages stay intuitive; the engine will still
+// snap / reject illegal sizes if needed.
 
 import type { Chips } from "../types/stack";
 
@@ -21,7 +24,7 @@ export function parsePercentLabel(label: string): number | null {
 }
 
 /**
- * Compute a total bet / raise amount for a pot‑percentage label.
+ * Compute a total bet / raise amount for a pot-percentage label.
  *
  * Inputs:
  *  - label:     percentage bucket label, e.g. "33%", "50%", "75%", "100%".
@@ -31,45 +34,49 @@ export function parsePercentLabel(label: string): number | null {
  *  - heroStack: remaining chips behind for hero (excluding any chips
  *               already committed). This is used to ensure we never propose
  *               a total greater than the hero’s stack.
- *  - minRaise:  optional minimum legal total (e.g. min‑raise total).
+ *  - minRaise:  optional advertised minimum legal total (e.g. min-raise
+ *               total). **Currently treated as informational only** so
+ *               that displayed pot-percentages remain intuitive.
  *  - maxRaise:  optional maximum legal total (e.g. jam total from backend).
  *
- * Formula:
+ * Formula (UI side):
  *   total = C + f * (P + C)
  * where f is the fraction corresponding to the percentage. We then clamp
- * this total to legal bounds and hero's remaining stack and round to the
- * nearest whole chip. If the result is <= 0, returns null.
+ * this total to hero's remaining stack and any explicit max bound, and
+ * round to the nearest whole chip. If the result is <= 0, returns null.
  */
 export function amountForPercentLabel(
   label: string,
   pot: Chips,
   toCall: Chips,
   heroStack: Chips,
-  minRaise?: Chips,
+  minRaise?: Chips, // kept for signature compatibility; not enforced
   maxRaise?: Chips
 ): Chips | null {
-  const m = String(label).trim().match(/^(\d+(?:\.\d+)?)%$/);
-  if (!m) return null;
-  const pct = parseFloat(m[1]) / 100;
+  const frac = parsePercentLabel(label);
+  if (frac == null) return null;
+
   const P = Number(pot) || 0;
   const C = Number(toCall) || 0;
-  let total = C + pct * (P + C);
 
-  // Enforce minimum raise if provided. We do not apply any minimum if
-  // minRaise is undefined or non‑positive. Note that C is part of total
-  // already, so minRaise should be the total amount to invest.
-  if (typeof minRaise === 'number' && minRaise > 0 && total < minRaise) {
-    total = minRaise;
-  }
+  // Base pot-percentage sizing: fraction of (pot + amount to call),
+  // added on top of the call amount.
+  let total = C + frac * (P + C);
+
+  // NOTE: we intentionally do NOT clamp up to minRaise here. Doing so
+  // would make intuitive labels like "50%" drift to odd values (e.g.
+  // 350 into a 500 pot when min-raise happens to be large). The engine
+  // remains the authority on legality and will snap / reject out-of-line
+  // sizes as needed.
 
   // Clamp to explicit max bound if provided (e.g. jam total).
-  if (typeof maxRaise === 'number' && maxRaise > 0 && total > maxRaise) {
+  if (typeof maxRaise === "number" && maxRaise > 0 && total > maxRaise) {
     total = maxRaise;
   }
 
   // Clamp so that the *additional* chips do not exceed hero's stack. If
   // heroStack is undefined we skip this check and rely on other bounds.
-  if (typeof heroStack === 'number' && heroStack >= 0) {
+  if (typeof heroStack === "number" && heroStack >= 0) {
     const maxByStack = C + heroStack;
     if (total > maxByStack) {
       total = maxByStack;

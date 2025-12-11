@@ -1,38 +1,46 @@
 # backend/coach/postflop/service.py
 """
-Postflop coaching service (v1, equity-based).
+Postflop coaching service (v1).
 
 This module implements a conservative postflop coach used by
-`/api/coach/advice` for flop/turn/river spots. It started as HU-only and
-now includes a simple multiway path when the equity backend supports it.
+`/api/coach/advice` for flop/turn/river spots.
 
-Current scope:
+Current behaviour:
 
-* Requires a known hero hand and board.
-* Uses `EquityService` against default villain range profiles
-  (see `backend.coach.postflop.ranges`).
-* HU:
-    - Uses `hero_vs_range_equity` vs a single villain range.
-* Multiway (n_players > 2):
-    - Uses range-based multiway equity with one generic villain range per
-      active villain seat when the backend supports ranges + multiway.
+* Primary path (when enabled and available):
+    - For HU flop/turn/river spots, attempts to call the TexasSolver
+      adapter in a range-vs-range, bucketed node and map the result into
+      AdviceV1 (source="solver").
+    - Uses the allowed_buckets from the DecisionContext as the node's
+      size options.
 
-Produces an `AdviceV1` payload with:
+* Fallback path:
+    - If TexasSolver is disabled / unavailable / the spot is unsupported,
+      falls back to an equity-based coach:
+        * Requires a known hero hand and board.
+        * Uses `EquityService` against default villain range profiles
+          (see `backend.coach.postflop.ranges`).
+        * HU:
+            - Uses `hero_vs_range_equity` vs a single villain range.
+        * Multiway (n_players > 2):
+            - Uses range-based multiway equity with one generic villain
+              range per active villain seat when supported by the equity
+              backend.
 
-* meta.street / meta.n_players / meta.hero_seat / meta.source="equity"
-* recommendation.bucket and a single-entry strategy_bar
-* equity.hero populated with the computed equity
-* equity.players populated for multiway when available
-* thresholds.pot_odds populated for call/fold decisions
+In both modes it produces an `AdviceV1` payload with:
 
-The heuristics are deliberately lightweight and deterministic so they can be
-easily tested and iterated on.
+* meta.street / meta.n_players / meta.hero_seat / meta.source
+  ("solver" or "equity"),
+* recommendation.bucket and a strategy_bar,
+* equity.* populated when using the equity backend,
+* thresholds.pot_odds populated for call/fold decisions.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
-from typing import List, Literal, Optional, cast
+from typing import List, Literal, Optional, TypedDict, cast
 
 from backend.coach.decision_context import DecisionContext
 from backend.coach.postflop.ranges import get_default_villain_range
@@ -46,6 +54,31 @@ from backend.schemas.advice import (
     StrategyPart,
 )
 from backend.services.equity.service import EquityService
+from backend.solvers.texas_solver.runner import (
+    DEFAULT_BUCKET_LABELS as TS_DEFAULT_BUCKET_LABELS,
+)
+
+
+# Optional TexasSolver integration
+try:  # pragma: no cover - optional dependency
+    from backend.adapters.solver.texassolver_adapter import (
+        TexasSolverAdapter,
+        SolveRequest,
+        CoachDisabledError,
+        UnsupportedSpotError,
+    )
+
+    _TEXASSOLVER_AVAILABLE = True
+except Exception:  # pragma: no cover - if solver is not installed / configured
+
+    class CoachDisabledError(Exception):  # type: ignore[no-redef]
+        ...
+
+    class UnsupportedSpotError(Exception):  # type: ignore[no-redef]
+        ...
+
+    _TEXASSOLVER_AVAILABLE = False
+
 
 StreetLiteral = Literal["preflop", "flop", "turn", "river", "showdown", "unknown"]
 EquityModeLiteral = Literal["hands", "ranges"]
@@ -63,7 +96,7 @@ class PostflopCoachConfig:
     # Global postflop coach gate (HU + multiway).
     enabled: bool = True
 
-    # HU equity settings.
+    # HU equity settings (fallback when solver is disabled/unavailable).
     iters: int = 20000
     timeout_ms: int = 0
     # From the hero's perspective; we currently always treat villain as OOP.
@@ -71,7 +104,7 @@ class PostflopCoachConfig:
     # Margin over pot odds to classify "clear" folds/raises.
     min_equity_edge: float = 0.05
 
-    # Multiway-specific settings.
+    # Multiway-specific settings (equity-based).
     multiway_enabled: bool = True
     multiway_iters: int = 30000
     multiway_timeout_ms: int = 0
@@ -100,7 +133,7 @@ def _compute_pot_odds(ctx: DecisionContext) -> Optional[float]:
     if ctx.to_call <= 0:
         return None
     price = float(ctx.to_call)
-    pot = float(ctx.pot_total)
+    pot = float(getattr(ctx, "pot_total", 0))
     if price <= 0 or pot < 0:
         return None
     return price / (pot + price)
@@ -115,56 +148,57 @@ def _flatten_board_like(obj: object) -> List[str]:
       * Dicts like {"flop":[...], "turn":[...], "river":[...]}.
       * Engine-style objects with .flop / .turn / .river attributes.
       * Lists / tuples, including list-of-lists.
+
+    For dicts/objects that store *cumulative* boards (e.g. turn = flop+turn),
+    we deduplicate while preserving order so that:
+      {"flop":["9h","Jh","Jc"], "turn":["9h","Jh","Jc","3s"], "river":[]}
+    becomes ["9h","Jh","Jc","3s"].
     """
     cards: List[str] = []
     if obj is None:
         return cards
 
+    def _extend(seg: object) -> None:
+        if isinstance(seg, (list, tuple)):
+            for c in seg:
+                if isinstance(c, str):
+                    cards.append(c)
+                elif c is not None:
+                    cards.append(str(c))
+        elif isinstance(seg, str):
+            cards.append(seg)
+
+    def _dedup(seq: List[str]) -> List[str]:
+        seen: set[str] = set()
+        out: List[str] = []
+        for c in seq:
+            if c not in seen:
+                seen.add(c)
+                out.append(c)
+        return out
+
     # Dict-like: {"flop":[...], "turn":[...], "river":[...]}
     if isinstance(obj, dict):
         for key in ("flop", "turn", "river"):
-            seg = obj.get(key)
-            if isinstance(seg, (list, tuple)):
-                for c in seg:
-                    if isinstance(c, str):
-                        cards.append(c)
-                    elif c is not None:
-                        cards.append(str(c))
-            elif isinstance(seg, str):
-                cards.append(seg)
+            _extend(obj.get(key))
         if cards:
-            return cards
+            return _dedup(cards)
 
     # Object with flop/turn/river attributes (engine board dataclass)
     has_attr = any(hasattr(obj, attr) for attr in ("flop", "turn", "river"))
     if has_attr:
         for attr in ("flop", "turn", "river"):
-            seg = getattr(obj, attr, None)
-            if isinstance(seg, (list, tuple)):
-                for c in seg:
-                    if isinstance(c, str):
-                        cards.append(c)
-                    elif c is not None:
-                        cards.append(str(c))
-            elif isinstance(seg, str):
-                cards.append(seg)
+            _extend(getattr(obj, attr, None))
         if cards:
-            return cards
+            return _dedup(cards)
 
     # Generic sequence: flatten one level
     if isinstance(obj, (list, tuple)):
         for item in obj:
-            if isinstance(item, (list, tuple)):
-                for inner in item:
-                    if isinstance(inner, str):
-                        cards.append(inner)
-                    elif inner is not None:
-                        cards.append(str(inner))
-            elif isinstance(item, str):
-                cards.append(item)
-            elif item is not None:
-                cards.append(str(item))
-        return cards
+            _extend(item)
+        if cards:
+            # Normally already unique, but dedupe defensively.
+            return _dedup(cards)
 
     return cards
 
@@ -183,7 +217,7 @@ def _resolve_board_for_equity(ctx: DecisionContext) -> List[str]:
     error.
     """
     # First attempt: whatever the DecisionContext has.
-    cards = _flatten_board_like(ctx.board)
+    cards = _flatten_board_like(getattr(ctx, "board", None))
     if len(cards) in (0, 3, 4, 5):
         return cards
 
@@ -256,6 +290,359 @@ def _pick_bucket(
 
     # Otherwise, call.
     return "call"
+
+
+# ---------------------------------------------------------------------------
+# TexasSolver helpers (HU only, best-effort)
+# ---------------------------------------------------------------------------
+
+
+def _get_numeric_map_from_obj(obj: object, attr_names: List[str]) -> dict[int, int]:
+    """
+    Best-effort helper: pull a {seat:int -> value:int} map from an object.
+
+    Used to extract stack_by_seat / committed_by_seat from either the
+    DecisionContext or its raw_state snapshot without being fragile to
+    naming differences.
+    """
+    if obj is None:
+        return {}
+    for name in attr_names:
+        m = getattr(obj, name, None)
+        if isinstance(m, dict) and m:
+            out: dict[int, int] = {}
+            for k, v in m.items():
+                try:
+                    seat = int(k)
+                except Exception:
+                    continue
+                try:
+                    out[seat] = int(v)
+                except Exception:
+                    # Ignore non-numeric entries
+                    continue
+            if out:
+                return out
+    return {}
+
+
+class _SolverInputs(TypedDict):
+    hero_is_ip: bool
+    ip_stack: int
+    oop_stack: int
+    ip_range: str
+    oop_range: str
+
+
+def _estimate_solver_inputs(
+    ctx: DecisionContext, street: StreetLiteral
+) -> Optional[_SolverInputs]:
+    """
+    Derive ip_stack/oop_stack and ip_range/oop_range for TexasSolver.
+
+    This is intentionally approximate:
+      * HU only (n_players == 2).
+      * Uses active_seats to identify hero/villain seats.
+      * Uses stack_by_seat / committed_by_seat when available to compute
+        chips-behind; otherwise falls back to generic depths.
+      * Uses get_default_villain_range(street, role="ip"/"oop") for both
+        hero and villain baseline ranges.
+    """
+    if ctx.n_players != 2:
+        return None
+
+    active = list(getattr(ctx, "active_seats", []) or [])
+    if len(active) != 2:
+        return None
+
+    hero_seat = int(ctx.hero_seat)
+    if hero_seat not in active:
+        return None
+
+    # Identify villain seat
+    villain_seat = active[0] if active[0] != hero_seat else active[1]
+
+    # Pull stack/committed maps from context or raw state.
+    stack_by_seat = _get_numeric_map_from_obj(
+        ctx, ["stack_by_seat", "stacks_by_seat", "stack_total_by_seat", "stacks"]
+    )
+    committed_by_seat = _get_numeric_map_from_obj(
+        ctx, ["committed_by_seat", "seat_committed", "committed"]
+    )
+    if not stack_by_seat:
+        raw_state = getattr(ctx, "raw_state", None)
+        stack_by_seat = _get_numeric_map_from_obj(
+            raw_state,
+            ["stack_by_seat", "stacks_by_seat", "stack_total_by_seat", "stacks"],
+        )
+        committed_by_seat = _get_numeric_map_from_obj(
+            raw_state, ["committed_by_seat", "seat_committed", "committed"]
+        )
+
+    total_hero = int(stack_by_seat.get(hero_seat, 0))
+    total_villain = int(stack_by_seat.get(villain_seat, 0))
+    committed_hero = int(committed_by_seat.get(hero_seat, 0))
+    committed_villain = int(committed_by_seat.get(villain_seat, 0))
+
+    hero_behind = max(0, total_hero - committed_hero)
+    villain_behind = max(0, total_villain - committed_villain)
+
+    # If we couldn't infer stacks, fall back to a generic symmetric depth.
+    if hero_behind <= 0 or villain_behind <= 0:
+        # Generic 100bb-ish fallback; exact value matters less than ratio.
+        hero_behind = hero_behind or 10000
+        villain_behind = villain_behind or 10000
+
+    # Try to detect whether hero is IP; tolerate different naming.
+    hero_is_ip = bool(
+        getattr(ctx, "hero_in_position", None)
+        or getattr(ctx, "hero_is_ip", None)
+        or getattr(ctx, "hero_ip", None)
+    )
+
+    hero_role: Literal["ip", "oop"] = "ip" if hero_is_ip else "oop"
+    villain_role: Literal["ip", "oop"] = "oop" if hero_is_ip else "ip"
+
+    hero_role = "ip" if hero_is_ip else "oop"
+    villain_role = "oop" if hero_is_ip else "ip"
+
+    # Re-use the default villain range helper for both sides; the underlying
+    # implementation usually keys off street + role.
+    hero_range = get_default_villain_range(street=street, role=hero_role)
+    villain_range = get_default_villain_range(street=street, role=villain_role)
+
+    if hero_is_ip:
+        ip_stack = hero_behind
+        oop_stack = villain_behind
+        ip_range = hero_range
+        oop_range = villain_range
+    else:
+        ip_stack = villain_behind
+        oop_stack = hero_behind
+        ip_range = villain_range
+        oop_range = hero_range
+
+    result: _SolverInputs = {
+        "hero_is_ip": hero_is_ip,
+        "ip_stack": int(ip_stack),
+        "oop_stack": int(oop_stack),
+        "ip_range": ip_range,
+        "oop_range": oop_range,
+    }
+    return result
+
+
+def _build_solver_advice(
+    ctx: DecisionContext,
+    base_meta: AdviceMeta,
+    street: StreetLiteral,
+) -> AdviceV1:
+    """
+    Attempt a TexasSolver solve for a HU postflop node.
+
+    On success, returns AdviceV1 with source="solver".
+    On any configuration / capability issue, returns a non-"ok" AdviceV1
+    (status ∈ {"disabled","unsupported","error"}) so the caller can
+    decide whether to fall back to equity.
+    """
+    meta = AdviceMeta(
+        street=street,
+        n_players=ctx.n_players,
+        hero_seat=ctx.hero_seat,
+        source="solver",
+    )
+
+    if not _TEXASSOLVER_AVAILABLE:
+        return AdviceV1(
+            version=1,
+            status="disabled",
+            meta=meta,
+            recommendation=None,
+            equity=None,
+            thresholds=None,
+            rationale="TexasSolver adapter is not available in this environment.",
+        )
+
+    if street not in ("flop", "turn", "river") or ctx.n_players != 2:
+        return AdviceV1(
+            version=1,
+            status="unsupported",
+            meta=meta,
+            recommendation=None,
+            equity=None,
+            thresholds=None,
+            rationale="TexasSolver integration currently targets HU flop/turn/river only.",
+        )
+
+    # We need a sensible board for the solver.
+    board_cards = _resolve_board_for_equity(ctx)
+    if len(board_cards) not in (3, 4, 5):
+        return AdviceV1(
+            version=1,
+            status="unsupported",
+            meta=meta,
+            recommendation=None,
+            equity=None,
+            thresholds=None,
+            rationale="TexasSolver requires a 3/4/5-card board for postflop nodes.",
+        )
+
+    # Derive stacks and ranges.
+    solver_inputs = _estimate_solver_inputs(ctx, street)
+    if solver_inputs is None:
+        return AdviceV1(
+            version=1,
+            status="unsupported",
+            meta=meta,
+            recommendation=None,
+            equity=None,
+            thresholds=None,
+            rationale=(
+                "TexasSolver inputs (stacks/ranges) could not be inferred from "
+                "the current decision context."
+            ),
+        )
+
+    # Buckets the engine exposes to the UI for this decision.
+    raw_allowed_buckets = list(ctx.allowed_buckets or [])
+    if not raw_allowed_buckets:
+        return AdviceV1(
+            version=1,
+            status="unsupported",
+            meta=meta,
+            recommendation=None,
+            equity=None,
+            thresholds=None,
+            rationale="No allowed buckets supplied for the solver node.",
+        )
+
+    # For TexasSolver we currently use a fixed set of postflop bet-size
+    # buckets expressed as % of pot. These come from the solver runner’s
+    # DEFAULT_BUCKET_LABELS, which you configured as:
+    #   ["25%", "40%", "67%", "jam"]
+    #
+    # The frontend will map these bucket labels back to actual engine
+    # actions via mapCoachToAction(...).
+    bucket_labels = list(TS_DEFAULT_BUCKET_LABELS)
+
+    # Pot before hero acts.
+    pot_total = int(getattr(ctx, "pot_total", 0) or 0)
+
+    # Build and run the solve request.
+    adapter = TexasSolverAdapter()
+    try:
+        req = SolveRequest(
+            street=cast(Literal["flop", "turn", "river"], street),
+            board=board_cards,
+            pot=pot_total,
+            ip_stack=solver_inputs["ip_stack"],
+            oop_stack=solver_inputs["oop_stack"],
+            ip_range=solver_inputs["ip_range"],
+            oop_range=solver_inputs["oop_range"],
+            bucket_labels=bucket_labels,
+            # For now, we treat all spots as SRP; 3BP support can be added when
+            # the DecisionContext carries that classification explicitly.
+            spot="SRP",
+        )
+
+        raw = adapter.solve(req)
+    except CoachDisabledError:
+        return AdviceV1(
+            version=1,
+            status="disabled",
+            meta=meta,
+            recommendation=None,
+            equity=None,
+            thresholds=None,
+            rationale="TexasSolver is disabled by configuration.",
+        )
+    except UnsupportedSpotError as e:
+        return AdviceV1(
+            version=1,
+            status="unsupported",
+            meta=meta,
+            recommendation=None,
+            equity=None,
+            thresholds=None,
+            rationale=str(e) or "TexasSolver does not support this spot.",
+        )
+    except Exception as e:
+        return AdviceV1(
+            version=1,
+            status="error",
+            meta=meta,
+            recommendation=None,
+            equity=None,
+            thresholds=None,
+            rationale=f"TexasSolver invocation failed: {e}",
+        )
+
+    # Map solver payload into AdviceV1.
+    data = dict(raw)  # type: ignore[arg-type]
+    recommended_bucket = str(data.get("recommended_bucket", "") or "")
+
+    raw_strategy = data.get("strategy") or {}
+    strategy_bar: List[StrategyPart] = []
+    if isinstance(raw_strategy, dict):
+        for label, weight in raw_strategy.items():
+            try:
+                w = float(weight)
+            except Exception:
+                continue
+            strategy_bar.append(StrategyPart(action=str(label), weight=w))
+
+    # If the solver didn't provide a detailed strategy, fall back to a single
+    # bucket with weight 1.0, as long as we have a recommendation.
+    if not strategy_bar and recommended_bucket:
+        strategy_bar.append(StrategyPart(action=recommended_bucket, weight=1.0))
+
+    # If we still don't have anything, mark as error.
+    if not recommended_bucket:
+        return AdviceV1(
+            version=1,
+            status="error",
+            meta=meta,
+            recommendation=None,
+            equity=None,
+            thresholds=None,
+            rationale="TexasSolver returned no recommended bucket.",
+        )
+
+    pot_odds = _compute_pot_odds(ctx)
+
+    recommendation = AdviceRecommendation(
+        bucket=recommended_bucket,
+        strategy_bar=strategy_bar,
+    )
+
+    thresholds = AdviceThresholds(
+        pot_odds=pot_odds,
+        spr=None,
+    )
+
+    rationale_parts: List[str] = [
+        "TexasSolver solved a range-vs-range node for this spot.",
+        f"Recommended bucket: {recommended_bucket}.",
+    ]
+    if strategy_bar and len(strategy_bar) > 1:
+        rationale_parts.append("The strategy bar reflects mixed frequencies.")
+    if pot_odds is not None:
+        rationale_parts.append(f"Pot odds threshold ≈ {pot_odds:.3f}.")
+
+    return AdviceV1(
+        version=1,
+        status="ok",
+        meta=meta,
+        recommendation=recommendation,
+        equity=None,  # Solver EVs are node-centric; we leave equity unset here.
+        thresholds=thresholds,
+        rationale=" ".join(rationale_parts),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Equity-based helpers (existing behaviour, used as fallback)
+# ---------------------------------------------------------------------------
 
 
 def _build_hu_advice(
@@ -576,6 +963,11 @@ def _build_multiway_advice(
     )
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
 def build_postflop_advice(
     ctx: DecisionContext,
     equity_service: Optional[EquityService] = None,
@@ -593,8 +985,13 @@ def build_postflop_advice(
       * If config.enabled is false:
           - Returns status="disabled".
       * For flop/turn/river with a known hero hand and n_players >= 2:
-          - n_players == 2 -> HU equity-based coach.
-          - n_players  > 2 -> multiway equity-based coach (when available).
+          - HU (n_players == 2):
+              - If TEXASSOLVER_ENABLED is true and the adapter is available,
+                attempt a solver-based node first.
+              - On solver "ok" result, return solver advice.
+              - Otherwise, fall back to HU equity-based coach.
+          - Multiway (n_players > 2):
+              - Use multiway equity-based coach when available.
       * All other spots:
           - Returns status="unsupported".
     """
@@ -660,8 +1057,21 @@ def build_postflop_advice(
             rationale="Postflop coach v1 requires at least two active players.",
         )
 
-    # HU: preserve existing behaviour (used heavily in tests).
+    # HU: optionally try TexasSolver first, then fall back to equity.
     if ctx.n_players == 2:
+        # Env gate for solver usage; default is enabled when adapter is present.
+        use_solver = os.getenv("TEXASSOLVER_ENABLED", "1").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if use_solver and _TEXASSOLVER_AVAILABLE:
+            solver_advice = _build_solver_advice(ctx=ctx, base_meta=meta, street=street)
+            if solver_advice.status == "ok":
+                return solver_advice
+            # For disabled/unsupported/error we silently fall back to equity.
+
         return _build_hu_advice(
             ctx=ctx,
             meta=meta,
@@ -670,7 +1080,7 @@ def build_postflop_advice(
             street=street,
         )
 
-    # Multiway path (n_players > 2).
+    # Multiway path (n_players > 2) is currently equity-based only.
     return _build_multiway_advice(
         ctx=ctx,
         meta=meta,

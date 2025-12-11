@@ -18,6 +18,10 @@
       "river": [],
       "turn": []
     },
+    "committed_by_seat": {
+      "0": 100,
+      "1": 100
+    },
     "deck_seed": "DOCS-EXAMPLE-SEED-1:1",
     "last_action": {
       "allowed_buckets": null,
@@ -30,21 +34,39 @@
     },
     "players": [
       {
+        "committed": 100,
         "hole_cards": [
           "5s",
           "4s"
         ],
-        "seat": 0
+        "seat": 0,
+        "stack": 9900,
+        "stack_total": 10000
       },
       {
+        "committed": 100,
         "hole_cards": [
           "XX",
           "XX"
         ],
-        "seat": 1
+        "seat": 1,
+        "stack": 9900,
+        "stack_total": 10000
       }
     ],
     "pot_total": 200,
+    "seat_committed": {
+      "0": 100,
+      "1": 100
+    },
+    "stack_by_seat": {
+      "0": 10000,
+      "1": 10000
+    },
+    "stacks_by_seat": {
+      "0": 10000,
+      "1": 10000
+    },
     "street": "preflop",
     "table": {
       "ante": 0,

@@ -29,12 +29,13 @@ The core public surface used by the rest of the backend is:
 from __future__ import annotations
 
 import hashlib
+import itertools
 import os
 import random
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, cast, Deque
+from typing import Any, Dict, List, Optional, Tuple, cast, Deque
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +79,10 @@ class _GameSnap:
     last_action: Optional[_LastAction] = None
     # Always provide board with flop/turn/river arrays (possibly empty)
     board: Dict[str, List[str]] = None  # type: ignore[assignment]
+    # Per-seat stack views (engine-level; API/frontend may mirror or transform).
+    # These are exposed as plain dicts keyed by seat index.
+    stack_by_seat: Dict[int, int] = None  # type: ignore[assignment]
+    committed_by_seat: Dict[int, int] = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +124,10 @@ class PokerKitAdapter:
         self.bb: int = 0
         self.ante: int = 0
         self.base_seed: Optional[str] = None
+        # Session-level stack configuration (total chips per seat).
+        # These are the "full" stacks for each player at the start of a hand;
+        # per-hand commitments are tracked separately in _committed.
+        self._stacks_total: List[int] = []
         # Hand/runtime state
         self.hand_id: int = 0
         self.button: int = -1
@@ -388,6 +397,257 @@ class PokerKitAdapter:
         self._recalc_pot_total()
         self._advance_street()
 
+    # --- Showdown / settlement helpers --------------------------------------
+
+    @staticmethod
+    def _rank_value(card: str) -> int:
+        """Map rank character to numeric value (2..14)."""
+        if not card:
+            return 0
+        r = card[0]
+        mapping = {
+            "2": 2,
+            "3": 3,
+            "4": 4,
+            "5": 5,
+            "6": 6,
+            "7": 7,
+            "8": 8,
+            "9": 9,
+            "T": 10,
+            "J": 11,
+            "Q": 12,
+            "K": 13,
+            "A": 14,
+        }
+        return mapping.get(r, 0)
+
+    def _evaluate_5(self, cards: List[str]) -> Tuple[int, Tuple[int, ...]]:
+        """
+        Evaluate a 5-card poker hand.
+
+        Returns a pair (category, tiebreaker_tuple) where:
+          category: 8 = straight flush
+                    7 = four of a kind
+                    6 = full house
+                    5 = flush
+                    4 = straight
+                    3 = three of a kind
+                    2 = two pair
+                    1 = one pair
+                    0 = high card
+        Higher category wins; on ties, tiebreaker_tuple is compared lexicographically.
+        """
+        if len(cards) != 5:
+            raise ValueError("evaluate_5 expects exactly 5 cards")
+
+        ranks = [self._rank_value(c) for c in cards]
+        suits = [c[1] if len(c) > 1 else "?" for c in cards]
+
+        rank_counts: Dict[int, int] = {}
+        for r in ranks:
+            rank_counts[r] = rank_counts.get(r, 0) + 1
+
+        counts_sorted = sorted(
+            rank_counts.items(), key=lambda kv: (kv[1], kv[0]), reverse=True
+        )
+        unique_ranks = sorted(set(ranks), reverse=True)
+        max_count = max(rank_counts.values())
+
+        # Flush?
+        is_flush = len(set(suits)) == 1
+
+        # Straight? (including wheel A-5)
+        is_straight = False
+        straight_high = 0
+        if len(unique_ranks) == 5:
+            high = unique_ranks[0]
+            low = unique_ranks[-1]
+            if high - low == 4:
+                is_straight = True
+                straight_high = high
+            else:
+                # Wheel: A-5 (A,5,4,3,2)
+                wheel_set = {14, 5, 4, 3, 2}
+                if set(unique_ranks) == wheel_set:
+                    is_straight = True
+                    straight_high = 5
+
+        # Straight flush
+        if is_straight and is_flush:
+            return 8, (straight_high,)
+
+        # Four of a kind
+        if max_count == 4:
+            four_rank = counts_sorted[0][0]
+            kicker = max(r for r in ranks if r != four_rank)
+            return 7, (four_rank, kicker)
+
+        # Full house
+        if max_count == 3 and len(rank_counts) == 2:
+            three_rank = counts_sorted[0][0]
+            pair_rank = counts_sorted[1][0]
+            return 6, (three_rank, pair_rank)
+
+        # Flush
+        if is_flush:
+            return 5, tuple(sorted(ranks, reverse=True))
+
+        # Straight
+        if is_straight:
+            return 4, (straight_high,)
+
+        # Three of a kind
+        if max_count == 3:
+            three_rank = counts_sorted[0][0]
+            kickers = sorted([r for r in ranks if r != three_rank], reverse=True)[:2]
+            return 3, (three_rank, *kickers)
+
+        # Two pair
+        if max_count == 2 and len(rank_counts) == 3:
+            pair1 = counts_sorted[0][0]
+            pair2 = counts_sorted[1][0]
+            hi_pair = max(pair1, pair2)
+            lo_pair = min(pair1, pair2)
+            kicker = max(r for r in ranks if r != hi_pair and r != lo_pair)
+            return 2, (hi_pair, lo_pair, kicker)
+
+        # One pair
+        if max_count == 2 and len(rank_counts) == 4:
+            pair_rank = counts_sorted[0][0]
+            kickers = sorted([r for r in ranks if r != pair_rank], reverse=True)[:3]
+            return 1, (pair_rank, *kickers)
+
+        # High card
+        return 0, tuple(sorted(ranks, reverse=True))
+
+    def _best_7_score(self, hole: List[str], board: List[str]) -> Tuple[int, ...]:
+        """
+        Compute the best 5-card hand out of 7 (2 hole + 5 board).
+
+        Returns a comparison key tuple (category, tiebreaker...).
+        """
+        cards = (hole or []) + (board or [])
+        if len(cards) < 5:
+            # Degenerate; fall back to whatever we have (pad with worst).
+            cat, tb = self._evaluate_5((cards + cards[:1] * 4)[:5])
+            return (cat, *tb)
+
+        best_key: Optional[Tuple[int, ...]] = None
+        for idxs in itertools.combinations(range(len(cards)), 5):
+            c5 = [cards[i] for i in idxs]
+            cat, tb = self._evaluate_5(c5)
+            key = (cat, *tb)
+            if best_key is None or key > best_key:
+                best_key = key
+        # best_key must not be None if len(cards) >= 5
+        assert best_key is not None
+        return best_key
+
+    def _compute_showdown_winners(self) -> List[int]:
+        """Determine winner seat(s) at showdown using simple 7-card evaluation."""
+        if self.seats <= 0:
+            return []
+        # Require a reasonable board for proper showdown
+        if len(self._board) < 3:
+            return []
+
+        # In standard hold'em showdown we have 5 board cards.
+        board_cards = self._board[:5]
+        best_key: Optional[Tuple[int, ...]] = None
+        winners: List[int] = []
+
+        for seat in range(self.seats):
+            if seat >= len(self._players_holes):
+                continue
+            hole = self._players_holes[seat]
+            if len(hole) < 2:
+                continue
+            key = self._best_7_score(hole, board_cards)
+            if best_key is None or key > best_key:
+                best_key = key
+                winners = [seat]
+            elif key == best_key:
+                winners.append(seat)
+
+        return winners
+
+    def _settle_previous_hand(self) -> None:
+        """
+        Settle the immediately preceding hand (if complete) by redistributing
+        the pot into _stacks_total.
+
+        This is called at the beginning of start_hand() so that stack
+        progression happens *between* hands without disturbing the final
+        snapshot of the previous hand.
+        """
+        # No prior hand has been played
+        if self.hand_id <= 0:
+            return
+
+        pot = int(self._pot_total)
+        if pot <= 0:
+            # Nothing to settle
+            return
+
+        # Only settle after a hand is logically finished. For this stub,
+        # that means the street is showdown.
+        if str(self._street) != "showdown":
+            return
+
+        winners: List[int] = []
+
+        # Fold case: last_action is a fold; opponent wins pot.
+        la = self._last_action
+        if isinstance(la, _LastAction) and la.type == "fold":
+            try:
+                win_seat = self._opponent_of(la.seat)
+                winners = [int(win_seat)] if win_seat is not None else []
+            except Exception:
+                winners = []
+        else:
+            # Otherwise, use showdown evaluation.
+            winners = self._compute_showdown_winners()
+
+        if not winners:
+            # Defensive: if we can't determine winners, don't mutate stacks.
+            return
+
+        # Split pot evenly among winners; odd chips go to lowest seat index.
+        num_w = len(winners)
+        base = pot // num_w
+        remainder = pot % num_w
+        payouts: Dict[int, int] = {seat: 0 for seat in range(self.seats)}
+        for seat in sorted(winners):
+            gain = base
+            if remainder > 0:
+                gain += 1
+                remainder -= 1
+            payouts[seat] = gain
+
+        # Update per-seat totals:
+        # new_total = old_total - committed + payout
+        for seat in range(self.seats):
+            old_total = (
+                int(self._stacks_total[seat]) if seat < len(self._stacks_total) else 0
+            )
+            committed = int(self._committed[seat]) if seat < len(self._committed) else 0
+            payout = payouts.get(seat, 0)
+            new_total = max(0, old_total - committed + payout)
+            if seat < len(self._stacks_total):
+                self._stacks_total[seat] = new_total
+            else:
+                self._stacks_total.append(new_total)
+
+        # Clear per-hand monetary state ready for the next hand; we leave
+        # board/players/last_action as-is so any final snapshots of the
+        # previous hand remain inspectable until start_hand() overwrites them.
+        self._committed = [0] * self.seats
+        self._pot_total = 0
+        self._current_price = 0
+        self._to_call_next = 0
+        # Do not touch self._street here; start_hand() will reset it.
+
     # --- Debug helpers (dev-only) -------------------------------------------
 
     def _emit_event(self, kind: str, **data: Any) -> None:
@@ -579,6 +839,10 @@ class PokerKitAdapter:
         self.bb = bb
         self.ante = ante
         self.base_seed = base_seed
+        # Persist the configured total stacks per seat for this table.
+        # These represent the full chip counts for each player at the
+        # start of a hand; per-hand commitments are tracked separately.
+        self._stacks_total = [int(max(0, s)) for s in stacks]
         # Reset per-hand state
         self.hand_id = 0
         self.button = -1
@@ -606,6 +870,16 @@ class PokerKitAdapter:
     def start_hand(self) -> str:
         if self.seats <= 0:
             raise RuntimeError("call start_table first")
+
+        # Before starting a new hand, settle the previous hand (if any)
+        # so that stacks progress between hands.
+        if self.hand_id > 0:
+            try:
+                self._settle_previous_hand()
+            except Exception:
+                # Settlement errors shouldn't prevent playing the next hand.
+                pass
+
         # Increment hand counter and rotate button
         self.hand_id += 1
         self.button = (self.button + 1) % self.seats
@@ -717,7 +991,8 @@ class PokerKitAdapter:
                 latency_ms=latency_ms,
                 _actor_before=actor_before,
             )
-            # pot_total already reflects committed
+            # pot_total already reflects committed; actual stack settlement is
+            # deferred until the next start_hand() call.
             return
         # ----- Check -----
         if action_l == "check":
@@ -937,6 +1212,8 @@ class PokerKitAdapter:
           * pot_total: sum of committed chips
           * last_action: minimal metadata for the last engine action
           * board: dict with 'flop'/'turn'/'river' arrays
+          * stack_by_seat: total stack per seat for this table
+          * committed_by_seat: chips committed to the current pot per seat
 
         The hand API uses this to build the public state JSON returned to the
         frontend, and the decision-context helper uses the same snapshot as
@@ -959,6 +1236,19 @@ class PokerKitAdapter:
             "turn": self._board[:4] if len(self._board) >= 4 else [],
             "river": self._board[:5] if len(self._board) >= 5 else [],
         }
+        # Build per-seat stack views.
+        stack_by_seat: Dict[int, int] = {}
+        committed_by_seat: Dict[int, int] = {}
+        for seat in range(self.seats):
+            total = (
+                int(self._stacks_total[seat]) if seat < len(self._stacks_total) else 0
+            )
+            committed = int(self._committed[seat]) if seat < len(self._committed) else 0
+            # stack_by_seat is the "total" stack for this hand (behind+committed);
+            # the UI can subtract committed_by_seat to derive chips behind.
+            stack_by_seat[seat] = max(0, total)
+            committed_by_seat[seat] = max(0, committed)
+
         return _GameSnap(
             table=tbl,
             players=players,
@@ -967,6 +1257,8 @@ class PokerKitAdapter:
             pot_total=int(self._pot_total),
             last_action=self._last_action,
             board=board,
+            stack_by_seat=stack_by_seat,
+            committed_by_seat=committed_by_seat,
         )
 
 

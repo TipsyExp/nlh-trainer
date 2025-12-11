@@ -76,6 +76,10 @@ log = logging.getLogger(__name__)
 # decisions.
 _ACTION_IDX: Dict[str, int] = {}
 
+# Track which hands have had stacks settled (pot pushed). This prevents
+# us from adjusting session/engine stacks more than once per hand.
+_HAND_SETTLED: Dict[str, bool] = {}
+
 
 def _hand_auto_enabled() -> bool:
     """
@@ -186,13 +190,8 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
       - On showdown, reveal all hole cards.
       - Board flows straight from engine snapshot.
       - Include actor/allowed context derived from engine.next_actor().
-
-    The shape returned here is what GET /api/hand/state exposes and is the
-    reference "public state" documented in docs/STATE-SCHEMA.md. The unified
-    coaching helper (backend.coach.decision_context) derives its own internal
-    DecisionContext from the underlying engine/DB state rather than this
-    redacted view, but many field semantics (street, pot_total, allowed) are
-    intentionally aligned.
+      - Surface per-seat total stacks and committed chips, plus per-player
+        chips-behind for UI display.
     """
     adapter = get_adapter()
     s = adapter.state()
@@ -201,13 +200,63 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
     # Reveal policy
     reveal_all = str(s.street) == "showdown"
 
-    # Players: reveal for human, mask others (unless showdown)
+    # Seat-level stacks/committed from engine snapshot (if provided).
+    raw_stack_by_seat = getattr(s, "stack_by_seat", None)
+    raw_committed_by_seat = getattr(s, "committed_by_seat", None)
+
+    stack_by_seat: Dict[int, int] = {}
+    committed_by_seat: Dict[int, int] = {}
+
+    if isinstance(raw_stack_by_seat, dict):
+        for k, v in raw_stack_by_seat.items():
+            try:
+                seat = int(k)
+            except Exception:
+                continue
+            try:
+                stack_by_seat[seat] = int(v)
+            except Exception:
+                stack_by_seat[seat] = 0
+
+    if isinstance(raw_committed_by_seat, dict):
+        for k, v in raw_committed_by_seat.items():
+            try:
+                seat = int(k)
+            except Exception:
+                continue
+            try:
+                committed_by_seat[seat] = int(v)
+            except Exception:
+                committed_by_seat[seat] = 0
+
+    # Players: reveal for human, mask others (unless showdown).
+    # Attach per-player chips-behind ("stack") using total - committed when available.
     players: List[Dict[str, Any]] = []
     for i, p in enumerate(s.players):
-        if reveal_all or i == human_seat:
-            players.append({"seat": i, "hole_cards": list(p.hole_cards)})
+        seat = i
+        if reveal_all or seat == human_seat:
+            player_dict: Dict[str, Any] = {
+                "seat": seat,
+                "hole_cards": list(p.hole_cards),
+            }
         else:
-            players.append({"seat": i, "hole_cards": ["XX", "XX"]})
+            player_dict = {"seat": seat, "hole_cards": ["XX", "XX"]}
+
+        total_stack = stack_by_seat.get(seat)
+        committed = committed_by_seat.get(seat, 0)
+        if total_stack is not None:
+            try:
+                behind = max(0, int(total_stack) - int(committed or 0))
+            except Exception:
+                behind = None
+            if behind is not None:
+                # This is the "chips behind" field the frontend stack helper will read.
+                player_dict["stack"] = behind
+            # Also expose raw totals for richer consumers (coaching/effective stack, etc.).
+            player_dict["stack_total"] = int(total_stack)
+            player_dict["committed"] = int(committed or 0)
+
+        players.append(player_dict)
 
     # Current actor / allowed
     actor = adapter.next_actor()
@@ -242,6 +291,17 @@ def _to_public_state(human_seat: int) -> Dict[str, Any]:
         "allowed": allowed,
         "last_action": _la_to_dict(getattr(s, "last_action", None)),
     }
+
+    # Seat-level stack maps on the public state (for overlays/effective-stack).
+    if stack_by_seat:
+        resp["stack_by_seat"] = stack_by_seat
+        # Backwards-compat alias used by some helpers.
+        resp["stacks_by_seat"] = stack_by_seat
+    if committed_by_seat:
+        resp["committed_by_seat"] = committed_by_seat
+        # Backwards-compat alias used by some helpers.
+        resp["seat_committed"] = committed_by_seat
+
     return resp
 
 
@@ -357,6 +417,123 @@ def _log_action(hand_id: str, seat: int, action: str, amount: Optional[int]) -> 
 
     # Increment the index for next action
     _ACTION_IDX[hand_id] = idx + 1
+
+
+def _maybe_settle_stacks(hand_id: str) -> None:
+    """Settle chips into winner stacks once a hand reaches showdown.
+
+    For now we implement a minimal HU-friendly rule:
+
+      * If the hand is at 'showdown' and the last action was a FOLD,
+        the entire pot is pushed to the non-folding seat.
+
+    This updates both the in-memory SessionState.stacks (session-level
+    chip counts) and the engine's internal _stacks_total so that the
+    next hand starts from the new stacks. We also zero the engine's
+    per-seat committed amounts so that 'stack' in the public state
+    reflects the settled stacks rather than "total - committed".
+
+    Non-fold showdowns (true card showdown) are currently left
+    unchanged; they can be extended later once a full evaluator is
+    wired in.
+    """
+    hid = _hand_id_str(hand_id)
+    # Only settle once per hand
+    if _HAND_SETTLED.get(hid):
+        return
+
+    adapter = get_adapter()
+    try:
+        snap = adapter.state()
+    except Exception:
+        return
+
+    if str(getattr(snap, "street", "")) != "showdown":
+        # Hand not finished yet
+        return
+
+    tbl = snap.table
+    seat_count = int(getattr(tbl, "seats", 0) or 0)
+
+    last = getattr(snap, "last_action", None)
+    last_type = None
+    last_seat: Optional[int] = None
+    if last is not None:
+        last_type = getattr(last, "type", None) or getattr(last, "action", None)
+        try:
+            last_seat = int(getattr(last, "seat", -1))
+        except Exception:
+            last_seat = None
+
+    winner_seats: List[int] = []
+
+    # Minimal HU rule: if someone folded, everyone else still in wins.
+    if (
+        isinstance(last_type, str)
+        and last_type.lower() == "fold"
+        and last_seat is not None
+    ):
+        for s_idx in range(seat_count):
+            if s_idx != last_seat:
+                winner_seats.append(s_idx)
+
+    # If we can't confidently identify winners yet (e.g. true showdown),
+    # leave stacks unchanged for now.
+    if not winner_seats:
+        return
+
+    # Session-level stacks before this hand
+    ss = get_session_state()
+    old_stacks = list(ss.stacks)
+    if seat_count > len(old_stacks):
+        old_stacks.extend([0] * (seat_count - len(old_stacks)))
+    elif seat_count < len(old_stacks):
+        old_stacks = old_stacks[:seat_count]
+
+    # Per-seat committed amounts and pot size from the engine snapshot
+    committed_map = getattr(snap, "committed_by_seat", None) or {}
+    pot_total = int(getattr(snap, "pot_total", 0) or 0)
+
+    # Start from old stacks; subtract each seat's committed amount
+    new_stacks: List[int] = []
+    for seat in range(seat_count):
+        base = int(old_stacks[seat]) if seat < len(old_stacks) else 0
+        committed = int(committed_map.get(seat, 0) or 0)
+        remaining = base - committed
+        if remaining < 0:
+            remaining = 0
+        new_stacks.append(remaining)
+
+    # Distribute the pot equally among winners (HU -> single winner so
+    # this is just pot_total).
+    if winner_seats and pot_total > 0:
+        share = pot_total // len(winner_seats)
+        remainder = pot_total - share * len(winner_seats)
+        for idx, seat in enumerate(winner_seats):
+            delta = share + (1 if idx < remainder else 0)
+            if 0 <= seat < len(new_stacks):
+                new_stacks[seat] = int(new_stacks[seat]) + max(0, delta)
+
+    # Persist new stacks into the session
+    ss.stacks = list(new_stacks)
+
+    # Update the engine's notion of total stacks for the next hand.
+    try:
+        adapter._stacks_total = list(new_stacks)  # type: ignore[attr-defined]
+    except Exception:
+        # Best-effort; engine remains source-of-truth for stack_by_seat in state()
+        pass
+
+    # Zero out committed chips inside the engine so that public 'stack'
+    # fields (total - committed) show the settled stacks but pot_total
+    # remains the last pot size for this finished hand.
+    try:
+        if hasattr(adapter, "_committed"):
+            adapter._committed = [0] * seat_count  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    _HAND_SETTLED[hid] = True
 
 
 # ---------- Bot decision helpers (timeout + validation + fallback) ----------
@@ -499,6 +676,9 @@ def _auto_advance_bots(hand_id: str, human_seat: int) -> List[Dict[str, Any]]:
         log.error(msg)
         raise RuntimeError(msg)
 
+    # If the bot loop ended the hand, settle stacks once.
+    _maybe_settle_stacks(hand_id)
+
     return actions_taken
 
 
@@ -529,6 +709,8 @@ def _persist_snapshot(hand_id: str) -> None:
     for seat_idx in range(int(tbl.seats)):
         p_type = SeatType.human if seat_idx == ss.human_seat else SeatType.bot
         alias = "Hero" if p_type == SeatType.human else f"Bot{seat_idx}"
+        # Persist the session's notion of stack for this seat; this is updated
+        # by _maybe_settle_stacks at the end of each hand.
         stack = ss.stacks[seat_idx] if seat_idx < len(ss.stacks) else 0
         players.append(
             PlayerState(
@@ -644,7 +826,7 @@ def start_hand() -> StartHandResponse:
     # Reset index for this hand (normalize key to string to avoid int vs str collisions)
     hid = _hand_id_str(hand_id)
     _ACTION_IDX[hid] = 0
-    # Also ensure DB-derived next idx starts at 0 by not relying on previous hand rows
+    # We treat a fresh hand as not yet settled (entry absent in _HAND_SETTLED).
 
     # Ensure a parent hand row exists *before* any actions are logged
     _persist_snapshot(hand_id)
@@ -658,7 +840,10 @@ def start_hand() -> StartHandResponse:
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
 
-    # Refresh snapshot so exports can see the post-bot state
+    # If the bot actions ended the hand immediately (e.g. preflop fold),
+    # _auto_advance_bots will have already called _maybe_settle_stacks.
+    # Refresh snapshot so exports can see the post-bot (and possibly
+    # post-settlement) state.
     _persist_snapshot(hand_id)
 
     return StartHandResponse(hand_id=_hand_id_str(hand_id))
@@ -717,7 +902,10 @@ def post_action(req: ActionRequest) -> ActionResponse:
     # Log the human action (post-apply)
     _log_action(hand_id, req.seat, req.action, req.amount)
 
-    # Persist snapshot immediately after human action
+    # If this action ended the hand (e.g. hero folds), settle stacks.
+    _maybe_settle_stacks(hand_id)
+
+    # Persist snapshot immediately after human action (and potential settlement)
     _persist_snapshot(hand_id)
 
     # Build the snapshot to return (reflects the human's move).
@@ -755,13 +943,13 @@ def auto_advance() -> ActionResponse:
     else:
         hand_id = _hand_id_str(hand_id_any)
 
-    # Advance bots
+    # Advance bots (this will also call _maybe_settle_stacks if the hand ends)
     try:
         bots = _auto_advance_bots(hand_id, human_seat)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
-    # Persist and return state
+    # Persist and return state (after any settlement)
     _persist_snapshot(hand_id)
     state = _to_public_state(human_seat)
     return ActionResponse(ok=True, bots_applied=bots, state=state)

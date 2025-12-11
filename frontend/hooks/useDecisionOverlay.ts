@@ -27,7 +27,8 @@ import type { Meta } from '../types/meta';
 import { setOverlayTrace } from '../store/overlayDebugStore';
 
 // Default client timeout for the coach endpoint (in ms).
-const DEFAULT_TIMEOUT_MS = 2000;
+// TexasSolver can take a few seconds on first solve, so keep this reasonably high.
+const DEFAULT_TIMEOUT_MS = 20000;
 const COACH_TIMEOUT_MS = (() => {
   const raw = process.env.NEXT_PUBLIC_COACH_CLIENT_TIMEOUT_MS;
   const n = raw ? parseInt(String(raw), 10) : NaN;
@@ -53,7 +54,7 @@ export interface UseDecisionOverlayResult {
     status: 'ok' | 'loading' | 'disabled' | 'not_found' | 'unavailable';
     error?: string;
   };
-  /** Convenience mapping of recommendation.primary_action -> action key for the UI. */
+  /** Convenience mapping of the coach’s recommended bucket -> action key for the UI. */
   recommendedAction: string | null;
   meta: {
     meta: Meta | null;
@@ -94,8 +95,9 @@ export function useDecisionOverlay(
       return;
     }
 
-    // Keyed by hand_id + idx (idx is unique within a hand).
-    const key = `${context.handId}:${context.idx}`;
+    // Keyed by hand_id + idx + street so that preflop / flop / turn / river
+    // decisions don't accidentally share the same cached advice.
+    const key = `${context.handId}:${context.idx}:${context.street ?? 'unknown'}`;
 
     const cached = getCoach(key);
     if (cached) {
@@ -151,6 +153,8 @@ export function useDecisionOverlay(
                 ? 'Coach disabled'
                 : status === 'not_found'
                 ? 'Advice route not available'
+                : res.status === 'timeout'
+                ? 'Coach timed out'
                 : 'Coach unavailable',
           };
           setCoach(key, resp);
@@ -225,12 +229,14 @@ export function useDecisionOverlay(
     };
   }, [coachResponse, overlayEnabled, context]);
 
-  // Recommended action key derived from advice.recommendation.primary_action.
+  // Recommended action key derived from the coach's chosen bucket
+  // (solver: recommendation.bucket, older paths: recommendation.primary_action).
   const recommendedAction = useMemo(() => {
     if (!context) return null;
     if (adviceState.status !== 'ok' || !adviceState.data) return null;
 
-    const bucket = adviceState.data.recommendation?.primary_action;
+    const rec = adviceState.data.recommendation;
+    const bucket = rec?.bucket || rec?.primary_action;
     if (!bucket) return null;
 
     const toCall = context.toCall ?? 0;

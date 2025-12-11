@@ -13,7 +13,13 @@
 //   "rationale": "Hero equity ≈ ..."
 // }
 
-export type AdviceStatus = 'ok' | 'skipped' | 'error' | 'unavailable';
+export type AdviceStatus =
+  | 'ok'
+  | 'error'
+  | 'skipped'
+  | 'unavailable'
+  | 'disabled'
+  | 'unsupported';
 
 /**
  * High-level source label, as used by the backend in `meta.source`
